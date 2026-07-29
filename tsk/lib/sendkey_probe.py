@@ -135,18 +135,18 @@ def send_willem_key(progress_cb=None) -> dict:
     result["seed"] = seed.hex()
   except NegativeResponseError as e:
     result.update(status="no_seed", message=f"Seed request at 0x03 refused: {nrc(e.error_code)}. "
-                  "Re-enter Not Ready to Drive and re-run. Screenshot and send to Calvin.")
+                  "Re-enter Not Ready to Drive, re-run, and export the evidence bundle.")
     return result
   except Exception as e:
     result.update(status="no_seed", message=f"Seed request at 0x03 failed: {type(e).__name__}. "
-                  "Re-enter Not Ready to Drive and re-run. Screenshot and send to Calvin.")
+                  "Re-enter Not Ready to Drive, re-run, and export the evidence bundle.")
     return result
   cb(step="seed", last=f"seed {result['seed'][:16]}")
 
   if len(seed) != 16:
     result.update(status="failed",
                   message=f"Seed is {len(seed)} bytes, expected 16 — can't compute the AES key. "
-                  "Screenshot and send to Calvin.")
+                  "Export the evidence bundle before continuing.")
     return result
 
   # Willem seed->key (identical to extractor.hack()).
@@ -202,21 +202,22 @@ def send_willem_key(progress_cb=None) -> dict:
   if result["status"] == "unlocked":
     opened = [r for r in reads if r.get("ok")]
     if opened:
-      result["message"] = ("Willem key ACCEPTED at level 0x03/0x04 — the Corolla shares the secret, and 0x23 "
-                           f"now reads {len(opened)} of {len(reads)} target(s). Screenshot and send to Calvin.")
+      result["message"] = ("Known Sienna key derivation ACCEPTED at level 0x03/0x04, and 0x23 "
+                           f"now reads {len(opened)} of {len(reads)} target(s). Export the evidence bundle.")
     else:
-      result["message"] = ("Willem key ACCEPTED at level 0x03/0x04 — the Corolla shares the secret. Security is "
-                           "open in extended, but 0x23 is still out-of-range at the Sienna addresses (the Corolla "
-                           "key is elsewhere). Screenshot and send to Calvin.")
+      result["message"] = ("Known Sienna key derivation ACCEPTED at level 0x03/0x04. Security is "
+                           "open in extended, but 0x23 remains out-of-range at the Sienna addresses. "
+                           "Export the evidence bundle.")
   elif result["status"] == "invalid_key":
-    result["message"] = ("Willem key rejected (invalid key) — the Corolla uses a different seed->key secret. The "
-                         "firmware-dump path is needed to recover it. Screenshot and send to Calvin.")
+    result["message"] = ("Known Sienna key derivation was rejected as invalid. This calibration uses a "
+                         "different secret or algorithm. Export the evidence bundle.")
   elif result["status"] == "locked":
     result["message"] = ("Security locked out (too many attempts / time delay). Power-cycle the panda / re-enter "
-                         "Not Ready to Drive before trying again. Screenshot and send to Calvin.")
+                         "Not Ready to Drive before trying again. Export the evidence bundle.")
   elif result["status"] == "denied":
     result["message"] = ("Send-key denied (NRC 0x33) — security access is not permitted here in this session/state. "
-                         "Screenshot and send to Calvin.")
+                         "Export the evidence bundle.")
   else:
-    result["message"] = (f"Send-key did not complete cleanly: {result['send_key']}. Screenshot and send to Calvin.")
+    result["message"] = (f"Send-key did not complete cleanly: {result['send_key']}. "
+                         "Export the evidence bundle.")
   return result

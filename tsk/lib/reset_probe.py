@@ -141,7 +141,7 @@ def probe_reset_window(progress_cb=None) -> dict:
   if entered:
     hit = next(a for a in attempts if "accepted" in a["detail"])
     result["message"] = (f"PROGRAMMING accepted {hit['t_ms']}ms after reset — there is a post-reset "
-                         "window. Screenshot and send to Calvin.")
+                         "window. Export the evidence bundle before continuing.")
   else:
     result["message"] = ("No PROGRAMMING acceptance in the reset window. Active session after reset: "
                          f"{result['session_after']} (0x02 would mean it switched silently).")

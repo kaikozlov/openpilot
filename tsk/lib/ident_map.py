@@ -19,6 +19,7 @@ from tsk.lib.env import is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.dump_dataflash import ADDR, DUMP_START
 from tsk.lib.dump_diag import CANDIDATE_BUSES
+from tsk.lib.diagnostic_route import discover_eps_route
 
 MAP_TIMEOUT = 1.0
 
@@ -75,7 +76,8 @@ def map_surface(progress_cb=None) -> dict:
 
   identity: list = []
   services: list = []
-  result = {"status": "failed", "panda": "", "eps_bus": -1, "identity": identity,
+  result = {"status": "failed", "panda": "", "eps_bus": -1, "eps_rx_bus": -1,
+            "eps_tx": f"0x{ADDR:03x}", "eps_rx": "", "identity": identity,
             "services": services, "message": ""}
 
   def nrc(code) -> str:
@@ -97,26 +99,21 @@ def map_surface(progress_cb=None) -> dict:
     result["message"] = f"Connect failed: {type(e).__name__}: {e}"
     return result
 
-  def mk(bus, timeout):
-    return UdsClient(panda, ADDR, ADDR + 8, bus, timeout=timeout, response_pending_timeout=timeout)
-
-  eps_bus = None
-  for cand in CANDIDATE_BUSES:
-    try:
-      mk(cand, 0.3).diagnostic_session_control(SESSION_TYPE.DEFAULT)
-      eps_bus = cand
-      break
-    except NegativeResponseError:
-      eps_bus = cand
-      break
-    except Exception:
-      continue
-  result["eps_bus"] = eps_bus if eps_bus is not None else -1
-  if eps_bus is None:
-    result.update(status="unreachable", message="EPS did not answer on bus 0, 1, or 2 in this car state.")
+  route = discover_eps_route(panda, CANDIDATE_BUSES, preferred_tx=ADDR)
+  if route is None:
+    result.update(status="unreachable",
+                  message="No diagnostic responder was identified on buses 0, 1, or 2.")
+    return result
+  eps_bus = route["tx_bus"]
+  result.update(eps_bus=eps_bus, eps_rx_bus=route["rx_bus"],
+                eps_tx=f"0x{route['tx']:03x}", eps_rx=f"0x{route['rx']:03x}")
+  if route["rx_bus"] != eps_bus:
+    result.update(status="mapped", message=("A matching diagnostic response was observed on a different "
+                                             "bus. The route was recorded; typed UDS reads were skipped."))
     return result
 
-  u = mk(eps_bus, MAP_TIMEOUT)
+  u = UdsClient(panda, route["tx"], route["rx"], eps_bus,
+                timeout=MAP_TIMEOUT, response_pending_timeout=MAP_TIMEOUT)
   try:
     u.diagnostic_session_control(SESSION_TYPE.EXTENDED_DIAGNOSTIC)
   except Exception:
@@ -175,5 +172,5 @@ def map_surface(progress_cb=None) -> dict:
   reads_ok = sum(1 for e in identity if e.get("hex"))
   svc_ok = sum(1 for s in services if s["supported"])
   result["message"] = (f"Read {reads_ok} identity field(s); {svc_ok} of {len(services)} probed "
-                       "services answered. Screenshot all of it and send to Calvin.")
+                       "services answered. Export the evidence bundle before continuing.")
   return result

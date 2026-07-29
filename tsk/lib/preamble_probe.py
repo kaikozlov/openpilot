@@ -261,7 +261,7 @@ def probe_preamble(progress_cb=None) -> dict:
                     message=("EPS security is locked out (" + lock["seed_03"] + "). The 15:16 "
                              "send-key attempt left a lock that survived. Power-cycle, re-enter "
                              "Not Ready to Drive, wait a few minutes, and re-run this page — the "
-                             "rest of the probe was skipped. Screenshot and send to Calvin."))
+                             "rest of the probe was skipped. Export the evidence bundle before continuing."))
       return result
 
     try:
@@ -291,10 +291,8 @@ def probe_preamble(progress_cb=None) -> dict:
     except Exception as e:
       record(services, f"routine results 0x{VERIFY_ROUTINE:04x}", False, describe(e))
 
-    download_open = False
     try:
       data = bytes(u.request_download(PAYLOAD_RAM_ADDR, PAYLOAD_RAM_SIZE))
-      download_open = True
       record(services, "request download (RAM)", True, f"ACCEPTED {data.hex()}")
       try:
         u.request_transfer_exit()
@@ -328,7 +326,7 @@ def probe_preamble(progress_cb=None) -> dict:
       result.update(status="dropped_out", dtc={"before": dtc_before, "after": [], "new": []},
                     message="The EPS stopped answering after the service probes — the preamble "
                             "variants did not run. Power-cycle, re-enter Not Ready to Drive, and "
-                            "re-run. Screenshot and send to Calvin.")
+                            "re-run. Export the evidence bundle before continuing.")
       return result
 
     # ---- Block D: preamble variants -------------------------------------------------
@@ -480,19 +478,19 @@ def probe_preamble(progress_cb=None) -> dict:
     result.update(status="security_open",
                   message=("SECURITY LEVEL 0x01 OPENED after: " + names + ". This is the level "
                            "Willem's Sienna secret belongs to — it is now testable directly. "
-                           "Screenshot everything and send to Calvin before running anything "
+                           "Export the evidence bundle before running anything "
                            "else."))
   elif entered:
     names = ", ".join(v["name"] for v in entered)
     result.update(status="programming_open",
                   message=("PROGRAMMING SESSION ENTERED via: " + names + ". The pre-programming "
-                           "preamble is what the EPS was waiting for. Screenshot everything and "
-                           "send to Calvin before running anything else."))
+                           "preamble is what the EPS was waiting for. Export the evidence bundle "
+                           "before running anything else."))
   else:
     detail = f"{len(result['dtc'].get('new', []))} new DTC(s)" if result.get("dtc") else "no DTC data"
     result.update(status="blocked",
                   message=("Programming still refused with the pre-programming preamble "
-                           f"({detail}). Level 0x01 stayed shut. Screenshot and send to Calvin — "
+                           f"({detail}). Level 0x01 stayed shut. Export the evidence bundle — "
                            "the DTC diff and the service refusal codes are the useful part of "
                            "this run even though programming did not open."))
   return result

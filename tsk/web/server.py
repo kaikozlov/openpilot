@@ -14,10 +14,10 @@ from urllib.parse import unquote, urlparse
 
 from tsk.lib.collect_can import collect as collect_can, count_oracle_frames, oracle_path as can_oracle_path, PROTECTED_TARGET, SYNC_TARGET
 from tsk.lib.dump_dataflash import DUMP_TOTAL, dump as dump_dataflash, dump_path
-from tsk.lib.env import is_agnos, setup
-from tsk.lib.extractor import NotAGNOSError, RetryError, TSKExtractor
+from tsk.lib.env import is_agnos
+from tsk.lib.evidence import create_evidence_bundle, record_operation
+from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.key_file_manager import KeyFileManager, format_key
-from tsk.lib.matcher import run as run_matcher
 from tsk.lib.reboot_manager import REBOOT_ACTIONS, RebootManager
 from tsk.lib.sniff_can import sniff as sniff_can, summarize_counts
 from tsk.lib.dump_diag import diagnose as dump_diagnose
@@ -29,7 +29,7 @@ from tsk.lib.level3_probe import probe_level3
 from tsk.lib.sendkey_probe import send_willem_key
 from tsk.lib.preamble_probe import probe_preamble
 from tsk.lib.sweep_uds import sweep
-from tsk.lib.capture_ready import capture_ready
+from tsk.lib.capture_ready import capture_ready, run_ready_diff
 
 
 HOST = "0.0.0.0"
@@ -41,8 +41,24 @@ OFFROAD_ALERT_INTERVAL = 5.0
 # Shared tail for the unexpected-error surfaces (extract + match). The leading
 # "!!!!" makes index.html's modal render it red; the extractor terminal prints it
 # verbatim. Kept in one place so the two paths can't drift.
-PING_REPORT = ("!!!! Unexpected error. Please take a screenshot, post it on "
-               "#toyota-security, and ping @calvinspark")
+PING_REPORT = ("!!!! Unexpected error. Preserve the raw logs and export the "
+               "evidence bundle before continuing.")
+
+READY_OPERATIONS = {"/api/can-collect", "/api/ready-capture", "/api/ready-diff"}
+NRTD_OPERATIONS = {
+  "/api/extract", "/api/dataflash-dump", "/api/dataflash-diag", "/api/prog-probe",
+  "/api/read-mem", "/api/ident-map", "/api/reset-probe", "/api/level3-probe",
+  "/api/sendkey-probe", "/api/preamble-probe", "/api/uds-sweep",
+}
+
+
+def expected_vehicle_state(operation: str) -> str:
+  if operation in READY_OPERATIONS:
+    return "READY (operator-asserted by selected workflow)"
+  if operation in NRTD_OPERATIONS:
+    return "Not Ready to Drive (operator-asserted by selected workflow)"
+  return "unspecified"
+
 
 last_alert_url: str | None = None
 # One physical panda: extract, dump, and collect must not run concurrently. Held
@@ -335,6 +351,9 @@ ident_state = {
   "last": "",
   "panda": "",
   "eps_bus": -1,
+  "eps_rx_bus": -1,
+  "eps_tx": "",
+  "eps_rx": "",
   "identity": [],
   "services": [],
   "message": "",
@@ -411,24 +430,31 @@ sweep_state = {
   "last": "",
   "stage": "",
   "panda": "",
+  "eps_tx": "",
   "eps_bus": -1,
+  "eps_rx_bus": -1,
+  "eps_rx": "",
   "timeout_ms": 0,
   "stages": [],
   "answering": [],
   "silent": [],
   "responders": [],
+  "responder_routes": [],
   "records": 0,
   "frontier": "",
+  "hypotheses": [],
   "message": "",
 }
 
-# READY pass — full-payload capture + the mode diff driven by the sweep's work-list.
+# READY passive capture. This state never includes diagnostic transmission.
 ready_lock = threading.Lock()
 ready_state = {
-  "status": "idle",   # idle | running | captured | no_sweep | unreachable | failed
+  "status": "idle",   # idle | running | captured | failed
   "count": 0,
   "last": "",
   "stage": "",
+  "mode": "passive",
+  "run_id": "",
   "panda": "",
   "eps_bus": -1,
   "capture": {},
@@ -437,8 +463,48 @@ ready_state = {
   "cross": [],
   "seeds": [],
   "frames": 0,
+  "tx_echoes_filtered": 0,
+  "path": "",
   "message": "",
 }
+
+# READY active diff. It is a separate operation and only replays requests recovered
+# from the prior Not Ready to Drive transcript.
+ready_diff_lock = threading.Lock()
+ready_diff_state = {
+  "status": "idle",   # idle | running | complete | no_sweep | unreachable | failed
+  "count": 0,
+  "last": "",
+  "stage": "",
+  "mode": "active_diff",
+  "run_id": "",
+  "panda": "",
+  "eps_tx": "",
+  "eps_bus": -1,
+  "eps_rx_bus": -1,
+  "eps_rx": "",
+  "diff": [],
+  "frames": 0,
+  "path": "",
+  "message": "",
+}
+
+
+def operation_states_snapshot() -> dict:
+  """Copy current job states into the evidence manifest without holding locks during I/O."""
+  snapshots = {}
+  for name, lock, state in (
+      ("can", can_lock, can_state), ("dataflash", df_lock, df_state),
+      ("sniff", sniff_lock, sniff_state), ("dataflash_diag", diag_lock, diag_state),
+      ("programming", probe_lock, probe_state), ("read_memory", readmem_lock, readmem_state),
+      ("identity", ident_lock, ident_state), ("reset", reset_lock, reset_state),
+      ("level3", level3_lock, level3_state), ("send_key", sendkey_lock, sendkey_state),
+      ("preamble", preamble_lock, preamble_state), ("uds_sweep", sweep_lock, sweep_state),
+      ("ready_passive", ready_lock, ready_state),
+      ("ready_active_diff", ready_diff_lock, ready_diff_state)):
+    with lock:
+      snapshots[name] = dict(state)
+  return snapshots
 
 
 def _df_progress(status=None, frames=None, bytes_done=None, total=None, message=None) -> None:
@@ -985,7 +1051,8 @@ def _run_ident_mock() -> None:
     _ident_progress(items=i * 4, last=f"item {i * 4}")
   with ident_lock:
     ident_state.update(
-      status="mapped", count=24, last="0x19 read DTC info", panda="1.7.0-mock", eps_bus=1,
+      status="mapped", count=24, last="0x19 read DTC info", panda="1.7.0-mock",
+      eps_bus=1, eps_rx_bus=1, eps_tx="0x7a1", eps_rx="0x7a9",
       identity=[
         {"did": "0xf181", "name": "app_sw_id", "hex": "383936354631323038303030", "ascii": "8965F1208000"},
         {"did": "0xf186", "name": "active_session", "hex": "03", "ascii": "."},
@@ -1011,8 +1078,9 @@ def _run_ident_job() -> None:
     with ident_lock:
       ident_state.update(
         status=result.get("status", "failed"), panda=result.get("panda", ""),
-        eps_bus=result.get("eps_bus", -1), identity=result.get("identity", []),
-        services=result.get("services", []),
+        eps_bus=result.get("eps_bus", -1), eps_rx_bus=result.get("eps_rx_bus", -1),
+        eps_tx=result.get("eps_tx", ""), eps_rx=result.get("eps_rx", ""),
+        identity=result.get("identity", []), services=result.get("services", []),
         count=len(result.get("identity", [])) + len(result.get("services", [])),
         message=result.get("message", ""),
       )
@@ -1031,7 +1099,8 @@ def start_ident_job() -> bool:
     return False
   with ident_lock:
     ident_state.update(status="running", count=0, last="", panda="", eps_bus=-1,
-                       identity=[], services=[], message="")
+                       eps_rx_bus=-1, eps_tx="", eps_rx="", identity=[], services=[],
+                       message="")
   try:
     threading.Thread(target=_run_ident_job, name="tsk_ident_map", daemon=True).start()
   except Exception:
@@ -1205,7 +1274,7 @@ def _sendkey_progress(step=None, last=None) -> None:
 
 
 def _run_sendkey_mock() -> None:
-  # Laptop dry run: the realistic shape — the Sienna secret is rejected on the Corolla.
+  # Laptop dry run: the target calibration rejects the known Sienna secret.
   for step in ("extended", "seed", "key", "send_key"):
     time.sleep(0.25)
     _sendkey_progress(step=step, last=step)
@@ -1216,8 +1285,8 @@ def _run_sendkey_mock() -> None:
       key="3f9c1a04d8b27e6510c23a9fbe4d7182",
       send_key="NRC 0x35 invalidKey",
       post_unlock_reads=[],
-      message="Willem key rejected (invalid key) — the Corolla uses a different seed->key secret. "
-              "The firmware-dump path is needed to recover it. (mock)",
+      message="Known Sienna key derivation rejected as invalid; the target uses a different "
+              "secret or algorithm. Export the evidence bundle. (mock)",
     )
 
 
@@ -1335,9 +1404,9 @@ def _run_preamble_mock() -> None:
       ],
       liveness="EPS still answering at end of run",
       message="Programming still refused with the pre-programming preamble (0 new DTC(s)). "
-              "Level 0x01 stayed shut. Screenshot and send to Calvin — the DTC diff and the "
-              "service refusal codes are the useful part of this run even though programming "
-              "did not open. (mock)",
+              "Level 0x01 stayed shut. Export the evidence bundle — the DTC diff and service "
+              "refusal codes are the useful part of this run even though programming did not "
+              "open. (mock)",
     )
 
 
@@ -1403,7 +1472,8 @@ def _run_sweep_mock() -> None:
   with sweep_lock:
     sweep_state.update(
       status="partial", count=812, last="sub-functions of 0x27", stage="subfunctions",
-      panda="1.7.0-mock", eps_bus=1, timeout_ms=120, records=812,
+      panda="1.7.0-mock", eps_tx="0x7a1", eps_bus=1, eps_rx_bus=1, eps_rx="0x7a9",
+      timeout_ms=120, records=812,
       stages=[
         {"name": "calibrate", "detail": "round trip 12 ms → timeout 120 ms"},
         {"name": "services/default", "detail": "256 sent"},
@@ -1416,9 +1486,10 @@ def _run_sweep_mock() -> None:
       silent=["0x28", "0x34", "0x36", "0x37", "0x85"],
       responders=["0x7a1", "0x7b0", "0x7e0"],
       frontier="subfunctions: stopped at 0x27 sub 0x40",
+      hypotheses=[{"request": "1002", "label": "programming session"}],
       message="Budget reached — 812 results saved. subfunctions: stopped at 0x27 sub 0x40. "
               "Run this page again (Not Ready to Drive) and it resumes where it stopped. "
-              "Screenshot and send to Calvin. (mock)",
+              "Export the evidence bundle before continuing. (mock)",
     )
 
 
@@ -1428,11 +1499,14 @@ def _run_sweep_job() -> None:
     with sweep_lock:
       sweep_state.update(
         status=result.get("status", "failed"), panda=result.get("panda", ""),
-        eps_bus=result.get("eps_bus", -1), timeout_ms=result.get("timeout_ms", 0),
+        eps_tx=result.get("eps_tx", ""), eps_bus=result.get("eps_bus", -1),
+        eps_rx_bus=result.get("eps_rx_bus", -1), eps_rx=result.get("eps_rx", ""),
+        timeout_ms=result.get("timeout_ms", 0),
         stages=result.get("stages", []), answering=result.get("answering", []),
         silent=result.get("silent", []), responders=result.get("responders", []),
-        records=result.get("records", 0), frontier=result.get("frontier", ""),
-        message=result.get("message", ""),
+        responder_routes=result.get("responder_routes", []), records=result.get("records", 0),
+        frontier=result.get("frontier", ""),
+        hypotheses=result.get("hypotheses", []), message=result.get("message", ""),
       )
   except NotAGNOSError:
     _run_sweep_mock()
@@ -1448,9 +1522,10 @@ def start_sweep_job() -> bool:
   if not panda_lock.acquire(blocking=False):
     return False
   with sweep_lock:
-    sweep_state.update(status="running", count=0, last="", stage="", panda="", eps_bus=-1,
-                       timeout_ms=0, stages=[], answering=[], silent=[], responders=[],
-                       records=0, frontier="", message="")
+    sweep_state.update(status="running", count=0, last="", stage="", panda="",
+                       eps_tx="", eps_bus=-1, eps_rx_bus=-1, eps_rx="", timeout_ms=0,
+                       stages=[], answering=[], silent=[], responders=[], responder_routes=[],
+                       records=0, frontier="", hypotheses=[], message="")
   try:
     threading.Thread(target=_run_sweep_job, name="tsk_uds_sweep", daemon=True).start()
   except Exception:
@@ -1472,16 +1547,16 @@ def _ready_progress(steps=None, last=None, stage=None) -> None:
 
 
 def _run_ready_mock() -> None:
-  for i, (stage, last) in enumerate((
-      ("capture", "capturing 30s / 90s"), ("capture", "capturing 90s / 90s"),
-      ("capture", "capture analysed"), ("diff", "reflash set: programming session"),
-      ("addresses", "address sweep")), 1):
+  for i, last in enumerate(("capturing 30s / 90s", "capturing 90s / 90s",
+                            "passive capture analysed"), 1):
     time.sleep(0.3)
-    _ready_progress(steps=i * 900, last=last, stage=stage)
+    _ready_progress(steps=i * 14000, last=last, stage="passive capture")
   with ready_lock:
     ready_state.update(
-      status="captured", count=4500, last="address sweep", stage="addresses",
-      panda="1.7.0-mock", eps_bus=1, frames=41208,
+      status="captured", count=41208, last="passive capture analysed",
+      stage="passive capture", mode="passive", run_id="ready-passive-mock",
+      panda="1.7.0-mock", eps_bus=-1, frames=41208, tx_echoes_filtered=0,
+      path="/cache/tsk/uds-sweep/ready_capture.ndjson",
       capture={
         "ids": 147, "frames": 41208,
         "candidates": [
@@ -1489,27 +1564,15 @@ def _run_ready_mock() -> None:
           {"bus": 1, "addr": "0x260", "samples": 1774, "tail_distinct": 0.996, "head_distinct": 0.044},
           {"bus": 1, "addr": "0x2a1", "samples": 890, "tail_distinct": 0.991, "head_distinct": 0.112},
         ],
-        "sync": [{"bus": 1, "addr": "0x00f", "samples": 88, "distinct": 88}],
+        "hypothesis_hits": [
+          {"bus": 1, "addr": "0x2e4", "samples": 20,
+           "annotation": "prior Sienna/Corolla protected-ID hypothesis"},
+        ],
+        "sync": [{"bus": 1, "addr": "0x00f", "samples": 88, "distinct": 88,
+                  "annotation": "prior Toyota sync hypothesis"}],
       },
-      diff=[
-        {"label": "reflash set: programming session", "request": "1002", "outcome": "silent", "nrc": -1, "raw": ""},
-        {"label": "reflash set: communication control", "request": "28", "outcome": "silent", "nrc": -1, "raw": ""},
-        {"label": "reflash set: request download", "request": "34", "outcome": "silent", "nrc": -1, "raw": ""},
-        {"label": "reflash set: control DTC setting", "request": "85", "outcome": "silent", "nrc": -1, "raw": ""},
-      ],
-      responders=["0x7a1", "0x7b0", "0x7c0", "0x7e0"],
-      cross=[
-        {"addr": "0x7b0", "label": "control DTC setting", "outcome": "nrc", "nrc": 0x7f},
-        {"addr": "0x7e0", "label": "control DTC setting", "outcome": "positive", "nrc": -1},
-      ],
-      seeds=[
-        {"level": "0x01", "outcome": "nrc", "nrc": 0x7e, "raw": "7f277e"},
-        {"level": "0x03", "outcome": "positive", "nrc": -1, "raw": "2703aabbccdd"},
-      ],
-      message="Captured 41208 frames across 147 IDs; 3 look SecOC-signed. Mode diff: 0 of 4 "
-              "answered in READY that did not in Not Ready to Drive. 4 responder(s) on the "
-              "bus. Screenshot and send to Calvin — the capture file is saved on the device "
-              "for offline analysis. (mock)",
+      diff=[], responders=[], cross=[], seeds=[],
+      message="Passively captured 41208 frames across 147 IDs. No diagnostic requests were sent. (mock)",
     )
 
 
@@ -1518,11 +1581,12 @@ def _run_ready_job() -> None:
     result = capture_ready(progress_cb=_ready_progress)
     with ready_lock:
       ready_state.update(
-        status=result.get("status", "failed"), panda=result.get("panda", ""),
+        status=result.get("status", "failed"), mode=result.get("mode", "passive"),
+        run_id=result.get("run_id", ""), panda=result.get("panda", ""),
         eps_bus=result.get("eps_bus", -1), capture=result.get("capture", {}),
-        diff=result.get("diff", []), responders=result.get("responders", []),
-        cross=result.get("cross", []), seeds=result.get("seeds", []),
-        frames=result.get("frames", 0), message=result.get("message", ""),
+        diff=[], responders=[], cross=[], seeds=[], frames=result.get("frames", 0),
+        tx_echoes_filtered=result.get("tx_echoes_filtered", 0),
+        path=result.get("path", ""), message=result.get("message", ""),
       )
   except NotAGNOSError:
     _run_ready_mock()
@@ -1538,14 +1602,85 @@ def start_ready_job() -> bool:
   if not panda_lock.acquire(blocking=False):
     return False
   with ready_lock:
-    ready_state.update(status="running", count=0, last="", stage="", panda="", eps_bus=-1,
-                       capture={}, diff=[], responders=[], cross=[], seeds=[], frames=0,
-                       message="")
+    ready_state.update(status="running", count=0, last="", stage="passive capture",
+                       mode="passive", run_id="", panda="", eps_bus=-1, capture={},
+                       diff=[], responders=[], cross=[], seeds=[], frames=0,
+                       tx_echoes_filtered=0, path="", message="")
   try:
     threading.Thread(target=_run_ready_job, name="tsk_ready_capture", daemon=True).start()
   except Exception:
     with ready_lock:
       ready_state.update(status="failed", message="Could not start the READY capture.")
+    panda_lock.release()
+    return False
+  return True
+
+
+def _ready_diff_progress(steps=None, last=None, stage=None) -> None:
+  with ready_diff_lock:
+    if steps is not None:
+      ready_diff_state["count"] = steps
+    if last is not None:
+      ready_diff_state["last"] = last
+    if stage is not None:
+      ready_diff_state["stage"] = stage
+
+
+def _run_ready_diff_mock() -> None:
+  for i, last in enumerate(("service 0x28", "service 0x34", "service 0x85"), 1):
+    time.sleep(0.2)
+    _ready_diff_progress(steps=i, last=last, stage="active diff")
+  with ready_diff_lock:
+    ready_diff_state.update(
+      status="complete", count=3, last="service 0x85", stage="active diff",
+      mode="active_diff", run_id="ready-diff-mock", panda="1.7.0-mock",
+      eps_tx="0x7a1", eps_bus=1, eps_rx_bus=1, eps_rx="0x7a9",
+      diff=[
+        {"label": "service 0x28", "request": "28", "outcome": "silent", "nrc": -1, "raw": ""},
+        {"label": "service 0x34", "request": "34", "outcome": "silent", "nrc": -1, "raw": ""},
+        {"label": "service 0x85", "request": "85", "outcome": "nrc", "nrc": 0x22, "raw": "7f8522"},
+      ],
+      frames=0, path="/cache/tsk/uds-sweep/ready_diff.ndjson",
+      message="Replayed 3 previously characterized bare-service requests. (mock)",
+    )
+
+
+def _run_ready_diff_job() -> None:
+  try:
+    result = run_ready_diff(progress_cb=_ready_diff_progress)
+    with ready_diff_lock:
+      ready_diff_state.update(
+        status=result.get("status", "failed"), mode=result.get("mode", "active_diff"),
+        run_id=result.get("run_id", ""), panda=result.get("panda", ""),
+        eps_tx=result.get("eps_tx", ""), eps_bus=result.get("eps_bus", -1),
+        eps_rx_bus=result.get("eps_rx_bus", -1), eps_rx=result.get("eps_rx", ""),
+        diff=result.get("diff", []),
+        frames=result.get("frames", 0), path=result.get("path", ""),
+        message=result.get("message", ""),
+      )
+  except NotAGNOSError:
+    _run_ready_diff_mock()
+  except Exception as e:
+    with ready_diff_lock:
+      ready_diff_state.update(status="failed", message=str(e))
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_ready_diff_job() -> bool:
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with ready_diff_lock:
+    ready_diff_state.update(status="running", count=0, last="", stage="active diff",
+                            mode="active_diff", run_id="", panda="", eps_tx="",
+                            eps_bus=-1, eps_rx_bus=-1, eps_rx="", diff=[], frames=0,
+                            path="", message="")
+  try:
+    threading.Thread(target=_run_ready_diff_job, name="tsk_ready_diff", daemon=True).start()
+  except Exception:
+    with ready_diff_lock:
+      ready_diff_state.update(status="failed", message="Could not start the READY active diff.")
     panda_lock.release()
     return False
   return True
@@ -1564,7 +1699,7 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       self._send_json({
         "ok": True,
         "key": DRY_RUN_FAKE_KEY,
-        "message": f"Success!\n\nThis is your key:\n{format_key(DRY_RUN_FAKE_KEY)}\n\nTake a screenshot now.",
+        "message": f"Success!\n\nThis is your key:\n{format_key(DRY_RUN_FAKE_KEY)}\n\nExport the evidence bundle now.",
       })
     elif scenario == 1:
       self._send_json({
@@ -1588,7 +1723,7 @@ class TSKWebHandler(BaseHTTPRequestHandler):
           '  File "/data/openpilot/tsk/lib/extractor.py", line 113, in _uds_request\n'
           "    raise RetryError(f\"UDS request timed out\")\n"
           "tsk.lib.extractor.RetryError: UDS request timed out\n\n"
-          "!!!! Unexpected error. Please take a screenshot, post it on #toyota-security, and ping @calvinspark\n"
+          "!!!! Unexpected error. Preserve raw logs and export the evidence bundle before continuing.\n"
         ),
       }, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
@@ -1600,6 +1735,11 @@ class TSKWebHandler(BaseHTTPRequestHandler):
 
   def do_POST(self) -> None:
     path = urlparse(self.path).path
+    try:
+      record_operation(path, client=self.client_address[0],
+                       vehicle_state=expected_vehicle_state(path))
+    except OSError:
+      pass
 
     if path == "/api/extract":
       if not panda_lock.acquire(blocking=False):
@@ -1615,7 +1755,7 @@ class TSKWebHandler(BaseHTTPRequestHandler):
         self._send_json({
           "ok": True,
           "key": secoc_key,
-          "message": f"Success!\n\nThis is your key:\n{format_key(secoc_key)}\n\nTake a screenshot now.",
+          "message": f"Success!\n\nThis is your key:\n{format_key(secoc_key)}\n\nExport the evidence bundle now.",
         })
       except NotAGNOSError:
         self._send_extract_dry_run()
@@ -1641,6 +1781,7 @@ class TSKWebHandler(BaseHTTPRequestHandler):
         return
 
       try:
+        from tsk.lib.matcher import run as run_matcher
         result = run_matcher()
         if result["status"] == "found":
           KeyFileManager().install_key(result["key"])
@@ -1653,7 +1794,7 @@ class TSKWebHandler(BaseHTTPRequestHandler):
           message = (
             f"This is your key:\n{format_key(result['key'])}\n\n"
             f"{detail}\n\n"
-            "Take a screenshot now."
+            "Export the evidence bundle now."
           )
           self._send_json({
             "ok": True,
@@ -1847,7 +1988,18 @@ class TSKWebHandler(BaseHTTPRequestHandler):
           "message": "A panda operation is already in progress.",
         }, status=HTTPStatus.CONFLICT)
         return
-      self._send_json({"ok": True, "status": "running"})
+      self._send_json({"ok": True, "status": "running", "mode": "passive"})
+      return
+
+    if path == "/api/ready-diff":
+      if not start_ready_diff_job():
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running", "mode": "active_diff"})
       return
 
     if path == "/api/preamble-probe":
@@ -1893,6 +2045,15 @@ class TSKWebHandler(BaseHTTPRequestHandler):
 
   def _handle_request(self, send_body: bool) -> None:
     path = urlparse(self.path).path
+
+    if path == "/api/evidence-bundle":
+      try:
+        bundle = create_evidence_bundle(operation_states_snapshot())
+        self._send_download(bundle, "application/gzip", send_body=send_body)
+      except Exception as e:
+        self._send_json({"ok": False, "message": str(e), "traceback": traceback.format_exc()},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR, send_body=send_body)
+      return
 
     if path == "/api/health":
       self._send_json({
@@ -1990,6 +2151,12 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       self._send_json(payload, send_body=send_body)
       return
 
+    if path == "/api/ready-diff-status":
+      with ready_diff_lock:
+        payload = dict(ready_diff_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
     if path == "/api/reboot":
       try:
         self._send_json(get_reboot_actions_payload(), send_body=send_body)
@@ -2028,6 +2195,18 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       return {}
     return json.loads(raw_body.decode("utf-8"))
 
+  def _send_download(self, path: Path, content_type: str, send_body: bool = True) -> None:
+    self.send_response(HTTPStatus.OK)
+    self.send_header("Content-Type", content_type)
+    self.send_header("Content-Length", str(path.stat().st_size))
+    self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+    self.send_header("Cache-Control", "no-store")
+    self.end_headers()
+    if send_body:
+      with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+          self.wfile.write(block)
+
   def _send_bytes(self, status: HTTPStatus, content_type: str, body: bytes, send_body: bool = True) -> None:
     self.send_response(status)
     self.send_header("Content-Type", content_type)
@@ -2047,7 +2226,6 @@ class TSKWebServer(ThreadingHTTPServer):
 
 
 def main() -> None:
-  setup()
   rehydrate_dataflash_state()
   rehydrate_can_state()
   update_offroad_alert()

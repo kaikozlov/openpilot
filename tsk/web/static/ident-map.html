@@ -100,7 +100,9 @@
         if (s.eps_bus === undefined || s.eps_bus === -1) {
           termWrite("EPS bus: no response on 0/1/2", "err");
         } else {
-          termWrite("EPS bus: " + s.eps_bus, s.eps_bus === 0 ? "" : "warn");
+          termWrite("Diagnostic route: " + (s.eps_tx || "0x7a1") + " bus " + s.eps_bus +
+                    " -> " + (s.eps_rx || "?") + " bus " +
+                    (s.eps_rx_bus === undefined ? s.eps_bus : s.eps_rx_bus), "ok");
         }
       }
 
@@ -134,7 +136,7 @@
         termWrite("");
         if (s.message) termWrite(s.message, "warn");
         termWrite("");
-        termWrite("Screenshot ALL of this — scroll up for the full list — and send it to Calvin.", "dim");
+        termWrite("Export the evidence bundle to preserve the complete result.", "dim");
       }
 
       async function runMap() {

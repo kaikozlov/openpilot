@@ -134,7 +134,7 @@ def read_key_region(progress_cb=None) -> dict:
     hit = next(r for r in reads if r["ok"])
     result["message"] = (f"0x23 returned data at {hit['address']} ({hit['session']}). If that is the "
                          "key region, the key may be readable with no programming session — "
-                         "screenshot and send to Calvin.")
+                         "export the evidence bundle before continuing.")
   else:
     result["message"] = ("0x23 was refused at every address — the EPS does not allow direct memory "
                          "reads here, so the exploit path is still needed.")
