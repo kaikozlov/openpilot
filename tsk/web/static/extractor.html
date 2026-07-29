@@ -49,6 +49,29 @@
         font-weight: 700;
       }
 
+      .warn-card {
+        margin: 0 16px 12px;
+        padding: 14px 16px;
+        border-radius: 12px;
+        background: #fff;
+        font-size: 14px;
+        line-height: 1.45;
+      }
+
+      .run-btn {
+        margin: 0 16px 12px;
+        padding: 14px;
+        border: none;
+        border-radius: 12px;
+        background: #ff9500;
+        color: #fff;
+        font: inherit;
+        font-size: 17px;
+        font-weight: 600;
+      }
+
+      .run-btn:disabled { background: #c7c7cc; }
+
       .terminal {
         margin: 0 16px 16px;
         background: #1c1c1e;
@@ -77,11 +100,18 @@
       <header class="page-header">
         <div class="page-title">TSK Extractor</div>
       </header>
+      <div class="warn-card">
+        This explicitly tests whether the known Sienna programming, SecurityAccess,
+        payload, and callback path transfers. An unknown fingerprint is recorded and
+        does not block the experiment.
+      </div>
+      <button class="run-btn" id="runBtn" type="button">Run Sienna transfer path</button>
       <div class="terminal" id="terminal"></div>
     </main>
 
     <script>
       const terminal = document.getElementById("terminal");
+      const runBtn = document.getElementById("runBtn");
 
       function termWrite(text, className) {
         const span = document.createElement("span");
@@ -92,16 +122,20 @@
       }
 
       async function runExtractor() {
+        runBtn.disabled = true;
+        terminal.textContent = "";
         try {
           const response = await fetch("/api/extract", { method: "POST", cache: "no-store" });
           const result = await response.json();
           termWrite(result.message || "", response.ok ? "ok" : "err");
         } catch (err) {
           termWrite(String(err), "err");
+        } finally {
+          runBtn.disabled = false;
         }
       }
 
-      runExtractor();
+      runBtn.addEventListener("click", runExtractor);
     </script>
   </body>
 </html>

@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
-"""Collect the CAN oracle: capture sync + protected SecOC frames for the matcher.
+"""Collect full-payload CAN evidence and annotate the prior SecOC oracle IDs.
 
-Vehicle requirement: READY Mode (hybrid system on) so the protected frames are actively
-signed. Writes can_oracle.ndjson (one raw CAN frame per line, {addr, bus, ts_ms,
-data}) that tsk/lib/matcher.py reads.
+Vehicle requirement: READY Mode (hybrid system on) so authenticated traffic is active.
+Every non-echo frame on every observed bus is appended to ``can_oracle.ndjson``. Known
+Sienna/Corolla sync and protected IDs are annotations and matcher inputs, never capture
+filters.
 
 Shares the panda-takeover preamble with dump_dataflash.py / extractor.py by
 deliberate duplication: this is a distinct operation — a read-only bus capture with
 no UDS session — kept independently testable rather than coupled through a helper.
 """
 import json
+import os
 import subprocess
 import time
+from datetime import datetime, UTC
 from pathlib import Path
+from uuid import uuid4
 
 from tsk.lib.env import CAN_ORACLE_PATH, is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 
 SYNC_ADDR = 0x0F
 PROTECTED_ADDRS = {0x131, 0x2E4, 0x344}
-ORACLE_BUSES = {0, 2}
+# Prior Sienna/Corolla IDs are annotations used by the existing matcher. Capture itself
+# is unfiltered across all buses and arbitration IDs.
 
 # UI/ready thresholds (raw frame counts, matching the index row's "N/50", "N/30").
 SYNC_TARGET = 50
@@ -52,10 +57,7 @@ def count_oracle_frames(path=None) -> tuple:
         try:
           r = json.loads(line)
           addr = int(r["addr"])
-          bus = int(r["bus"])
         except (ValueError, KeyError, TypeError):
-          continue
-        if bus not in ORACLE_BUSES:
           continue
         if addr == SYNC_ADDR:
           sync += 1
@@ -93,33 +95,45 @@ def collect(progress_cb=None, seconds=COLLECT_SECONDS) -> dict:
 
   sync_count = 0
   protected_count = 0
-  begin = time.time()
+  begin = time.monotonic()
   last_progress = begin
   cb(seconds=0.0, sync=0, protected=0)
 
-  with path.open("w", encoding="utf-8") as f:
-    while time.time() - begin < seconds:
+  run_id = f"oracle-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-{uuid4().hex[:8]}"
+  with path.open("a", encoding="utf-8") as f:
+    f.write(json.dumps({"event": "run_start", "run_id": run_id,
+                        "operation": "can_oracle_capture",
+                        "time_utc": datetime.now(UTC).isoformat(),
+                        "sync_hypothesis": f"0x{SYNC_ADDR:03x}",
+                        "protected_hypotheses": sorted(f"0x{a:03x}" for a in PROTECTED_ADDRS)}) + "\n")
+    while time.monotonic() - begin < seconds:
       frames = panda.can_recv()
       if not frames:
         time.sleep(0.005)
         continue
 
-      ts_ms = (time.time() - begin) * 1000.0
+      ts_ms = (time.monotonic() - begin) * 1000.0
       for addr, *_, data, bus in frames:
-        if bus not in ORACLE_BUSES:
+        if bus >= 0x80:
           continue
-        if addr != SYNC_ADDR and addr not in PROTECTED_ADDRS:
-          continue
-        f.write(json.dumps({"addr": int(addr), "bus": int(bus),
-                            "ts_ms": ts_ms, "data": bytes(data).hex()}) + "\n")
-        if addr == SYNC_ADDR:
+        known_sync = addr == SYNC_ADDR
+        known_protected = addr in PROTECTED_ADDRS
+        f.write(json.dumps({"event": "can", "run_id": run_id,
+                            "addr": int(addr), "bus": int(bus), "len": len(data),
+                            "ts_ms": ts_ms, "t_mono_ns": time.monotonic_ns(),
+                            "t_wall_ns": time.time_ns(),
+                            "data": bytes(data).hex(),
+                            "annotation": ("prior_sync_hypothesis" if known_sync else
+                                           "prior_protected_hypothesis" if known_protected else "")}) + "\n")
+        if known_sync:
           sync_count += 1
-        else:
+        elif known_protected:
           protected_count += 1
 
-      now = time.time()
+      now = time.monotonic()
       if now - last_progress >= 1.0:
         last_progress = now
+        f.flush()
         cb(seconds=now - begin, sync=sync_count, protected=protected_count)
 
       # Stop as soon as both targets are met. Sync is the bottleneck (~10/s) while
@@ -128,7 +142,13 @@ def collect(progress_cb=None, seconds=COLLECT_SECONDS) -> dict:
       if sync_count >= SYNC_TARGET and protected_count >= PROTECTED_TARGET:
         break
 
-  cb(seconds=time.time() - begin, sync=sync_count, protected=protected_count)
+    f.write(json.dumps({"event": "run_end", "run_id": run_id,
+                        "operation": "can_oracle_capture", "sync": sync_count,
+                        "protected": protected_count}) + "\n")
+    f.flush()
+    os.fsync(f.fileno())
+
+  cb(seconds=time.monotonic() - begin, sync=sync_count, protected=protected_count)
 
   if sync_count >= SYNC_TARGET and protected_count >= PROTECTED_TARGET:
     return {
@@ -143,6 +163,8 @@ def collect(progress_cb=None, seconds=COLLECT_SECONDS) -> dict:
     "sync": sync_count,
     "protected": protected_count,
     "oracle_path": str(path),
-    "message": (f"Only {sync_count}/{SYNC_TARGET} sync and {protected_count}/{PROTECTED_TARGET} "
-                "protected frames. Put the car in READY Mode (hybrid on) and collect again."),
+    "message": " ".join((
+      f"Only {sync_count}/{SYNC_TARGET} sync and {protected_count}/{PROTECTED_TARGET} protected frames.",
+      "Put the car in READY Mode (hybrid on) and collect again.",
+    )),
   }

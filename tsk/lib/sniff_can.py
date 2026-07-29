@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """CAN sniffer: a read-only diagnostic that tallies raw CAN traffic per bus.
 
-collect_can.py counts only the four SecOC oracle IDs (0x0F sync, 0x2E4/0x131/0x344
-protected) on buses 0/2, so its "0/0" can't tell "no CAN at all" from "CAN present
-but different IDs/bus". This drops every filter and counts every arbitration ID on
+The full-payload collector preserves every frame, while its progress counters still
+highlight prior SecOC hypotheses (0x0F sync and 0x2E4/0x131/0x344 protected). This
+lightweight inventory independently drops every filter and counts every arbitration ID on
 every bus, splitting the failure into: nothing on any bus (wiring / pin-swap), vs
 traffic on a bus the oracle ignores (bus mapping), vs traffic present but sync 0x0F
 absent (different sync ID, or no SecOC on this car).
@@ -19,8 +19,8 @@ from tsk.lib.env import is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 
 SNIFF_SECONDS = 8.0
-KNOWN_BUSES = (0, 1, 2)   # always reported, even at 0 frames, so the screenshot has a fixed shape
-MAX_IDS_PER_BUS = 40      # cap the per-bus ID list so a phone screenshot stays legible
+KNOWN_BUSES = (0, 1, 2)   # always reported, even at 0 frames, for a fixed summary shape
+MAX_IDS_PER_BUS = 40      # display cap only; full-payload evidence uses capture_ready.py
 
 # SecOC markers highlighted on the result (checked across every bus). Sync 0x0F is
 # the one the matcher can't do without; the three protected IDs are the Sienna's

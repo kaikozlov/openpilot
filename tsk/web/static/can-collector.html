@@ -156,7 +156,7 @@
           }
         }
 
-        termWrite("Collecting sync (0x0F) and protected (0x2E4, 0x131, 0x344) up to 60 seconds.");
+        termWrite("Capturing every CAN payload for up to 60 seconds; prior SecOC IDs are annotations only.");
         let lastSec = -1;
         while (true) {
           await sleep(500);

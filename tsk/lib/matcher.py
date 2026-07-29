@@ -52,7 +52,6 @@ FIRST_PASS_SAMPLES = 5
 # Oracle framing (matches the reference loader and the collector's target format).
 SYNC_ADDR = 0x0F
 PROTECTED_ADDRS = {0x131, 0x2E4, 0x344}
-ORACLE_BUSES = {0, 2}
 MAX_SYNC_SAMPLES = 1024
 MAX_PROTECTED_PER_ADDR = 250
 
@@ -142,13 +141,18 @@ def load_oracle_samples(path: Path):
         continue
       try:
         r = json.loads(line)
+        if r.get("event") == "run_start":
+          sync_by_bus.clear()
+          continue
+        if r.get("event") not in (None, "can"):
+          continue
         addr = int(r["addr"])
         bus = int(r["bus"])
         data = bytes.fromhex(r["data"][:16])
       except (ValueError, KeyError, TypeError):
         malformed += 1
         continue
-      if bus not in ORACLE_BUSES or len(data) < 8:
+      if len(data) < 8:
         continue
 
       if addr == SYNC_ADDR:

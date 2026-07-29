@@ -116,12 +116,12 @@
       <div class="warn-card" id="warnCard">
         Run this with the car in <b>Not Ready to Drive</b> (powered on, engine/hybrid not
         started). It sends every UDS service byte 0x00–0xFF and every sub-function of the
-        ones that answer — including operations that can <b>reset the EPS or silence it on
-        the bus</b>. Both are recovered by a power cycle, and the probe restores fault
-        logging and CAN output after every block.<br><br>
-        It runs for <b>5 minutes</b> and stops. Results are written to the device as they
-        arrive, so nothing is lost if the 12V sags — just run it again and it resumes
-        exactly where it stopped.
+        ones that answer. Observation-oriented services run first; stateful families run
+        later with restoration and a liveness boundary after every request. The sweep sends
+        TesterPresent during long blocks and rediscovers the route after response loss.<br><br>
+        It runs for <b>5 minutes</b> and stops. Every request, response, NRC, timeout,
+        liveness check, restoration, route, and timing value is appended as it arrives.
+        Run it again to resume exactly where it stopped.
       </div>
 
       <button class="run-btn" id="runBtn" type="button">Start the 5-minute sweep</button>
@@ -153,8 +153,11 @@
         termWrite("");
         termWrite("UDS boundary sweep", "ok");
         termWrite("Panda: " + (s.panda || "?"));
-        termWrite("EPS bus: " + (s.eps_bus === -1 ? "no response on 0/1/2" : s.eps_bus),
-                  s.eps_bus === -1 ? "err" : "warn");
+        termWrite("Diagnostic route: " + (s.eps_tx || "?") + " bus " +
+                  (s.eps_bus === -1 ? "no response" : s.eps_bus) + " -> " +
+                  (s.eps_rx || "?") + " bus " +
+                  (s.eps_rx_bus === undefined ? "?" : s.eps_rx_bus),
+                  s.eps_bus === -1 ? "err" : "ok");
         termWrite("Response timeout: " + (s.timeout_ms || "?") + " ms (measured)");
         termWrite("Results saved: " + (s.records || 0));
 
@@ -178,6 +181,11 @@
           termWrite("Other ECUs answering on this bus (" + s.responders.length + ")", "ok");
           termWrite("  " + s.responders.join(" "));
         }
+        if ((s.hypotheses || []).length) {
+          termWrite("");
+          termWrite("Prior Corolla/Sienna hypotheses (annotations only)", "dim");
+          for (const h of s.hypotheses) termWrite("  " + h.request + " " + h.label);
+        }
         if (s.frontier) {
           termWrite("");
           termWrite("Stopped at: " + s.frontier, "warn");
@@ -187,7 +195,7 @@
           termWrite(s.message, s.status === "complete" ? "ok big" : "warn");
         }
         termWrite("");
-        termWrite("Tap below to copy this as text instead of screenshotting.", "dim");
+        termWrite("Download the evidence bundle from the main page for the complete transcript.", "dim");
         copyArea.value = terminal.textContent;
         copyArea.style.display = "block";
         copyArea.addEventListener("click", () => copyArea.select());

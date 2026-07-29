@@ -72,6 +72,14 @@ function launch {
   ln -sfn $(pwd) /data/pythonpath
   export PYTHONPATH="$PWD"
 
+  # submodule package symlinks for PYTHONPATH imports on device.
+  # on PC these come from editable installs via pyproject.toml / uv.
+  ln -sfn msgq_repo/msgq msgq
+  ln -sfn opendbc_repo/opendbc opendbc
+  ln -sfn rednose_repo/rednose rednose
+  ln -sfn teleoprtc_repo/teleoprtc teleoprtc
+  ln -sfn tinygrad_repo/tinygrad tinygrad
+
   # hardware specific init
   if [ -f /AGNOS ]; then
     agnos_init
@@ -83,8 +91,8 @@ function launch {
   # TSK: /cache is root-owned but the web server runs as comma, so create the TSK
   # cache dir privileged and hand it to comma before its jobs write to it. /cache
   # clears on AGNOS update, so recreate every boot; mkdir -p is idempotent.
-  sudo mkdir -p /cache/tsk
-  sudo chown comma:comma /cache/tsk
+  sudo mkdir -p /cache/tsk/logs
+  sudo chown -R comma:comma /cache/tsk
   sudo mkdir -p /cache/params
   sudo chown comma:comma /cache/params
 
@@ -92,8 +100,10 @@ function launch {
   # so the recommended/alternate clones aren't needed and the boot isn't blocked on them.
   cd $DIR
 
-  # TSK: start web server before the manager so it survives manager kills
-  python3 -m tsk.web.server &
+  # TSK: start web server before the manager so it survives manager kills. Keep an
+  # append-only device log that is included in the evidence bundle.
+  python3 -m tsk.web.server >> /cache/tsk/logs/tsk-web.log 2>&1 &
+  echo $! > /cache/tsk/tsk-web.pid
 
   # start manager
   cd openpilot/system/manager

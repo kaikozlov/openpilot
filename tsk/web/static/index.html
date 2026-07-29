@@ -322,17 +322,40 @@
         <div class="status-key" id="keyDetail"></div>
       </div>
 
-      <div class="section-label span-hidden">2021, 2022, 2023 RAV4 Prime &amp; Sienna</div>
-      <div class="group span-hidden">
-        <a class="group-item action" href="/extractor.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">TSK Extractor <span class="chevron">›</span></a>
+      <div class="section-label">1. Identify &amp; observe</div>
+      <div class="group">
+        <a class="group-item action" href="/ident-map.html">EPS fingerprint &amp; service map <span class="chevron">›</span></a>
+        <a class="group-item action" href="/can-sniff.html">Passive CAN inventory <span class="chevron">›</span></a>
       </div>
 
-      <div class="section-label span-hidden">2021+</div>
-      <div class="group span-hidden">
+      <div class="section-label">2. Not Ready To Drive characterization</div>
+      <div class="group">
+        <a class="group-item action" href="/uds-sweep.html">Exhaustive UDS sweep <span class="chevron">›</span></a>
+        <a class="group-item action" href="/preamble-probe.html">Programming preamble <span class="chevron">›</span></a>
+        <a class="group-item action" href="/read-mem.html">Read-memory characterization <span class="chevron">›</span></a>
+        <a class="group-item action" href="/prog-probe.html">Programming &amp; security probe <span class="chevron">›</span></a>
+        <a class="group-item action" href="/level3-probe.html">Security level 0x03 isolation <span class="chevron">›</span></a>
+        <a class="group-item action" href="/reset-probe.html">Reset-window probe <span class="chevron">›</span></a>
+      </div>
+
+      <div class="section-label">3. READY evidence</div>
+      <div class="group">
+        <a class="group-item action" href="/ready-capture.html">Passive capture / separate active diff <span class="chevron">›</span></a>
+      </div>
+
+      <div class="section-label">4. Sienna transfer hypothesis</div>
+      <div class="group">
+        <a class="group-item action" href="/extractor.html">Known Sienna RAM path <span class="chevron">›</span></a>
+        <a class="group-item action" href="/dataflash-diag.html">Instrumented DataFlash path <span class="chevron">›</span></a>
+        <a class="group-item action" href="/sendkey-probe.html">Test known seed/key hypothesis <span class="chevron">›</span></a>
+      </div>
+
+      <div class="section-label">Key candidate validation</div>
+      <div class="group">
         <a class="prereq-row" href="/can-collector.html" id="canRow">
           <div class="prereq-dot" id="canDot"></div>
           <div class="prereq-body">
-            <div class="prereq-title">Collect CAN messages</div>
+            <div class="prereq-title">Capture all CAN; annotate prior SecOC IDs</div>
             <div class="prereq-detail" id="canDetail">Sync 0 / 50<br>Protected 0 / 30</div>
           </div>
           <div class="prereq-chevron">›</div>
@@ -340,49 +363,19 @@
         <a class="prereq-row" href="/dataflash-collector.html" id="dfRow">
           <div class="prereq-dot" id="dfDot"></div>
           <div class="prereq-body">
-            <div class="prereq-title">Dump DataFlash</div>
+            <div class="prereq-title">Dump DataFlash with known payload</div>
             <div class="prereq-detail" id="dfDetail" style="display:none;"></div>
           </div>
           <div class="prereq-chevron">›</div>
         </a>
       </div>
-
-      <div class="group span-hidden" style="margin-top: 8px;">
+      <div class="group" style="margin-top: 8px;">
         <button class="group-item disabled" type="button" id="matcherBtn" disabled>Find Toyota Security Key (need CAN &amp; DataFlash)</button>
       </div>
 
-      <div class="section-label">Not Ready To Drive</div>
+      <div class="section-label">Evidence</div>
       <div class="group">
-        <a class="group-item action" href="/uds-sweep.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;"><b>1. UDS Sweep (5 min)</b> <span class="chevron">›</span></a>
-      </div>
-
-      <!-- Superseded by the preamble probe, which folds in the identity read, the service
-           surface, the 0x03 lock read, the 0x01 baseline, the programming entries and the
-           0x23 reads — one tap, one screenshot set, instead of six runs. Hidden rather than
-           deleted: the pages are still served at their URLs if a result reopens one.
-           sendkey is retired outright — it is spent, and re-running it spends another
-           counted security attempt at a level Willem's secret does not belong to. -->
-      <div class="group span-hidden">
-        <a class="group-item action" href="/preamble-probe.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Programming preamble <span class="chevron">›</span></a>
-        <a class="group-item action" href="/read-mem.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Read key region (0x23) <span class="chevron">›</span></a>
-        <a class="group-item action" href="/ident-map.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">EPS identity &amp; service map <span class="chevron">›</span></a>
-        <a class="group-item action" href="/prog-probe.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Programming &amp; security probe <span class="chevron">›</span></a>
-        <a class="group-item action" href="/level3-probe.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Security level 0x03 (isolation) <span class="chevron">›</span></a>
-        <a class="group-item action" href="/sendkey-probe.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Send Willem key (0x03/0x04) <span class="chevron">›</span></a>
-        <a class="group-item action" href="/dataflash-diag.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">DataFlash dump (diagnostic) <span class="chevron">›</span></a>
-        <a class="group-item action" href="/reset-probe.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Reset-window probe <span class="chevron">›</span></a>
-      </div>
-
-      <div class="section-label">READY</div>
-      <div class="group">
-        <a class="group-item action" href="/ready-capture.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;"><b>2. READY Capture (5 min)</b> <span class="chevron">›</span></a>
-      </div>
-
-      <!-- sniff_can records frame counts and arb IDs but never payloads, so it cannot do
-           the signed-ID capture — ready-capture.html supersedes it. Hidden, not deleted;
-           still served at /can-sniff.html. -->
-      <div class="group span-hidden">
-        <a class="group-item action" href="/can-sniff.html" style="text-decoration:none;display:flex;justify-content:space-between;align-items:center;">Sniff CAN messages <span class="chevron">›</span></a>
+        <a class="group-item action" href="/api/evidence-bundle">Download complete evidence bundle <span class="chevron">›</span></a>
       </div>
 
       <div class="section-label span-hidden">Manage</div>
@@ -779,7 +772,7 @@
 
       function buildMatchDebug(result) {
         // Complete-dump not-found: the plain result plus the captured byte count, so a
-        // screenshot still carries the dump size. Scan internals (candidate address,
+        // exported summary still carries the dump size. Scan internals (candidate address,
         // match counts, windows scanned) are omitted as user-facing jargon — the API
         // response still carries them for debugging.
         const lines = [
@@ -787,7 +780,7 @@
           "",
           `Dump captured: ${state.dfBytes} / ${state.dfTotal} bytes`,
           "",
-          "Take a screenshot, post on #toyota-security, and ping @calvinspark.",
+          "Export the evidence bundle before continuing.",
         ];
         return lines.join("\n");
       }

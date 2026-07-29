@@ -100,7 +100,7 @@
       </header>
       <div class="warn-card">
         This sends <b>one</b> security key (level 0x03/0x04) computed with the Sienna secret,
-        to test whether the Corolla shares it. A wrong key can <b>temporarily lock</b> the EPS
+        to test whether the target calibration shares it. A wrong key can <b>temporarily lock</b> the EPS
         security. Run it <b>once</b>; if it says invalid or locked, power-cycle the panda /
         re-enter Not Ready to Drive before trying again.
       </div>
@@ -161,7 +161,7 @@
           termWrite(s.message, cls);
         }
         termWrite("");
-        termWrite("Screenshot ALL of this and send it to Calvin.", "dim");
+        termWrite("Export the evidence bundle before continuing.", "dim");
       }
 
       async function run() {

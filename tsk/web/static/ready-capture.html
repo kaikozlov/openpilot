@@ -3,272 +3,142 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>READY Capture</title>
+    <title>READY Evidence</title>
     <style>
       * { box-sizing: border-box; margin: 0; }
-
-      body {
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
-        background: #f2f2f7;
-        color: #1c1c1e;
-        min-height: 100vh;
-        display: flex;
-        flex-direction: column;
-      }
-
-      .page {
-        width: min(100vw, 460px);
-        margin: 0 auto;
-        display: flex;
-        flex-direction: column;
-        flex: 1;
-        min-height: 100vh;
-      }
-
+      body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+             background: #f2f2f7; color: #1c1c1e; min-height: 100vh; }
+      .page { width: min(100vw, 460px); margin: 0 auto; padding-bottom: 20px; }
       .back-bar { padding: 12px 20px; }
-
-      .back-link {
-        color: #007aff;
-        font-size: 17px;
-        text-decoration: none;
-        -webkit-tap-highlight-color: transparent;
-      }
-
+      .back-link { color: #007aff; font-size: 17px; text-decoration: none; }
       .back-link::before { content: "‹ "; }
-
       .page-header { padding: 0 20px 12px; }
       .page-title { font-size: 26px; font-weight: 700; }
-
-      .warn-card {
-        margin: 0 16px 12px;
-        background: #fff;
-        border-radius: 12px;
-        padding: 14px 16px;
-        font-size: 14px;
-        line-height: 1.45;
-      }
-
-      .warn-card b { color: #c93400; }
-
-      .run-btn {
-        display: block;
-        width: calc(100% - 32px);
-        margin: 0 16px 12px;
-        padding: 14px;
-        border: none;
-        border-radius: 12px;
-        background: #007aff;
-        color: #fff;
-        font: inherit;
-        font-size: 17px;
-        font-weight: 600;
-        cursor: pointer;
-        -webkit-tap-highlight-color: transparent;
-      }
-
+      .card { margin: 0 16px 12px; background: #fff; border-radius: 12px;
+              padding: 14px 16px; font-size: 14px; line-height: 1.45; }
+      .card b { color: #c93400; }
+      .run-btn { display: block; width: calc(100% - 32px); margin: 0 16px 10px;
+                 padding: 14px; border: none; border-radius: 12px; color: #fff;
+                 background: #007aff; font: inherit; font-size: 17px; font-weight: 600; }
+      .run-btn.active { background: #ff9500; }
       .run-btn:disabled { background: #c7c7cc; }
-
-      .terminal {
-        margin: 0 16px 16px;
-        background: #1c1c1e;
-        border-radius: 12px;
-        padding: 16px;
-        flex: 1;
-        overflow-y: auto;
-        overflow-x: hidden;
-        font-family: "SF Mono", ui-monospace, monospace;
-        font-size: 12px;
-        line-height: 1.55;
-        color: #e5e5ea;
-        white-space: pre-wrap;
-        word-break: break-all;
-      }
-
-      .terminal .err { color: #ff453a; }
-      .terminal .ok { color: #30d158; }
-      .terminal .warn { color: #ff9f0a; }
-      .terminal .dim { color: #8e8e93; }
-      .terminal .big { font-size: 14px; font-weight: 700; }
-
-      .copy-area {
-        margin: 0 16px 16px;
-        width: calc(100% - 32px);
-        height: 160px;
-        display: none;
-        font-family: "SF Mono", ui-monospace, monospace;
-        font-size: 11px;
-        padding: 10px;
-        border-radius: 12px;
-        border: 1px solid #c6c6c8;
-      }
+      .terminal { margin: 12px 16px 16px; min-height: 260px; background: #1c1c1e;
+                  border-radius: 12px; padding: 16px; overflow: auto;
+                  font: 12px/1.55 "SF Mono", ui-monospace, monospace; color: #e5e5ea;
+                  white-space: pre-wrap; word-break: break-all; }
+      .terminal .err { color: #ff453a; } .terminal .ok { color: #30d158; }
+      .terminal .warn { color: #ff9f0a; } .terminal .dim { color: #8e8e93; }
+      .export-link { display: block; margin: 0 16px; padding: 13px; border-radius: 12px;
+                     background: #fff; color: #007aff; text-align: center; text-decoration: none; }
     </style>
   </head>
   <body>
     <main class="page">
-      <div class="back-bar">
-        <a class="back-link" href="/">TSK Manager</a>
-      </div>
-      <header class="page-header">
-        <div class="page-title">READY Capture</div>
-      </header>
+      <div class="back-bar"><a class="back-link" href="/">TSK Manager</a></div>
+      <header class="page-header"><div class="page-title">READY Evidence</div></header>
 
-      <div class="warn-card" id="warnCard">
-        Run this with the car in <b>READY</b> (hybrid system started, foot on the brake,
-        in Park). Run the <b>UDS Sweep</b> in Not Ready to Drive first — this pass re-tests
-        what that one found, so it is much more useful second.<br><br>
-        It records every CAN frame with its full payload for 90 seconds, then re-asks only
-        requests the first sweep already characterised. No unknown bytes are sent while the
-        car is drivable. About 5 minutes total.
+      <div class="card">
+        <b>Confirm the vehicle is in Park before either operation.</b><br><br>
+        <b>Passive capture</b> records every received CAN payload for 90 seconds. It sends
+        no UDS or CAN request.<br><br>
+        <b>Active mode diff</b> is separate. It replays only bare service bytes already
+        recorded as silent or condition-gated by the Not Ready to Drive sweep, checks
+        liveness after each request, and restores the default session.
       </div>
 
-      <button class="run-btn" id="runBtn" type="button">Start the READY capture</button>
+      <button class="run-btn" id="passiveBtn" type="button">Start passive READY capture</button>
+      <button class="run-btn active" id="diffBtn" type="button">Run characterized active diff</button>
       <div class="terminal" id="terminal"></div>
-      <textarea class="copy-area" id="copyArea" readonly></textarea>
+      <a class="export-link" href="/api/evidence-bundle">Download evidence bundle</a>
     </main>
 
     <script>
       const terminal = document.getElementById("terminal");
-      const runBtn = document.getElementById("runBtn");
-      const copyArea = document.getElementById("copyArea");
+      const passiveBtn = document.getElementById("passiveBtn");
+      const diffBtn = document.getElementById("diffBtn");
 
-      function termWrite(text, className) {
+      function line(text, cls) {
         const span = document.createElement("span");
-        if (className) span.className = className;
+        if (cls) span.className = cls;
         span.textContent = text + "\n";
         terminal.appendChild(span);
         terminal.scrollTop = terminal.scrollHeight;
       }
+      function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+      function disabled(value) { passiveBtn.disabled = value; diffBtn.disabled = value; }
 
-      function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-      async function getStatus() {
-        const r = await fetch("/api/ready-capture-status", { cache: "no-store" });
-        return r.json();
-      }
-
-      function render(s) {
+      function renderPassive(s) {
         const cap = s.capture || {};
-        termWrite("");
-        termWrite("READY capture", "ok");
-        termWrite("Panda: " + (s.panda || "?"));
-        termWrite("EPS bus: " + (s.eps_bus === -1 ? "no diagnostic response" : s.eps_bus),
-                  s.eps_bus === -1 ? "err" : "warn");
-        termWrite("Frames captured: " + (s.frames || 0) + " across " + (cap.ids || 0) + " IDs");
-
-        termWrite("");
-        termWrite("SecOC-signed candidates (changing MAC tail, stable head)",
-                  (cap.candidates || []).length ? "ok" : "warn");
-        if ((cap.candidates || []).length) {
-          for (const c of cap.candidates) {
-            termWrite("  bus " + c.bus + "  " + c.addr + "  samples " + c.samples +
-                      "  tail " + c.tail_distinct + "  head " + c.head_distinct, "ok");
-          }
-        } else {
-          termWrite("  none found — the EPS may not be signing, or the window was too short");
+        line(""); line("PASSIVE READY CAPTURE", "ok");
+        line("Run: " + (s.run_id || "?"));
+        line("Panda: " + (s.panda || "?"));
+        line("Frames: " + (s.frames || 0) + " across " + (cap.ids || 0) + " IDs");
+        line("TX echoes filtered: " + (s.tx_echoes_filtered || 0));
+        line("Transcript: " + (s.path || "?"), "dim");
+        line(""); line("Structural authenticated-frame candidates", "ok");
+        for (const c of (cap.candidates || [])) {
+          line(`  bus ${c.bus} ${c.addr} samples ${c.samples} tail ${c.tail_distinct} head ${c.head_distinct}`);
         }
-
-        termWrite("");
-        termWrite("Sync frames (0x0F)", (cap.sync || []).length ? "ok" : "warn");
-        for (const y of (cap.sync || [])) {
-          termWrite("  bus " + y.bus + "  " + y.addr + "  samples " + y.samples +
-                    "  distinct " + y.distinct);
+        if (!(cap.candidates || []).length) line("  none", "warn");
+        line(""); line("Prior-work annotations (not capture filters)", "dim");
+        for (const h of (cap.hypothesis_hits || [])) {
+          line(`  bus ${h.bus} ${h.addr} samples ${h.samples}: ${h.annotation}`);
         }
-        if (!(cap.sync || []).length) termWrite("  none seen");
-
-        if ((s.diff || []).length) {
-          termWrite("");
-          termWrite("Mode diff — silent in Not Ready to Drive, re-asked here", "dim");
-          for (const d of s.diff) {
-            const changed = d.outcome !== "silent";
-            termWrite("  " + d.label + ": " + d.outcome +
-                      (d.nrc >= 0 ? " NRC 0x" + d.nrc.toString(16) : ""),
-                      changed ? "ok" : "warn");
-          }
+        for (const h of (cap.sync || [])) {
+          line(`  bus ${h.bus} ${h.addr} samples ${h.samples}: ${h.annotation}`);
         }
-
-        if ((s.responders || []).length) {
-          termWrite("");
-          termWrite("Responders on the bus (" + s.responders.length + ")", "ok");
-          termWrite("  " + s.responders.join(" "));
-        }
-        if ((s.cross || []).length) {
-          termWrite("");
-          termWrite("Silent services against other ECUs", "dim");
-          for (const c of s.cross) {
-            termWrite("  " + c.addr + " " + c.label + ": " + c.outcome,
-                      c.outcome === "silent" ? "warn" : "ok");
-          }
-        }
-        if ((s.seeds || []).length) {
-          termWrite("");
-          termWrite("Security seed in READY", "dim");
-          for (const sd of s.seeds) {
-            termWrite("  level " + sd.level + ": " + sd.outcome +
-                      (sd.raw ? " " + sd.raw : ""), sd.outcome === "positive" ? "ok" : "warn");
-          }
-        }
-
-        termWrite("");
-        if (s.message) termWrite(s.message, s.status === "captured" ? "ok" : "warn");
-        termWrite("");
-        termWrite("Tap below to copy this as text instead of screenshotting.", "dim");
-        copyArea.value = terminal.textContent;
-        copyArea.style.display = "block";
-        copyArea.addEventListener("click", () => copyArea.select());
+        if (s.message) { line(""); line(s.message, "ok"); }
       }
 
-      async function run() {
-        runBtn.disabled = true;
-        runBtn.textContent = "Running…";
-        document.getElementById("warnCard").style.display = "none";
+      function renderDiff(s) {
+        line(""); line("ACTIVE READY MODE DIFF", s.status === "complete" ? "ok" : "warn");
+        line("Run: " + (s.run_id || "?"));
+        line("Panda: " + (s.panda || "?"));
+        line("Diagnostic route: " + (s.eps_tx || "?") + " bus " + (s.eps_bus ?? -1) +
+             " -> " + (s.eps_rx || "?") + " bus " + (s.eps_rx_bus ?? -1));
+        for (const d of (s.diff || [])) {
+          line(`  ${d.request} ${d.label}: ${d.outcome}${d.nrc >= 0 ? " NRC 0x" + d.nrc.toString(16) : ""}`,
+               d.outcome === "silent" ? "warn" : "ok");
+        }
+        if (s.message) { line(""); line(s.message, s.status === "complete" ? "ok" : "warn"); }
+      }
 
-        let s = null;
-        try { s = await getStatus(); } catch (err) { /* fall through */ }
-
-        if (s && s.status === "running") {
-          termWrite("A capture is already in progress — attaching...");
-        } else {
-          try {
-            const r = await fetch("/api/ready-capture", { method: "POST", cache: "no-store" });
-            const started = await r.json();
-            if (!started.ok && started.status !== "running") {
-              termWrite(started.message || "Could not start the capture.", "err");
-              runBtn.disabled = false;
-              runBtn.textContent = "Start the READY capture";
-              return;
-            }
-          } catch (err) {
-            termWrite(String(err), "err");
-            runBtn.disabled = false;
+      async function run(mode) {
+        disabled(true);
+        terminal.textContent = "";
+        const endpoint = mode === "passive" ? "/api/ready-capture" : "/api/ready-diff";
+        const statusEndpoint = mode === "passive" ? "/api/ready-capture-status" : "/api/ready-diff-status";
+        try {
+          const startResponse = await fetch(endpoint, { method: "POST", cache: "no-store" });
+          const start = await startResponse.json();
+          if (!startResponse.ok && start.status !== "running") {
+            line(start.message || "Could not start operation.", "err");
             return;
           }
-        }
-
-        termWrite("Capturing. About 5 minutes — leave the screen on.");
-        let last = -1;
-        while (true) {
-          await sleep(1000);
-          try { s = await getStatus(); } catch (err) { continue; }
-          if (s.status === "running") {
-            if ((s.count || 0) !== last) {
-              last = s.count || 0;
-              termWrite("  " + (s.stage || "") + "  " + (s.last || ""));
+          line(mode === "passive" ? "Passive capture started; no requests will be sent."
+                                  : "Active diff started from the saved NRtD worklist.");
+          let previous = "";
+          while (true) {
+            await sleep(1000);
+            const response = await fetch(statusEndpoint, { cache: "no-store" });
+            const state = await response.json();
+            if (state.status === "running") {
+              const progress = `${state.stage || ""} ${state.last || ""}`;
+              if (progress !== previous) { previous = progress; line("  " + progress, "dim"); }
+              continue;
             }
-            continue;
-          }
-          if (s.status === "failed") {
-            termWrite("");
-            termWrite(s.message || "Capture failed.", "err");
+            if (mode === "passive") renderPassive(state); else renderDiff(state);
             break;
           }
-          render(s);
-          break;
+        } catch (err) {
+          line(String(err), "err");
+        } finally {
+          disabled(false);
         }
-        runBtn.disabled = false;
-        runBtn.textContent = "Run again";
       }
 
-      runBtn.addEventListener("click", run);
+      passiveBtn.addEventListener("click", () => run("passive"));
+      diffBtn.addEventListener("click", () => run("active"));
     </script>
   </body>
 </html>

@@ -2,7 +2,6 @@
 import struct
 import subprocess
 import time
-from subprocess import check_output, CalledProcessError
 
 from tsk.lib.env import is_agnos, PAYLOAD_PATH
 
@@ -147,7 +146,8 @@ class TSKExtractor:
       raise RetryError("Car not detected")
 
     if app_version not in cls.APPLICATION_VERSIONS:
-      print(f"Unexpected application version (ignored): {str(app_version)}")
+      print("Application version is outside the known Sienna/RAV4 set. "
+            f"Continuing the explicit Sienna-transfer hypothesis: {app_version!r}")
 
     # Mandatory flow of diagnostic sessions
     try:
@@ -168,9 +168,11 @@ class TSKExtractor:
 
     try:
       if bl_version != cls.APPLICATION_VERSIONS[app_version]:
-        print(f"Unexpected bootloader version (ignored): {str(bl_version)}")
+        print("Bootloader version differs from the prior fixture. Continuing the explicit "
+              f"Sienna-transfer hypothesis: {bl_version!r}")
     except KeyError as e: # In case app_version is not found at all
-      print(f"Unexpected bootloader version (ignored): {str(e)}")
+      print("No prior bootloader fixture exists for this application. Continuing the explicit "
+            f"Sienna-transfer hypothesis: {e}")
 
     # Go back to programming session
     try:
@@ -223,7 +225,7 @@ class TSKExtractor:
       print("\nUpload payload...")
 
       print(" - Request download")
-      resp = uds_client._uds_request(SERVICE_TYPE.REQUEST_DOWNLOAD, data=data)
+      uds_client._uds_request(SERVICE_TYPE.REQUEST_DOWNLOAD, data=data)
 
       # Upload payload
       payload = open(PAYLOAD_PATH, "rb").read()
@@ -333,9 +335,9 @@ class TSKExtractor:
     except (BoarddNotRunningError, RetryError):
       raise
     except Exception as e:
-      e.add_note("\n\n!!!! Unexpected error. Please take a screenshot, post it on #toyota-security, and ping @calvinspark\n")
+      e.add_note("\n\n!!!! Unexpected error. Preserve the raw logs and export the evidence bundle before continuing.\n")
       raise
 
     print("SecOC key extracted successfully")
-    print("!!!! Take a photo of this screen")
+    print("!!!! Export the evidence bundle before continuing")
     return secoc_key

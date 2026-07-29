@@ -300,7 +300,8 @@ def probe_programming(progress_cb=None) -> dict:
   result["status"] = "entered" if entered else "blocked"
   if entered:
     hit = next(a["name"] for a in attempts if a["ok"] and a.get("programming"))
-    result["message"] = f"A programming-session sequence worked: {hit}. The exploit path may be open — tell Calvin."
+    result["message"] = (f"A programming-session sequence worked: {hit}. The Sienna transfer "
+                         "hypothesis remains open; export the evidence bundle before continuing.")
   elif switched is True:
     result["message"] = (f"No sequence entered on bus {eps_bus}, but the session switched to 0x02 silently — "
                          "the EPS enters programming and the response is being lost. A repin or a scope on "
