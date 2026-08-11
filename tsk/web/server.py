@@ -538,6 +538,152 @@ def operation_states_snapshot() -> dict:
   return snapshots
 
 
+def _identity_value(identity: list[dict], name: str) -> str:
+  for entry in identity:
+    if entry.get("name") == name and entry.get("hex"):
+      return str(entry.get("ascii", "")).strip(".\x00 ")
+  return ""
+
+
+def dashboard_payload() -> dict:
+  """Project raw TSK state into the operator-facing recovery workflow.
+
+  This endpoint deliberately owns workflow semantics so the browser does not have to
+  reconstruct them from a collection of independently changing probe endpoints.
+  """
+  snapshots = operation_states_snapshot()
+  identity = snapshots["identity"]
+  can = snapshots["can"]
+  dataflash = snapshots["dataflash"]
+  programming = snapshots["programming"]
+  key = RebootManager.key_status_payload()
+  installed = bool(key.get("installed"))
+
+  app_sw = _identity_value(identity.get("identity", []), "app_sw_id")
+  spare_part = _identity_value(identity.get("identity", []), "spare_part_no")
+  ecu_serial = _identity_value(identity.get("identity", []), "ecu_serial")
+  identity_ready = identity.get("status") == "mapped" and bool(app_sw)
+  known_transfer = bool(app_sw) and any(app_sw.encode() in version for version in TSKExtractor.APPLICATION_VERSIONS)
+  control_ready = bool(can.get("control_ready"))
+  programming_status = str(programming.get("status", "idle"))
+  programming_ready = known_transfer or programming_status == "entered"
+  programming_blocked = programming_status in ("failed", "rejected", "blocked", "unreachable")
+  dataflash_ready = bool(dataflash.get("ready") or dataflash.get("status") == "partial")
+
+  route = {
+    "tx": identity.get("eps_tx", ""),
+    "rx": identity.get("eps_rx", ""),
+    "tx_bus": identity.get("eps_bus", -1),
+    "rx_bus": identity.get("eps_rx_bus", -1),
+    "elm327_param": identity.get("elm327_param", -1),
+    "semantic_path": identity.get("semantic_path", ""),
+    "alternate_routes": identity.get("alternate_routes", []),
+  }
+  route_ready = identity_ready and route["tx_bus"] >= 0 and bool(route["tx"] and route["rx"])
+
+  if installed:
+    stage = "complete"
+    next_action = {
+      "id": "complete", "title": "Recovery complete",
+      "description": "A verified SecOC key is installed. Export the evidence bundle before leaving this build.",
+      "href": "/api/evidence-bundle", "label": "Download evidence", "vehicle_state": "Any",
+      "tone": "success",
+    }
+  elif not identity_ready:
+    stage = "identify"
+    next_action = {
+      "id": "identify", "title": "Identify the EPS",
+      "description": "Read F181 and establish the complete diagnostic route before any recovery attempt.",
+      "href": "/ident-map.html", "label": "Identify EPS", "vehicle_state": "Not Ready to Drive",
+      "tone": "primary",
+    }
+  elif not control_ready:
+    stage = "capture_can"
+    next_action = {
+      "id": "capture_can", "title": "Capture SecOC traffic",
+      "description": "Collect READY-state authentication traffic, including the control messages openpilot must sign.",
+      "href": "/can-collector.html", "label": "Capture CAN evidence", "vehicle_state": "READY",
+      "tone": "primary",
+    }
+  elif not programming_ready:
+    stage = "programming"
+    if programming_blocked:
+      next_action = {
+        "id": "programming", "title": "Programming handoff is blocked",
+        "description": programming.get("message") or "The EPS did not reach its bootloader on the preserved physical route.",
+        "href": "", "label": "Open programming diagnostics", "vehicle_state": "Not Ready to Drive",
+        "tone": "warning", "action": "research",
+      }
+    else:
+      next_action = {
+        "id": "programming", "title": "Confirm the programming handoff",
+        "description": "Unknown calibration: confirm bootloader reappearance on the preserved route before sending a dump payload.",
+        "href": "/prog-probe.html", "label": "Run handoff probe", "vehicle_state": "Not Ready to Drive",
+        "tone": "primary",
+      }
+  elif not dataflash_ready:
+    stage = "dataflash"
+    next_action = {
+      "id": "dataflash", "title": "Recover key material",
+      "description": "Dump EPS DataFlash on the already identified physical route. The candidate will not be trusted until CAN verification succeeds.",
+      "href": "/dataflash-collector.html", "label": "Dump DataFlash", "vehicle_state": "Not Ready to Drive",
+      "tone": "primary",
+    }
+  else:
+    stage = "verify"
+    next_action = {
+      "id": "verify", "title": "Verify the key candidate",
+      "description": "CAN evidence and DataFlash are available. Scan candidates and install only a key that authenticates the openpilot control domain.",
+      "href": "", "label": "Find & verify key", "vehicle_state": "Any",
+      "tone": "primary", "action": "match",
+    }
+
+  steps = [
+    {"id": "identify", "title": "Identify EPS", "state": "complete" if installed or identity_ready else "current" if stage == "identify" else "pending",
+     "detail": app_sw or "Read F181 and diagnostic route"},
+    {"id": "capture_can", "title": "Capture CAN evidence",
+     "state": "complete" if installed or control_ready else "current" if stage == "capture_can" else "pending",
+     "detail": (f"{can.get('protected_count', 0)} protected frames · control IDs ready" if control_ready else
+                "Completed earlier" if installed else f"{can.get('sync_count', 0)} sync · {can.get('protected_count', 0)} protected")},
+    {"id": "programming", "title": "Confirm programming route",
+     "state": "complete" if installed or programming_ready else "current" if stage == "programming" else "pending",
+     "detail": ("Known transfer path" if known_transfer else "Bootloader reappeared on preserved route" if programming_status == "entered" else
+                "Completed earlier" if installed else "Required for this calibration")},
+    {"id": "dataflash", "title": "Recover key material",
+     "state": "complete" if installed or dataflash_ready else "current" if stage == "dataflash" else "pending",
+     "detail": ("Complete DataFlash dump" if dataflash.get("ready") else
+                "Usable partial DataFlash dump" if dataflash.get("status") == "partial" else
+                "Completed earlier" if installed else "Waiting for programming route")},
+    {"id": "verify", "title": "Verify candidate", "state": "complete" if installed else "current" if stage == "verify" else "pending",
+     "detail": "Cryptographic control-domain verification"},
+    {"id": "install", "title": "Install key", "state": "complete" if installed else "pending",
+     "detail": "Installed" if installed else "Only after verification"},
+  ]
+
+  failures = []
+  for name, snapshot in (("CAN capture", can), ("DataFlash dump", dataflash), ("Programming handoff", programming)):
+    if snapshot.get("status") in ("failed", "rejected", "blocked", "unreachable", "unusable_partial"):
+      failures.append({"name": name, "status": snapshot.get("status"), "message": snapshot.get("message", "")})
+
+  return {
+    "key": key,
+    "vehicle": {
+      "identified": identity_ready,
+      "known_transfer": known_transfer,
+      "app_sw_id": app_sw,
+      "spare_part_no": spare_part,
+      "ecu_serial": ecu_serial,
+      "panda": identity.get("panda", ""),
+    },
+    "route": {**route, "identified": route_ready},
+    "recovery": {"stage": stage, "next_action": next_action, "steps": steps, "failures": failures},
+    "can": can,
+    "dataflash": dataflash,
+    "programming": programming,
+    "reboot": get_reboot_actions_payload(),
+  }
+
+
 def _df_progress(status=None, frames=None, bytes_done=None, total=None, message=None) -> None:
   with df_lock:
     if status is not None:
@@ -2267,6 +2413,10 @@ class TSKWebHandler(BaseHTTPRequestHandler):
 
     if path == "/api/status":
       self._send_json(RebootManager.key_status_payload(), send_body=send_body)
+      return
+
+    if path == "/api/dashboard":
+      self._send_json(dashboard_payload(), send_body=send_body)
       return
 
     if path == "/api/can-status":

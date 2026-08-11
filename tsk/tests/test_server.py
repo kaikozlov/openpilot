@@ -9,6 +9,7 @@ from unittest.mock import patch
 from tsk.web.server import (
   TSKWebHandler,
   TSKWebServer,
+  dashboard_payload,
   expected_vehicle_state,
   operation_states_snapshot,
   ready_diff_lock,
@@ -33,6 +34,65 @@ class TestServer(unittest.TestCase):
     self.assertTrue(local_pages)
     self.assertTrue(all(resolve_asset(link) is not None for link in local_pages))
     self.assertIn("/api/evidence-bundle", links)
+    self.assertIsNotNone(resolve_asset("/css/app.css"))
+    self.assertIsNotNone(resolve_asset("/js/dashboard.js"))
+    self.assertIsNotNone(resolve_asset("/js/api.js"))
+    self.assertIn('src="/js/dashboard.js"', index)
+
+  def test_dashboard_recovery_state_machine(self):
+    base = {
+      "identity": {"status": "idle", "identity": [], "eps_bus": -1, "eps_rx_bus": -1,
+                   "eps_tx": "", "eps_rx": "", "elm327_param": -1, "semantic_path": ""},
+      "can": {"status": "idle", "control_ready": False, "sync_count": 0, "protected_count": 0},
+      "dataflash": {"status": "idle", "ready": False, "bytes": 0, "total": 32768},
+      "programming": {"status": "idle"},
+    }
+
+    def projected(snapshots, installed=False):
+      with patch("tsk.web.server.operation_states_snapshot", return_value=snapshots), \
+           patch("tsk.web.server.RebootManager.key_status_payload",
+                 return_value={"installed": installed, "key": "00" * 16 if installed else None}), \
+           patch("tsk.web.server.get_reboot_actions_payload", return_value={}):
+        return dashboard_payload()
+
+    self.assertEqual(projected(base)["recovery"]["stage"], "identify")
+
+    mapped = {**base, "identity": {
+      "status": "mapped", "identity": [{"name": "app_sw_id", "hex": "31", "ascii": "8965F1208000"}],
+      "eps_bus": 1, "eps_rx_bus": 1, "eps_tx": "0x7a1", "eps_rx": "0x7a9",
+      "elm327_param": 1, "semantic_path": "normal-harness",
+    }}
+    self.assertEqual(projected(mapped)["recovery"]["stage"], "capture_can")
+
+    captured = {**mapped, "can": {
+      "status": "complete", "control_ready": True, "sync_count": 50, "protected_count": 300,
+    }}
+    self.assertEqual(projected(captured)["recovery"]["stage"], "programming")
+
+    handoff = {**captured, "programming": {"status": "entered"}}
+    self.assertEqual(projected(handoff)["recovery"]["stage"], "dataflash")
+
+    known = {**captured, "identity": {
+      **mapped["identity"],
+      "identity": [{"name": "app_sw_id", "hex": "31", "ascii": "8965B4509100"}],
+    }}
+    known_projection = projected(known)
+    self.assertTrue(known_projection["vehicle"]["known_transfer"])
+    self.assertEqual(known_projection["recovery"]["stage"], "dataflash")
+
+    blocked = {**captured, "programming": {"status": "blocked", "message": "handoff blocked"}}
+    blocked_projection = projected(blocked)
+    self.assertEqual(blocked_projection["recovery"]["stage"], "programming")
+    self.assertEqual(blocked_projection["recovery"]["next_action"]["action"], "research")
+
+    dumped = {**handoff, "dataflash": {
+      "status": "complete", "ready": True, "bytes": 32768, "total": 32768,
+    }}
+    self.assertEqual(projected(dumped)["recovery"]["stage"], "verify")
+
+    complete = projected(base, installed=True)
+    self.assertEqual(complete["recovery"]["stage"], "complete")
+    self.assertTrue(all(step["state"] == "complete" for step in complete["recovery"]["steps"]))
 
   def test_operation_vehicle_state_annotations(self):
     self.assertIn("READY", expected_vehicle_state("/api/ready-capture"))
