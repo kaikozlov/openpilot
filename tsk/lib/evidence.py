@@ -10,7 +10,9 @@ from datetime import datetime, UTC
 from pathlib import Path
 from uuid import uuid4
 
-from tsk.lib.env import CACHE_DIR, DATAFLASH_PAYLOAD_PATH, OPENPILOT_DIR, PAYLOAD_PATH
+from tsk.lib.env import (
+  CACHE_DIR, DATAFLASH_AUTORESET_PAYLOAD_PATH, DATAFLASH_PAYLOAD_PATH, OPENPILOT_DIR, PAYLOAD_PATH,
+)
 
 EVIDENCE_ROOT = Path(CACHE_DIR) / "tsk"
 BUNDLE_DIR = EVIDENCE_ROOT / "evidence"
@@ -77,7 +79,8 @@ def _candidate_files() -> list[Path]:
 def build_manifest(operation_states: dict | None = None) -> dict:
   payloads = []
   for label, raw_path in (("ram_dump_payload", PAYLOAD_PATH),
-                          ("dataflash_dump_payload", DATAFLASH_PAYLOAD_PATH)):
+                          ("dataflash_dump_payload", DATAFLASH_PAYLOAD_PATH),
+                          ("dataflash_autoreset_payload", DATAFLASH_AUTORESET_PAYLOAD_PATH)):
     path = Path(raw_path)
     payloads.append({
       "name": label,

@@ -17,6 +17,7 @@ reset can't hide. The EPS bus is found by the same software sweep the other tool
 """
 import time
 
+from tsk.lib.diagnostic_route import discover_eps_route_with_routing, route_fields
 from tsk.lib.env import is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.dump_dataflash import ADDR
@@ -48,7 +49,6 @@ def probe_level3(progress_cb=None) -> dict:
   cb = progress_cb or _noop
 
   from opendbc.car.isotp import isotp_send
-  from opendbc.car.structs import CarParams
   from opendbc.car.uds import UdsClient, SESSION_TYPE, \
     InvalidServiceIdError, MessageTimeoutError, NegativeResponseError
   try:
@@ -72,7 +72,6 @@ def probe_level3(progress_cb=None) -> dict:
 
   try:
     panda = TSKExtractor._connect_panda()
-    panda.set_safety_mode(CarParams.SafetyModel.elm327)
     try:
       ver = panda.get_version()
       result["panda"] = ver.decode(errors="replace") if isinstance(ver, (bytes, bytearray)) else str(ver)
@@ -82,25 +81,17 @@ def probe_level3(progress_cb=None) -> dict:
     result["message"] = f"Connect failed: {type(e).__name__}: {e}"
     return result
 
-  def mk(bus, timeout):
-    return UdsClient(panda, ADDR, ADDR + 8, bus, timeout=timeout, response_pending_timeout=timeout)
-
-  # Software bus sweep: first candidate that answers a default-session request.
-  eps_bus = None
-  for cand in CANDIDATE_BUSES:
-    try:
-      mk(cand, 0.3).diagnostic_session_control(SESSION_TYPE.DEFAULT)
-      eps_bus = cand
-      break
-    except NegativeResponseError:
-      eps_bus = cand
-      break
-    except Exception:
-      continue
-  result["eps_bus"] = eps_bus if eps_bus is not None else -1
-  if eps_bus is None:
-    result.update(status="unreachable", message="EPS did not answer on bus 0, 1, or 2 in this car state.")
+  route = discover_eps_route_with_routing(panda, CANDIDATE_BUSES, preferred_tx=ADDR)
+  if route is None:
+    result.update(status="unreachable",
+                  message="EPS did not answer under normal-harness or OBD routing.")
     return result
+  result.update(**route_fields(route))
+  eps_bus = route["tx_bus"]
+
+  def mk(bus, timeout):
+    return UdsClient(panda, route["tx"], route["rx"], bus,
+                     timeout=timeout, response_pending_timeout=timeout)
 
   def enter(u, session):
     try:
@@ -163,7 +154,7 @@ def probe_level3(progress_cb=None) -> dict:
     # Fire-and-forget PROGRAMMING (never waits, never switches this client). If a prior
     # programming attempt is what unlocks 0x03, this reproduces it.
     try:
-      isotp_send(panda, PROGRAMMING_REQUEST, ADDR, bus=eps_bus)
+      isotp_send(panda, PROGRAMMING_REQUEST, route["tx"], bus=eps_bus)
     except Exception:
       pass
     time.sleep(0.3)

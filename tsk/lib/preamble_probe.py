@@ -22,7 +22,7 @@ Blocks, in order:
                    measured. A seed rules out a persistent lock; 0x36/0x37 means locked
                    and the run stops there. Also takes the 0x01 baseline (expect 0x7e)
                    that block D compares against.
-  C. surface     — the services Willem's exploit needs, by refusal code only: DIDs
+  C. surface     — the known 8965B4x bootloader payload path, by refusal code only: DIDs
                    0x201/0x202/0x203 read, RoutineControl REQUEST_RESULTS on 0x10f0,
                    RequestDownload to RAM, and whether 0x85 / 0x28 are accepted at all.
                    0x7f (not in this session) means the service exists and is gated;
@@ -30,8 +30,8 @@ Blocks, in order:
                    EPS even with PROGRAMMING open. Then the DTC snapshot.
   D. preamble    — five PROGRAMMING entries, each from a fresh DEFAULT -> EXTENDED, each
                    followed by an 0xF186 session read AND a 0x01 REQUEST_SEED retry. If
-                   0x01 ever hands out a seed, Willem's secret becomes testable at the
-                   level it actually belongs to (0x01/0x02) — that is the run's best
+                   0x01 ever hands out a seed, the known 8965B4x bootloader 0x01/0x02
+                   SecurityAccess derivation becomes testable — that is the run's best
                    possible outcome and it costs no counted attempt to detect.
   E. dtc diff    — a second snapshot, diffed. A fresh code names the unmet condition; an
                    empty diff alongside bus silence points at a lower-layer drop
@@ -51,6 +51,7 @@ is_agnos-gated; the server mocks it off-device.
 """
 import time
 
+from tsk.lib.diagnostic_route import SIENNA_FUNCTIONAL_ADDR, discover_eps_route_with_routing, route_fields
 from tsk.lib.env import is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.dump_dataflash import ADDR, DUMP_START, KNOWN_KEY_OFFSET
@@ -60,11 +61,11 @@ SHORT_TIMEOUT = 1.0
 LONG_TIMEOUT = 3.0
 PATIENT_TIMEOUT = 6.0     # one variant waits longer, in case PROGRAMMING reboots into a
                           # bootloader that needs time before it answers
-FUNCTIONAL_ADDR = 0x7DF
+FUNCTIONAL_ADDR = SIENNA_FUNCTIONAL_ADDR  # firmware-verified on 8965B4512000
 ACTIVE_SESSION_DID = 0xF186
 SEED_DATA = b"\x00" * 16
 
-SEED_LEVEL_WILLEM = 0x01  # the level Willem's Sienna secret belongs to (gated behind PROGRAMMING)
+SEED_LEVEL_BOOT = 0x01    # known 8965B4x bootloader SecurityAccess request-seed level
 SEED_LEVEL_EXT = 0x03     # the level the Corolla hands out in EXTENDED
 
 # Raw requests we send outside UdsClient, where we do not want its response handling.
@@ -72,7 +73,7 @@ PROGRAMMING_REQUEST = b"\x10\x02"
 PROGRAMMING_SUPPRESS = b"\x10\x82"          # suppressPosRsp — we read 0xF186 instead of waiting
 COMM_CONTROL_DISABLE_TX = b"\x28\x01\x01"   # ENABLE_RX_DISABLE_TX, NORMAL message type
 
-# Willem's exploit surface, probed by refusal code only — no writes, no transfers.
+# Known 8965B4x authenticated payload surface, probed by refusal code only — no writes or transfers.
 EXPLOIT_DIDS = [(0x201, "did_201_key"), (0x202, "did_202_iv"), (0x203, "did_203_state")]
 VERIFY_ROUTINE = 0x10F0
 PAYLOAD_RAM_ADDR = 0xFEBF0000
@@ -123,7 +124,6 @@ def probe_preamble(progress_cb=None) -> dict:
   cb = progress_cb or _noop
 
   from opendbc.car.isotp import isotp_send
-  from opendbc.car.structs import CarParams
   from opendbc.car.uds import UdsClient, SESSION_TYPE, ROUTINE_CONTROL_TYPE, \
     DTC_REPORT_TYPE, DTC_SETTING_TYPE, CONTROL_TYPE, MESSAGE_TYPE, \
     InvalidServiceIdError, MessageTimeoutError, NegativeResponseError
@@ -165,7 +165,6 @@ def probe_preamble(progress_cb=None) -> dict:
 
   try:
     panda = TSKExtractor._connect_panda()
-    panda.set_safety_mode(CarParams.SafetyModel.elm327)
     try:
       ver = panda.get_version()
       result["panda"] = ver.decode(errors="replace") if isinstance(ver, (bytes, bytearray)) else str(ver)
@@ -175,27 +174,18 @@ def probe_preamble(progress_cb=None) -> dict:
     result["message"] = f"Connect failed: {type(e).__name__}: {e}"
     return result
 
-  def mk(bus, timeout):
-    return UdsClient(panda, ADDR, ADDR + 8, bus, timeout=timeout, response_pending_timeout=timeout)
-
   # ---- Block A: baseline -----------------------------------------------------------
-  eps_bus = None
-  for cand in CANDIDATE_BUSES:
-    try:
-      mk(cand, 0.3).diagnostic_session_control(SESSION_TYPE.DEFAULT)
-      eps_bus = cand
-      break
-    except NegativeResponseError:
-      eps_bus = cand   # a negative response still means the EPS is on this bus
-      break
-    except Exception:
-      continue
-  result["eps_bus"] = eps_bus if eps_bus is not None else -1
-  if eps_bus is None:
+  route = discover_eps_route_with_routing(panda, CANDIDATE_BUSES, preferred_tx=ADDR)
+  if route is None or route["tx_bus"] != route["rx_bus"]:
     result.update(status="unreachable",
-                  message="EPS did not answer on bus 0, 1, or 2. Re-enter Not Ready to Drive "
-                          "and re-run.")
+                  message="No same-bus EPS route answered under normal-harness or OBD routing.")
     return result
+  result.update(**route_fields(route))
+  eps_bus = route["tx_bus"]
+
+  def mk(bus, timeout):
+    return UdsClient(panda, route["tx"], route["rx"], bus,
+                     timeout=timeout, response_pending_timeout=timeout)
 
   def extended(u):
     try:
@@ -265,7 +255,7 @@ def probe_preamble(progress_cb=None) -> dict:
       return result
 
     try:
-      seed = bytes(u.security_access(SEED_LEVEL_WILLEM, data_record=SEED_DATA))
+      seed = bytes(u.security_access(SEED_LEVEL_BOOT, data_record=SEED_DATA))
       lock["seed_01_baseline"] = f"seed {seed.hex()}"
     except Exception as e:
       lock["seed_01_baseline"] = describe(e)
@@ -344,7 +334,7 @@ def probe_preamble(progress_cb=None) -> dict:
         v["programming"] = describe(e)
       v["session_after"] = read_session(mk(eps_bus, LONG_TIMEOUT))
       try:
-        seed = bytes(mk(eps_bus, LONG_TIMEOUT).security_access(SEED_LEVEL_WILLEM,
+        seed = bytes(mk(eps_bus, LONG_TIMEOUT).security_access(SEED_LEVEL_BOOT,
                                                                data_record=SEED_DATA))
         v["seed_01_after"] = f"seed {seed.hex()}"
         v["opened"] = True
@@ -391,7 +381,7 @@ def probe_preamble(progress_cb=None) -> dict:
     def v_suppress(uu, v):
       dtc_off(uu, v)
       comm_off(uu, v)
-      isotp_send(panda, PROGRAMMING_SUPPRESS, ADDR, bus=eps_bus)
+      isotp_send(panda, PROGRAMMING_SUPPRESS, route["tx"], bus=eps_bus)
       v["steps"].append({"step": "raw 10 82 (suppressPosRsp)", "detail": "sent, no response expected"})
       time.sleep(0.5)
       return "sent (suppressed) — see session read"
@@ -400,9 +390,9 @@ def probe_preamble(progress_cb=None) -> dict:
       dtc_off(uu, v)
       try:
         isotp_send(panda, COMM_CONTROL_DISABLE_TX, FUNCTIONAL_ADDR, bus=eps_bus)
-        v["steps"].append({"step": "functional 0x28 -> 0x7df", "detail": "sent"})
+        v["steps"].append({"step": "functional 0x28 -> 0x777", "detail": "sent"})
       except Exception as e:
-        v["steps"].append({"step": "functional 0x28 -> 0x7df", "detail": describe(e)})
+        v["steps"].append({"step": "functional 0x28 -> 0x777", "detail": describe(e)})
       time.sleep(0.5)
       return programming(uu)
 
@@ -477,7 +467,7 @@ def probe_preamble(progress_cb=None) -> dict:
     names = ", ".join(v["name"] for v in opened)
     result.update(status="security_open",
                   message=("SECURITY LEVEL 0x01 OPENED after: " + names + ". This is the level "
-                           "Willem's Sienna secret belongs to — it is now testable directly. "
+                           "the known 8965B4x bootloader SecurityAccess derivation uses — it is now testable directly. "
                            "Export the evidence bundle before running anything "
                            "else."))
   elif entered:

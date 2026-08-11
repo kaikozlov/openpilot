@@ -69,6 +69,21 @@
       .terminal .ok { color: #30d158; }
       .terminal .warn { color: #ff9f0a; }
       .terminal .dim { color: #8e8e93; }
+
+      .controls {
+        margin: 0 16px 12px;
+        background: #fff;
+        border-radius: 12px;
+        padding: 14px 16px;
+        font-size: 14px;
+        line-height: 1.4;
+      }
+
+      .controls label { display: block; margin-bottom: 12px; }
+      .controls button {
+        width: 100%; padding: 12px; border: 0; border-radius: 10px;
+        font-size: 16px; font-weight: 600; background: #007aff; color: white;
+      }
     </style>
   </head>
   <body>
@@ -79,11 +94,20 @@
       <header class="page-header">
         <div class="page-title">DataFlash Dump</div>
       </header>
+      <div class="controls">
+        <label>
+          <input type="checkbox" id="recoveryPayload">
+          Experimental auto-reset payload after a complete dump. This is a locally re-authenticated derivative of the statically recovered reset-ending body; the raw external candidate is never sent. Not yet vehicle-confirmed.
+        </label>
+        <button id="startBtn" type="button">Start dump</button>
+      </div>
       <div class="terminal" id="terminal"></div>
     </main>
 
     <script>
       const terminal = document.getElementById("terminal");
+      const startBtn = document.getElementById("startBtn");
+      const recoveryPayload = document.getElementById("recoveryPayload");
 
       function termWrite(text, className) {
         const span = document.createElement("span");
@@ -115,7 +139,7 @@
           termWrite("Dump complete.", "ok");
         } else if (s.status === "partial") {
           termWrite(s.message || "Partial dump. Try Find, or dump again.", "warn");
-        } else if (s.status === "key_missed") {
+        } else if (s.status === "unusable_partial") {
           termWrite(s.message || "Partial dump. Not enough data. Dump again.", "err");
         } else {
           termWrite(s.message || "Dump failed.", "err");
@@ -125,7 +149,7 @@
       async function runDump() {
         // Attach to an in-progress dump, or short-circuit a finished one, before
         // starting a fresh dump. Revisiting the page after a complete dump does
-        // not re-dump; revisiting after partial/key_missed/failed retries.
+        // not re-dump; revisiting after partial/unusable_partial/failed retries.
         let s = null;
         try {
           s = await getStatus();
@@ -140,9 +164,17 @@
           termWrite("A dump is already in progress — attaching...");
         } else {
           termWrite("Starting DataFlash dump.");
-          termWrite("The car will freak out - don't worry.", "warn");
+          termWrite("The EPS may reset during the dump; preserve the evidence bundle before another active experiment.", "warn");
           try {
-            const response = await fetch("/api/dataflash-dump", { method: "POST", cache: "no-store" });
+            const useRecoveryPayload = recoveryPayload.checked;
+            termWrite("Payload: " + (useRecoveryPayload ? "experimental auto-reset" : "standard"),
+                      useRecoveryPayload ? "warn" : "dim");
+            const response = await fetch("/api/dataflash-dump", {
+              method: "POST",
+              cache: "no-store",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ use_recovery_payload: useRecoveryPayload }),
+            });
             const started = await response.json();
             if (!started.ok && started.status !== "running") {
               termWrite(started.message || "Could not start dump.", "err");
@@ -175,7 +207,16 @@
         }
       }
 
-      runDump();
+      startBtn.addEventListener("click", async () => {
+        startBtn.disabled = true;
+        recoveryPayload.disabled = true;
+        try {
+          await runDump();
+        } finally {
+          startBtn.disabled = false;
+          recoveryPayload.disabled = false;
+        }
+      });
     </script>
   </body>
 </html>

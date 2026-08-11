@@ -2,7 +2,7 @@
 """ReadMemoryByAddress (UDS 0x23) probe: ask the EPS to read its own DataFlash
 directly — no programming session, no exploit.
 
-The whole Willem dump exists because normal reads are blocked on the Sienna EPS: the
+The authenticated RAM/DataFlash dump path exists because normal reads are blocked on the Sienna EPS: the
 shellcode blasts memory out as CAN frames precisely because 0x23 is denied there. But
 the Corolla EPS (8965F1208000) is a different firmware family with an unmapped service
 surface, so it costs one read to check whether 0x23 is open here. If it is, the key
@@ -15,6 +15,7 @@ Shares the panda-takeover preamble and the EPS-bus sweep with the other diagnost
 import subprocess
 import time
 
+from tsk.lib.diagnostic_route import discover_eps_route_with_routing, route_fields
 from tsk.lib.env import is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.dump_dataflash import ADDR, DUMP_START, KNOWN_KEY_OFFSET, PAYLOAD_LOAD_ADDR
@@ -50,7 +51,6 @@ def read_key_region(progress_cb=None) -> dict:
 
   cb = progress_cb or _noop
 
-  from opendbc.car.structs import CarParams
   from opendbc.car.uds import UdsClient, SESSION_TYPE, \
     InvalidServiceIdError, MessageTimeoutError, NegativeResponseError
   try:
@@ -71,7 +71,6 @@ def read_key_region(progress_cb=None) -> dict:
 
   try:
     panda = TSKExtractor._connect_panda()
-    panda.set_safety_mode(CarParams.SafetyModel.elm327)
     try:
       ver = panda.get_version()
       result["panda"] = ver.decode(errors="replace") if isinstance(ver, (bytes, bytearray)) else str(ver)
@@ -81,27 +80,16 @@ def read_key_region(progress_cb=None) -> dict:
     result["message"] = f"Connect failed: {type(e).__name__}: {e}"
     return result
 
-  def mk(bus):
-    return UdsClient(panda, ADDR, ADDR + 8, bus, timeout=READ_TIMEOUT, response_pending_timeout=READ_TIMEOUT)
-
-  # Find the EPS bus: first candidate that answers a default-session request. A
-  # negative response still means the EPS is on that bus and talking.
-  eps_bus = None
-  for cand in CANDIDATE_BUSES:
-    try:
-      UdsClient(panda, ADDR, ADDR + 8, cand, timeout=0.3, response_pending_timeout=0.3) \
-        .diagnostic_session_control(SESSION_TYPE.DEFAULT)
-      eps_bus = cand
-      break
-    except NegativeResponseError:
-      eps_bus = cand
-      break
-    except Exception:
-      continue
-  result["eps_bus"] = eps_bus if eps_bus is not None else -1
-  if eps_bus is None:
-    result.update(status="unreachable", message="EPS did not answer on bus 0, 1, or 2 in this car state.")
+  route = discover_eps_route_with_routing(panda, CANDIDATE_BUSES, preferred_tx=ADDR)
+  if route is None or route["tx_bus"] != route["rx_bus"]:
+    result.update(status="unreachable", message="No same-bus EPS route answered under normal-harness or OBD routing.")
     return result
+  result.update(**route_fields(route))
+  eps_bus = route["tx_bus"]
+
+  def mk(bus):
+    return UdsClient(panda, route["tx"], route["rx"], bus,
+                     timeout=READ_TIMEOUT, response_pending_timeout=READ_TIMEOUT)
 
   def do_read(name, session_name, session, addr, size):
     u = mk(eps_bus)

@@ -1,42 +1,38 @@
 #!/usr/bin/env python3
-"""Send-key test at security level 0x03/0x04 using the Willem secret.
+"""Application SecurityAccess 0x03/0x04 comparison probe.
 
-The Corolla EPS (8965F1208000) returns a level-0x03 seed in the extended session. This
-sends the level-0x04 key computed with Willem's Sienna secret to answer one question:
-does the Corolla share the Sienna's seed->key secret?
+The analyzed Sienna EPS 8965B4512000 has two independent SecurityAccess domains:
 
-  accepted  -> yes; security opens in extended with no programming session. The probe then
-               retries the 0x23 read at the key region / dataflash base to see whether the
-               read range opens once security is passed.
-  NRC 0x35  -> no (invalid key); the Corolla uses a different secret and the firmware-dump
-               path is needed to recover it.
-  NRC 0x36/0x37 -> the EPS locked security out (too many attempts / time delay) — power-
-               cycle before retrying.
+* bootloader 0x01/0x02 -> ``TSKExtractor.BOOT_SA_SECRET`` (f05f...)
+* application 0x03/0x04 -> ``TSKExtractor.APPLICATION_03_04_SA_SECRET_8965B4512000``
 
-The key math is Willem's, byte-for-byte the same as extractor.hack():
-  derived  = AES-ECB-decrypt(SECRET, 16 zero bytes)
-  response = AES-ECB-encrypt(derived, seed)
+Older TSKM code incorrectly sent the bootloader 0x01/0x02 secret against an
+application 0x03/0x04 challenge, making the resulting NRC 0x35 uninformative.
+This probe uses the correct application-domain secret.
 
-ONE key is sent per run — a wrong key can increment the EPS lockout counter, so the page
-is tap-to-run (not auto-run) and warns to run it once. The EPS bus is found by the same
-software sweep the other tools use (no pin swap). is_agnos-gated; server mocks it off-device.
+A wrong SEND_KEY is a counted attempt. The probe therefore refuses to send it on a
+cross-calibration target unless ``allow_cross_calibration=True`` is explicitly armed.
 """
+from __future__ import annotations
+
+import subprocess
 import time
 
-from tsk.lib.env import is_agnos
-from tsk.lib.extractor import NotAGNOSError, TSKExtractor
+from tsk.lib.diagnostic_route import (
+  AmbiguousDiagnosticRouteError, discover_eps_route_with_routing, route_fields,
+)
 from tsk.lib.dump_dataflash import ADDR, DUMP_START, KNOWN_KEY_OFFSET
 from tsk.lib.dump_diag import CANDIDATE_BUSES
+from tsk.lib.env import is_agnos
+from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 
 LONG_TIMEOUT = 3.0
-SEED_LEVEL = 0x03    # REQUEST_SEED sub-function (odd)
-KEY_LEVEL = 0x04     # SEND_KEY sub-function (even) for the same 0x03/0x04 pair
+SEED_LEVEL = 0x03
+KEY_LEVEL = 0x04
 SEED_DATA = b"\x00" * 16
+ANALYZED_APPLICATION_ID = b"8965B4512000"
 
-# Post-unlock read targets: the Sienna key region and the dataflash base. These are the
-# Sienna addresses (out-of-range for the Corolla before security); the point is to see
-# whether passing security widens what 0x23 will read.
-KEY_REGION = DUMP_START + KNOWN_KEY_OFFSET   # 0xFF206E14
+KEY_REGION = DUMP_START + KNOWN_KEY_OFFSET
 READ_TARGETS = [("key region", KEY_REGION), ("dataflash base", DUMP_START)]
 
 
@@ -44,18 +40,15 @@ def _noop(**kwargs) -> None:
   pass
 
 
-def send_willem_key(progress_cb=None) -> dict:
-  """Request the 0x03 seed, compute the Willem key, send it at 0x04. Returns:
-    {status, panda, eps_bus, session, seed, key, send_key, post_unlock_reads[], message}
-  status is:
-    "unlocked"    — the key was accepted; security is open in extended;
-    "invalid_key" — NRC 0x35, the secret differs;
-    "locked"      — NRC 0x36/0x37, security locked out;
-    "denied"      — NRC 0x33;
-    "rejected"    — some other NRC (e.g. 0x22/0x24) — reported, no secret claim;
-    "no_seed"     — the seed request itself was refused;
-    "unreachable" | "failed".
-  Raises NotAGNOSError off-device.
+def _ascii(data: bytes) -> str:
+  return "".join(chr(c) if 32 <= c < 127 else "." for c in data)
+
+
+def send_sienna_application_key(progress_cb=None, *, allow_cross_calibration: bool = False) -> dict:
+  """Test the 8965B4512000 application 0x03/0x04 key derivation once.
+
+  Cross-calibration SEND_KEY requires explicit arming. Merely discovering the route,
+  reading F181, entering EXTENDED, and requesting a seed are not counted-key writes.
   """
   if not is_agnos():
     raise NotAGNOSError
@@ -63,9 +56,7 @@ def send_willem_key(progress_cb=None) -> dict:
   cb = progress_cb or _noop
 
   from Crypto.Cipher import AES
-  from opendbc.car.structs import CarParams
-  from opendbc.car.uds import UdsClient, SESSION_TYPE, \
-    InvalidServiceIdError, MessageTimeoutError, NegativeResponseError
+  from opendbc.car.uds import UdsClient, SESSION_TYPE, InvalidServiceIdError, MessageTimeoutError, NegativeResponseError
   try:
     from opendbc.car.uds import _negative_response_codes as NRC_TABLE
   except Exception:
@@ -75,19 +66,19 @@ def send_willem_key(progress_cb=None) -> dict:
   result = {
     "status": "failed", "panda": "", "eps_bus": -1, "session": "", "seed": "",
     "key": "", "send_key": "", "post_unlock_reads": reads, "message": "",
+    "target_f181": "", "target_f181_hex": "", "cross_calibration": False,
+    "armed": bool(allow_cross_calibration),
   }
 
   def nrc(code) -> str:
     return f"NRC 0x{code:02x} {NRC_TABLE.get(code, 'unknown')}"
 
-  import subprocess
   subprocess.run(["pkill", "-9", "-f", "manager.py"], check=False)
   subprocess.run(["pkill", "-9", "-f", "pandad"], check=False)
   time.sleep(2)
 
   try:
     panda = TSKExtractor._connect_panda()
-    panda.set_safety_mode(CarParams.SafetyModel.elm327)
     try:
       ver = panda.get_version()
       result["panda"] = ver.decode(errors="replace") if isinstance(ver, (bytes, bytearray)) else str(ver)
@@ -97,29 +88,42 @@ def send_willem_key(progress_cb=None) -> dict:
     result["message"] = f"Connect failed: {type(e).__name__}: {e}"
     return result
 
-  def mk(bus, timeout):
-    return UdsClient(panda, ADDR, ADDR + 8, bus, timeout=timeout, response_pending_timeout=timeout)
+  try:
+    route = discover_eps_route_with_routing(panda, CANDIDATE_BUSES, preferred_tx=ADDR)
+  except AmbiguousDiagnosticRouteError as e:
+    result.update(status="failed", message=f"Ambiguous EPS diagnostic route: {e}")
+    return result
+  if route is None or route["tx_bus"] != route["rx_bus"]:
+    result.update(status="unreachable", message="No same-bus EPS route was identified.")
+    return result
+  result.update(**route_fields(route))
+  eps_bus = route["tx_bus"]
 
-  # Software bus sweep.
-  eps_bus = None
-  for cand in CANDIDATE_BUSES:
-    try:
-      mk(cand, 0.3).diagnostic_session_control(SESSION_TYPE.DEFAULT)
-      eps_bus = cand
-      break
-    except NegativeResponseError:
-      eps_bus = cand
-      break
-    except Exception:
-      continue
-  result["eps_bus"] = eps_bus if eps_bus is not None else -1
-  if eps_bus is None:
-    result.update(status="unreachable", message="EPS did not answer on bus 0, 1, or 2 in this car state.")
+  def mk(timeout=LONG_TIMEOUT):
+    return UdsClient(panda, route["tx"], route["rx"], eps_bus,
+                     timeout=timeout, response_pending_timeout=timeout)
+
+  # Identify the exact calibration before any counted key attempt.
+  try:
+    identity = bytes(mk(0.6).read_data_by_identifier(0xF181))
+  except Exception as e:
+    result.update(status="failed", message=f"Could not read F181 before SecurityAccess: {type(e).__name__}.")
+    return result
+  result["target_f181_hex"] = identity.hex()
+  result["target_f181"] = _ascii(identity)
+  exact_analyzed_target = ANALYZED_APPLICATION_ID in identity
+  result["cross_calibration"] = not exact_analyzed_target
+  cb(step="identity", last=result["target_f181"])
+
+  if not exact_analyzed_target and not allow_cross_calibration:
+    result.update(
+      status="armed_required",
+      message=("Target is not the analyzed 8965B4512000 calibration. No SEND_KEY was sent. " +
+               "Explicitly arm the cross-calibration comparison to spend one counted 0x03/0x04 key attempt."),
+    )
     return result
 
-  u = mk(eps_bus, LONG_TIMEOUT)
-
-  # Enter EXTENDED (where the 0x03 seed is available).
+  u = mk()
   try:
     u.diagnostic_session_control(SESSION_TYPE.EXTENDED_DIAGNOSTIC)
     result["session"] = "extended"
@@ -129,37 +133,31 @@ def send_willem_key(progress_cb=None) -> dict:
     result["session"] = type(e).__name__
   cb(step="extended", last="extended session")
 
-  # Request the 0x03 seed.
   try:
     seed = bytes(u.security_access(SEED_LEVEL, data_record=SEED_DATA))
     result["seed"] = seed.hex()
   except NegativeResponseError as e:
-    result.update(status="no_seed", message=f"Seed request at 0x03 refused: {nrc(e.error_code)}. "
-                  "Re-enter Not Ready to Drive, re-run, and export the evidence bundle.")
+    result.update(status="no_seed", message=f"Application seed request at 0x03 refused: {nrc(e.error_code)}.")
     return result
   except Exception as e:
-    result.update(status="no_seed", message=f"Seed request at 0x03 failed: {type(e).__name__}. "
-                  "Re-enter Not Ready to Drive, re-run, and export the evidence bundle.")
+    result.update(status="no_seed", message=f"Application seed request at 0x03 failed: {type(e).__name__}.")
     return result
   cb(step="seed", last=f"seed {result['seed'][:16]}")
 
   if len(seed) != 16:
-    result.update(status="failed",
-                  message=f"Seed is {len(seed)} bytes, expected 16 — can't compute the AES key. "
-                  "Export the evidence bundle before continuing.")
+    result.update(status="failed", message=f"Seed is {len(seed)} bytes, expected 16.")
     return result
 
-  # Willem seed->key (identical to extractor.hack()).
   try:
-    derived = AES.new(TSKExtractor.SEED_KEY_SECRET, AES.MODE_ECB).decrypt(SEED_DATA)
-    response = AES.new(derived, AES.MODE_ECB).encrypt(seed)
+    intermediate = AES.new(TSKExtractor.APPLICATION_03_04_SA_SECRET_8965B4512000,
+                           AES.MODE_ECB).decrypt(SEED_DATA)
+    response = AES.new(intermediate, AES.MODE_ECB).encrypt(seed)
     result["key"] = response.hex()
   except Exception as e:
     result.update(status="failed", message=f"Key computation failed: {type(e).__name__}.")
     return result
-  cb(step="key", last="computed Willem key")
+  cb(step="key", last="computed 8965B4512000 application 03/04 key")
 
-  # Send the key ONCE.
   try:
     u.security_access(KEY_LEVEL, security_key=response)
     result["send_key"] = "accepted"
@@ -173,9 +171,6 @@ def send_willem_key(progress_cb=None) -> dict:
     elif e.error_code == 0x33:
       result["status"] = "denied"
     else:
-      # An NRC that isn't a clean invalid-key / lockout / denial (e.g. 0x22
-      # conditionsNotCorrect, 0x24 requestSequenceError). Report it without
-      # claiming the secret differs — that would misdirect to the firmware dump.
       result["status"] = "rejected"
   except (InvalidServiceIdError, MessageTimeoutError) as e:
     result["send_key"] = f"{type(e).__name__}" + (f": {e}" if str(e) else "")
@@ -185,7 +180,6 @@ def send_willem_key(progress_cb=None) -> dict:
     result["status"] = "failed"
   cb(step="send_key", last=f"send_key {result['send_key']}")
 
-  # If unlocked, see whether 0x23 opens up now that security passed.
   if result["status"] == "unlocked":
     for name, addr in READ_TARGETS:
       entry = {"name": name, "address": f"0x{addr:08x}", "size": 16}
@@ -200,24 +194,16 @@ def send_willem_key(progress_cb=None) -> dict:
       cb(step="read", last=name)
 
   if result["status"] == "unlocked":
-    opened = [r for r in reads if r.get("ok")]
-    if opened:
-      result["message"] = ("Known Sienna key derivation ACCEPTED at level 0x03/0x04, and 0x23 "
-                           f"now reads {len(opened)} of {len(reads)} target(s). Export the evidence bundle.")
-    else:
-      result["message"] = ("Known Sienna key derivation ACCEPTED at level 0x03/0x04. Security is "
-                           "open in extended, but 0x23 remains out-of-range at the Sienna addresses. "
-                           "Export the evidence bundle.")
+    result["message"] = ("8965B4512000 application 0x03/0x04 key derivation was accepted. " +
+                         "Export the evidence bundle.")
   elif result["status"] == "invalid_key":
-    result["message"] = ("Known Sienna key derivation was rejected as invalid. This calibration uses a "
-                         "different secret or algorithm. Export the evidence bundle.")
+    result["message"] = ("The 8965B4512000 application 0x03/0x04 key derivation was rejected as invalid. " +
+                         "For this target/session, the application secret or algorithm differs.")
   elif result["status"] == "locked":
-    result["message"] = ("Security locked out (too many attempts / time delay). Power-cycle the panda / re-enter "
-                         "Not Ready to Drive before trying again. Export the evidence bundle.")
+    result["message"] = ("Application SecurityAccess is locked out (0x36/0x37). Power-cycle/re-enter the " +
+                         "known safe state before another counted attempt.")
   elif result["status"] == "denied":
-    result["message"] = ("Send-key denied (NRC 0x33) — security access is not permitted here in this session/state. "
-                         "Export the evidence bundle.")
+    result["message"] = "Application SEND_KEY was denied with NRC 0x33 in this session/state."
   else:
-    result["message"] = (f"Send-key did not complete cleanly: {result['send_key']}. "
-                         "Export the evidence bundle.")
+    result["message"] = f"Application SEND_KEY did not complete cleanly: {result['send_key']}."
   return result

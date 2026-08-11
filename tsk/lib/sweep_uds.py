@@ -55,7 +55,9 @@ from tsk.lib.env import CACHE_DIR, is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.dump_dataflash import ADDR
 from tsk.lib.dump_diag import CANDIDATE_BUSES
-from tsk.lib.diagnostic_route import discover_eps_route, probe_response_route
+from tsk.lib.diagnostic_route import (
+  discover_eps_route_with_routing, probe_response_route, rediscover_route, route_fields,
+)
 
 SWEEP_DIR = f"{CACHE_DIR}/tsk/uds-sweep"
 SWEEP_PATH = f"{SWEEP_DIR}/uds_sweep.ndjson"
@@ -73,9 +75,9 @@ SUBFUNCTION_RANGE = range(0x100)
 ADDRESS_RANGE = range(0x700, 0x800)
 
 # DID blocks worth a scoped pass. The full 16-bit space is 65536 requests (~16 min) and
-# does not fit the window; these three cover identity, the block Willem's payload upload
+# does not fit the window; these three cover identity, the known bootloader payload-upload block,
 # writes, and the manufacturer-specific range.
-DID_BLOCKS = [(0xF100, 0xF1FF, "identity"), (0x0200, 0x02FF, "willem"),
+DID_BLOCKS = [(0xF100, 0xF1FF, "identity"), (0x0200, 0x02FF, "payload_gate"),
               (0xFD00, 0xFEFF, "manufacturer")]
 
 # Prior Corolla work found these requests silent. They remain visible as hypotheses in
@@ -278,8 +280,6 @@ def sweep(progress_cb=None, budget_seconds: float = DEFAULT_BUDGET, mode: str = 
     "message": "",
   }
 
-  from opendbc.car.structs import CarParams
-
   import subprocess
   subprocess.run(["pkill", "-9", "-f", "manager.py"], check=False)
   subprocess.run(["pkill", "-9", "-f", "pandad"], check=False)
@@ -287,7 +287,6 @@ def sweep(progress_cb=None, budget_seconds: float = DEFAULT_BUDGET, mode: str = 
 
   try:
     panda = TSKExtractor._connect_panda()
-    panda.set_safety_mode(CarParams.SafetyModel.elm327)
     try:
       ver = panda.get_version()
       result["panda"] = ver.decode(errors="replace") if isinstance(ver, (bytes, bytearray)) else str(ver)
@@ -304,7 +303,7 @@ def sweep(progress_cb=None, budget_seconds: float = DEFAULT_BUDGET, mode: str = 
 
   try:
     # --- test the prior Toyota route without assuming its response ID/bus ----------
-    route = discover_eps_route(panda, CANDIDATE_BUSES, preferred_tx=ADDR)
+    route = discover_eps_route_with_routing(panda, CANDIDATE_BUSES, preferred_tx=ADDR)
     if route is None:
       result.update(status="unreachable", message=" ".join((
         "No EPS-like diagnostic responder was identified on bus 0, 1, or 2.",
@@ -315,8 +314,7 @@ def sweep(progress_cb=None, budget_seconds: float = DEFAULT_BUDGET, mode: str = 
     eps_bus = route["tx_bus"]
     eps_rx_bus = route["rx_bus"]
     eps_rx = route["rx"]
-    result.update(eps_tx=f"0x{eps_tx:03x}", eps_bus=eps_bus,
-                  eps_rx_bus=eps_rx_bus, eps_rx=f"0x{eps_rx:03x}")
+    result.update(**route_fields(route))
 
     def ask_eps(payload: bytes, request_timeout: float) -> dict:
       return ask(panda, eps_bus, eps_tx, eps_rx, payload, request_timeout,
@@ -337,22 +335,23 @@ def sweep(progress_cb=None, budget_seconds: float = DEFAULT_BUDGET, mode: str = 
 
     rec.write_event("route", tx=f"0x{eps_tx:03x}", rx=f"0x{eps_rx:03x}",
                     tx_bus=eps_bus, rx_bus=eps_rx_bus, probe_body=route["body"],
-                    source=route.get("source", "unknown"))
+                    source=route.get("source", "unknown"),
+                    elm327_param=route["elm327_param"], semantic_path=route["semantic_path"])
 
     def discover_bus() -> bool:
-      nonlocal eps_tx, eps_bus, eps_rx_bus, eps_rx
-      rediscovered = discover_eps_route(panda, CANDIDATE_BUSES, preferred_tx=eps_tx,
-                                        preferred_timeout=timeout * 4,
-                                        scan_timeout=min(timeout, 0.1))
+      nonlocal route, eps_tx, eps_bus, eps_rx_bus, eps_rx
+      rediscovered = rediscover_route(panda, route, buses=CANDIDATE_BUSES,
+                                      preferred_timeout=timeout * 4,
+                                      scan_timeout=min(timeout, 0.1))
       if rediscovered is None:
         rec.write_event("route_probe", tx=f"0x{eps_tx:03x}", outcome="silent")
         return False
+      route = rediscovered
       eps_tx = rediscovered["tx"]
       eps_bus = rediscovered["tx_bus"]
       eps_rx_bus = rediscovered["rx_bus"]
       eps_rx = rediscovered["rx"]
-      result.update(eps_tx=f"0x{eps_tx:03x}", eps_bus=eps_bus,
-                    eps_rx_bus=eps_rx_bus, eps_rx=f"0x{eps_rx:03x}")
+      result.update(**route_fields(rediscovered))
       rec.write_event("route_probe", tx=f"0x{eps_tx:03x}", rx=f"0x{eps_rx:03x}",
                       tx_bus=eps_bus, rx_bus=eps_rx_bus, outcome="response",
                       raw=rediscovered["body"], ms=rediscovered["ms"])

@@ -12,6 +12,7 @@ CONTINUE_FILE = f"{COMMA_DATA_DIR}/continue.sh"
 OPENPILOT_DIR = f"{COMMA_DATA_DIR}/openpilot"
 PAYLOAD_PATH = str(Path(__file__).parent / "payload.bin")
 DATAFLASH_PAYLOAD_PATH = str(Path(__file__).parent / "payload_dataflash_ff200000_ff208000.bin")
+DATAFLASH_AUTORESET_PAYLOAD_PATH = str(Path(__file__).parent / "payload_dataflash_ff200000_ff208000_autoreset.bin")
 
 # CAN messages and DataFlash dumps live under /cache so they survive reboot but
 # clear on AGNOS update. Off-device they go under ~/comma_data for dry-run testing.

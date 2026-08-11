@@ -19,7 +19,7 @@ from tsk.lib.env import is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.dump_dataflash import ADDR, DUMP_START
 from tsk.lib.dump_diag import CANDIDATE_BUSES
-from tsk.lib.diagnostic_route import discover_eps_route
+from tsk.lib.diagnostic_route import discover_eps_route_with_routing, route_fields
 
 MAP_TIMEOUT = 1.0
 
@@ -66,7 +66,6 @@ def map_surface(progress_cb=None) -> dict:
 
   cb = progress_cb or _noop
 
-  from opendbc.car.structs import CarParams
   from opendbc.car.uds import UdsClient, ACCESS_TYPE, SESSION_TYPE, SERVICE_TYPE, \
     InvalidServiceIdError, MessageTimeoutError, NegativeResponseError
   try:
@@ -89,7 +88,6 @@ def map_surface(progress_cb=None) -> dict:
 
   try:
     panda = TSKExtractor._connect_panda()
-    panda.set_safety_mode(CarParams.SafetyModel.elm327)
     try:
       ver = panda.get_version()
       result["panda"] = ver.decode(errors="replace") if isinstance(ver, (bytes, bytearray)) else str(ver)
@@ -99,14 +97,13 @@ def map_surface(progress_cb=None) -> dict:
     result["message"] = f"Connect failed: {type(e).__name__}: {e}"
     return result
 
-  route = discover_eps_route(panda, CANDIDATE_BUSES, preferred_tx=ADDR)
+  route = discover_eps_route_with_routing(panda, CANDIDATE_BUSES, preferred_tx=ADDR)
   if route is None:
     result.update(status="unreachable",
                   message="No diagnostic responder was identified on buses 0, 1, or 2.")
     return result
   eps_bus = route["tx_bus"]
-  result.update(eps_bus=eps_bus, eps_rx_bus=route["rx_bus"],
-                eps_tx=f"0x{route['tx']:03x}", eps_rx=f"0x{route['rx']:03x}")
+  result.update(**route_fields(route))
   if route["rx_bus"] != eps_bus:
     result.update(status="mapped", message=("A matching diagnostic response was observed on a different "
                                              "bus. The route was recorded; typed UDS reads were skipped."))

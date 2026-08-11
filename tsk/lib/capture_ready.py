@@ -26,7 +26,10 @@ from tsk.lib.env import CACHE_DIR, is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.dump_dataflash import ADDR
 from tsk.lib.dump_diag import CANDIDATE_BUSES
-from tsk.lib.diagnostic_route import discover_eps_route
+from tsk.lib.diagnostic_route import (
+  ELM327_NORMAL_PARAM, configure_elm327, discover_eps_route_with_routing,
+)
+from tsk.lib.secoc_profile import CAPTURE_PROTECTED_HYPOTHESES, SYNC_ADDR
 from tsk.lib.sweep_uds import SWEEP_PATH, ask
 
 CAPTURE_DIR = f"{CACHE_DIR}/tsk/uds-sweep"
@@ -36,8 +39,8 @@ DIFF_PATH = f"{CAPTURE_DIR}/ready_diff.ndjson"
 CAPTURE_SECONDS = 90.0
 TIMEOUT = 0.2
 CONDITION_NRCS = {0x22, 0x7E, 0x7F}
-SYNC_HYPOTHESES = {0x0F}
-PROTECTED_ID_HYPOTHESES = {0x090, 0x0D7, 0x131, 0x132, 0x2E4, 0x344}
+SYNC_HYPOTHESES = {SYNC_ADDR}
+PROTECTED_ID_HYPOTHESES = set(CAPTURE_PROTECTED_HYPOTHESES)
 
 
 def _noop(**kwargs) -> None:
@@ -139,13 +142,11 @@ def build_mode_diff_worklist(path: str = SWEEP_PATH) -> list[tuple[bytes, str]]:
 
 
 def _take_panda():
-  from opendbc.car.structs import CarParams
-
   subprocess.run(["pkill", "-9", "-f", "manager.py"], check=False)
   subprocess.run(["pkill", "-9", "-f", "pandad"], check=False)
   time.sleep(2)
   panda = TSKExtractor._connect_panda()
-  panda.set_safety_mode(CarParams.SafetyModel.elm327)
+  configure_elm327(panda, ELM327_NORMAL_PARAM)
   return panda
 
 
@@ -234,6 +235,8 @@ def capture_ready(progress_cb=None, seconds: float = CAPTURE_SECONDS) -> dict:
     "run_id": run_id,
     "panda": panda_version,
     "eps_bus": -1,
+    "elm327_param": ELM327_NORMAL_PARAM,
+    "semantic_path": "normal-harness",
     "capture": analysis,
     "diff": [],
     "responders": [],
@@ -266,16 +269,18 @@ def run_ready_diff(progress_cb=None, sweep_path: str = SWEEP_PATH) -> dict:
 
   panda = _take_panda()
   panda_version = _panda_version(panda)
-  route = discover_eps_route(panda, CANDIDATE_BUSES, preferred_tx=ADDR)
+  route = discover_eps_route_with_routing(panda, CANDIDATE_BUSES, preferred_tx=ADDR)
   if route is None:
     return {
       "status": "unreachable",
       "mode": "active_diff",
       "panda": panda_version,
       "eps_bus": -1,
+      "elm327_param": -1,
+      "semantic_path": "",
       "diff": [],
       "frames": 0,
-      "message": "The prior EPS route did not answer on buses 0, 1, or 2.",
+      "message": "The prior EPS route did not answer on buses 0, 1, or 2 under normal-harness or OBD routing.",
     }
 
   eps_tx = route["tx"]
@@ -301,6 +306,8 @@ def run_ready_diff(progress_cb=None, sweep_path: str = SWEEP_PATH) -> dict:
       "eps_bus": eps_bus,
       "eps_rx_bus": eps_rx_bus,
       "eps_rx": f"0x{eps_rx:03x}",
+      "elm327_param": route["elm327_param"],
+      "semantic_path": route["semantic_path"],
       "worklist_count": len(worklist),
     })
     for payload, label in worklist:
@@ -360,6 +367,8 @@ def run_ready_diff(progress_cb=None, sweep_path: str = SWEEP_PATH) -> dict:
     "eps_bus": eps_bus,
     "eps_rx_bus": eps_rx_bus,
     "eps_rx": f"0x{eps_rx:03x}",
+    "elm327_param": route["elm327_param"],
+    "semantic_path": route["semantic_path"],
     "diff": diff,
     "frames": 0,
     "path": DIFF_PATH,

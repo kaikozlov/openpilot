@@ -15,17 +15,20 @@ import subprocess
 import time
 from collections import Counter
 
+from tsk.lib.diagnostic_route import ELM327_NORMAL_PARAM, configure_elm327
 from tsk.lib.env import is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
+from tsk.lib.secoc_profile import CLASSIC_PROTECTED_ADDRS, SYNC_ADDR
 
 SNIFF_SECONDS = 8.0
 KNOWN_BUSES = (0, 1, 2)   # always reported, even at 0 frames, for a fixed summary shape
 MAX_IDS_PER_BUS = 40      # display cap only; full-payload evidence uses capture_ready.py
 
-# SecOC markers highlighted on the result (checked across every bus). Sync 0x0F is
-# the one the matcher can't do without; the three protected IDs are the Sienna's
-# signed set. Order matches the page's display.
-MARKERS = (("sync 0x0F", 0x0F), ("0x2E4", 0x2E4), ("0x131", 0x131), ("0x344", 0x344))
+# SecOC markers highlighted across every bus. The full known classic Toyota family
+# is shown; presence remains an observation, not an ECU-ownership claim.
+MARKERS = ((f"sync 0x{SYNC_ADDR:03X}", SYNC_ADDR),) + tuple(
+  (f"0x{addr:03X}", addr) for addr in sorted(CLASSIC_PROTECTED_ADDRS)
+)
 
 
 def _noop(**kwargs) -> None:
@@ -91,15 +94,13 @@ def sniff(progress_cb=None, seconds=SNIFF_SECONDS) -> dict:
 
   cb = progress_cb or _noop
 
-  from opendbc.car.structs import CarParams
-
   # Kill the manager so pandad doesn't fight for the panda (mirrors collect/dump).
   subprocess.run(["pkill", "-9", "-f", "manager.py"], check=False)
   subprocess.run(["pkill", "-9", "-f", "pandad"], check=False)
   time.sleep(2)
 
   panda = TSKExtractor._connect_panda()
-  panda.set_safety_mode(CarParams.SafetyModel.elm327)
+  configure_elm327(panda, ELM327_NORMAL_PARAM)
 
   bus_counters: dict = {}
   bus_maxlen: dict = {}
@@ -125,4 +126,6 @@ def sniff(progress_cb=None, seconds=SNIFF_SECONDS) -> dict:
 
   elapsed = time.time() - begin
   cb(seconds=elapsed, frames=frame_total, buses=len(bus_counters))
-  return summarize_counts(bus_counters, elapsed, bus_maxlen)
+  result = summarize_counts(bus_counters, elapsed, bus_maxlen)
+  result.update(elm327_param=ELM327_NORMAL_PARAM, semantic_path="normal-harness")
+  return result

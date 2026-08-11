@@ -18,18 +18,22 @@ from datetime import datetime, UTC
 from pathlib import Path
 from uuid import uuid4
 
+from tsk.lib.diagnostic_route import ELM327_NORMAL_PARAM, configure_elm327
 from tsk.lib.env import CAN_ORACLE_PATH, is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
+from tsk.lib.secoc_profile import (
+  CLASSIC_PROTECTED_ADDRS, OPENPILOT_CONTROL_PROTECTED_ADDRS, SYNC_ADDR,
+)
 
-SYNC_ADDR = 0x0F
-PROTECTED_ADDRS = {0x131, 0x2E4, 0x344}
-# Prior Sienna/Corolla IDs are annotations used by the existing matcher. Capture itself
-# is unfiltered across all buses and arbitration IDs.
+PROTECTED_ADDRS = CLASSIC_PROTECTED_ADDRS
+# Known classic Toyota SecOC IDs are annotations/matcher inputs only. Capture itself
+# remains unfiltered across all buses and arbitration IDs.
 
 # UI/ready thresholds (raw frame counts, matching the index row's "N/50", "N/30").
 SYNC_TARGET = 50
 PROTECTED_TARGET = 30
-COLLECT_SECONDS = 60.0  # hard cap; collection stops early once both targets are met
+CONTROL_SAMPLE_TARGET = 2
+COLLECT_SECONDS = 60.0  # hard cap; early stop additionally requires control-domain evidence
 
 
 def oracle_path() -> Path:
@@ -80,21 +84,21 @@ def collect(progress_cb=None, seconds=COLLECT_SECONDS) -> dict:
 
   cb = progress_cb or _noop
 
-  from opendbc.car.structs import CarParams
-
   # Kill the manager so pandad doesn't fight for the panda (mirrors dump()).
   subprocess.run(["pkill", "-9", "-f", "manager.py"], check=False)
   subprocess.run(["pkill", "-9", "-f", "pandad"], check=False)
   time.sleep(2)
 
   panda = TSKExtractor._connect_panda()
-  panda.set_safety_mode(CarParams.SafetyModel.elm327)
+  configure_elm327(panda, ELM327_NORMAL_PARAM)
 
   path = oracle_path()
   path.parent.mkdir(parents=True, exist_ok=True)
 
   sync_count = 0
   protected_count = 0
+  protected_by_id = {addr: 0 for addr in sorted(PROTECTED_ADDRS)}
+  counts_by_bus: dict[int, dict[str, int]] = {}
   begin = time.monotonic()
   last_progress = begin
   cb(seconds=0.0, sync=0, protected=0)
@@ -127,8 +131,11 @@ def collect(progress_cb=None, seconds=COLLECT_SECONDS) -> dict:
                                            "prior_protected_hypothesis" if known_protected else "")}) + "\n")
         if known_sync:
           sync_count += 1
+          counts_by_bus.setdefault(int(bus), {"sync": 0, "protected": 0})["sync"] += 1
         elif known_protected:
           protected_count += 1
+          protected_by_id[int(addr)] += 1
+          counts_by_bus.setdefault(int(bus), {"sync": 0, "protected": 0})["protected"] += 1
 
       now = time.monotonic()
       if now - last_progress >= 1.0:
@@ -136,15 +143,26 @@ def collect(progress_cb=None, seconds=COLLECT_SECONDS) -> dict:
         f.flush()
         cb(seconds=now - begin, sync=sync_count, protected=protected_count)
 
-      # Stop as soon as both targets are met. Sync is the bottleneck (~10/s) while
-      # protected floods (~100/s), so this exits with hundreds of protected samples,
-      # far above the matcher floor. The seconds cap still bounds a slow/sparse bus.
-      if sync_count >= SYNC_TARGET and protected_count >= PROTECTED_TARGET:
+      # Do not let a fast non-control protected stream end the capture before the
+      # current openpilot control IDs have had a chance to appear. A vehicle with no
+      # such IDs still reaches the hard cap and returns its generalized evidence.
+      control_ready = all(protected_by_id.get(addr, 0) >= CONTROL_SAMPLE_TARGET
+                          for addr in OPENPILOT_CONTROL_PROTECTED_ADDRS)
+      if sync_count >= SYNC_TARGET and protected_count >= PROTECTED_TARGET and control_ready:
         break
 
+    control_ready = all(protected_by_id.get(addr, 0) >= CONTROL_SAMPLE_TARGET
+                        for addr in OPENPILOT_CONTROL_PROTECTED_ADDRS)
+    control_counts = {f"0x{addr:03x}": protected_by_id.get(addr, 0)
+                      for addr in sorted(OPENPILOT_CONTROL_PROTECTED_ADDRS)}
     f.write(json.dumps({"event": "run_end", "run_id": run_id,
                         "operation": "can_oracle_capture", "sync": sync_count,
-                        "protected": protected_count}) + "\n")
+                        "protected": protected_count,
+                        "protected_by_id": {f"0x{k:03x}": v for k, v in protected_by_id.items() if v},
+                        "counts_by_bus": counts_by_bus,
+                        "control_ready": control_ready, "control_counts": control_counts,
+                        "elm327_param": ELM327_NORMAL_PARAM,
+                        "semantic_path": "normal-harness"}) + "\n")
     f.flush()
     os.fsync(f.fileno())
 
@@ -155,13 +173,27 @@ def collect(progress_cb=None, seconds=COLLECT_SECONDS) -> dict:
       "status": "complete",
       "sync": sync_count,
       "protected": protected_count,
+      "protected_by_id": {f"0x{k:03x}": v for k, v in protected_by_id.items() if v},
+      "counts_by_bus": counts_by_bus,
+      "control_ready": control_ready,
+      "control_counts": control_counts,
+      "elm327_param": ELM327_NORMAL_PARAM,
+      "semantic_path": "normal-harness",
       "oracle_path": str(path),
-      "message": f"Collected {sync_count} sync and {protected_count} protected frames.",
+      "message": (f"Collected {sync_count} sync and {protected_count} protected frames. " +
+                  ("Control-domain oracle is ready." if control_ready else
+                   f"Control-domain evidence is incomplete: {control_counts}; research capture retained.")),
     }
   return {
     "status": "insufficient",
     "sync": sync_count,
     "protected": protected_count,
+    "protected_by_id": {f"0x{k:03x}": v for k, v in protected_by_id.items() if v},
+    "counts_by_bus": counts_by_bus,
+    "control_ready": control_ready,
+    "control_counts": control_counts,
+    "elm327_param": ELM327_NORMAL_PARAM,
+    "semantic_path": "normal-harness",
     "oracle_path": str(path),
     "message": " ".join((
       f"Only {sync_count}/{SYNC_TARGET} sync and {protected_count}/{PROTECTED_TARGET} protected frames.",
