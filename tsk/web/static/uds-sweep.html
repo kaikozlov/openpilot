@@ -3,134 +3,67 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>UDS Sweep (Not Ready to Drive)</title>
-    <style>
-      * { box-sizing: border-box; margin: 0; }
-
-      body {
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
-        background: #f2f2f7;
-        color: #1c1c1e;
-        min-height: 100vh;
-        display: flex;
-        flex-direction: column;
-      }
-
-      .page {
-        width: min(100vw, 460px);
-        margin: 0 auto;
-        display: flex;
-        flex-direction: column;
-        flex: 1;
-        min-height: 100vh;
-      }
-
-      .back-bar { padding: 12px 20px; }
-
-      .back-link {
-        color: #007aff;
-        font-size: 17px;
-        text-decoration: none;
-        -webkit-tap-highlight-color: transparent;
-      }
-
-      .back-link::before { content: "‹ "; }
-
-      .page-header { padding: 0 20px 12px; }
-      .page-title { font-size: 26px; font-weight: 700; }
-
-      .warn-card {
-        margin: 0 16px 12px;
-        background: #fff;
-        border-radius: 12px;
-        padding: 14px 16px;
-        font-size: 14px;
-        line-height: 1.45;
-        color: #1c1c1e;
-      }
-
-      .warn-card b { color: #c93400; }
-
-      .run-btn {
-        display: block;
-        width: calc(100% - 32px);
-        margin: 0 16px 12px;
-        padding: 14px;
-        border: none;
-        border-radius: 12px;
-        background: #007aff;
-        color: #fff;
-        font: inherit;
-        font-size: 17px;
-        font-weight: 600;
-        cursor: pointer;
-        -webkit-tap-highlight-color: transparent;
-      }
-
-      .run-btn:disabled { background: #c7c7cc; }
-
-      .terminal {
-        margin: 0 16px 16px;
-        background: #1c1c1e;
-        border-radius: 12px;
-        padding: 16px;
-        flex: 1;
-        overflow-y: auto;
-        overflow-x: hidden;
-        font-family: "SF Mono", ui-monospace, monospace;
-        font-size: 12px;
-        line-height: 1.55;
-        color: #e5e5ea;
-        white-space: pre-wrap;
-        word-break: break-all;
-      }
-
-      .terminal .err { color: #ff453a; }
-      .terminal .ok { color: #30d158; }
-      .terminal .warn { color: #ff9f0a; }
-      .terminal .dim { color: #8e8e93; }
-      .terminal .big { font-size: 14px; font-weight: 700; }
-
-      .copy-area {
-        margin: 0 16px 16px;
-        width: calc(100% - 32px);
-        height: 160px;
-        display: none;
-        font-family: "SF Mono", ui-monospace, monospace;
-        font-size: 11px;
-        padding: 10px;
-        border-radius: 12px;
-        border: 1px solid #c6c6c8;
-      }
-    </style>
+    <title>Exhaustive UDS Sweep · TSK Manager</title>
+    <link rel="stylesheet" href="/css/app.css">
+    <link rel="stylesheet" href="/css/probe.css">
   </head>
-  <body>
-    <main class="page">
-      <div class="back-bar">
-        <a class="back-link" href="/">TSK Manager</a>
+  <body class="probe-body">
+    <header class="probe-topbar">
+      <div class="probe-topbar-inner">
+        <a class="probe-back" href="/#research"><span class="probe-back-arrow">←</span><span>Research</span></a>
+        <div class="probe-context" aria-label="Current vehicle context">
+          <span class="probe-context-item" id="probeVehicle">Loading vehicle…</span>
+          <span class="probe-context-sep"></span>
+          <span class="probe-context-item route" id="probeRoute">Loading route…</span>
+        </div>
       </div>
-      <header class="page-header">
-        <div class="page-title">UDS Sweep</div>
-      </header>
+    </header>
 
-      <div class="warn-card" id="warnCard">
-        Run this with the car in <b>Not Ready to Drive</b> (powered on, engine/hybrid not
-        started). It sends every UDS service byte 0x00–0xFF and every sub-function of the
-        ones that answer. Observation-oriented services run first; stateful families run
-        later with restoration and a liveness boundary after every request. The sweep sends
-        TesterPresent during long blocks and rediscovers the route after response loss.<br><br>
-        It runs for <b>5 minutes</b> and stops. Every request, response, NRC, timeout,
-        liveness check, restoration, route, and timing value is appended as it arrives.
-        Run it again to resume exactly where it stopped.
+    <main class="probe-page">
+      <section class="probe-heading">
+        <p class="probe-breadcrumb">Research · Observe & map</p>
+        <h1 class="probe-title">Exhaustive UDS sweep</h1>
+        <p class="probe-description">Deadline-bounded, resumable mapping of the diagnostic service surface with liveness checks and restoration around stateful request families.</p>
+        <div class="probe-badges"><span class="probe-badge blue">NOT READY</span><span class="probe-badge amber">ACTIVE</span><span class="probe-badge amber">5 MINUTES</span><span class="probe-badge green">RESUMABLE</span></div>
+      </section>
+
+      <div class="probe-layout">
+        <aside class="probe-side">
+          <section class="probe-card">
+            <div class="probe-card-body">
+              <p class="probe-card-kicker">Operation</p>
+              <h2 class="probe-card-title">Five-minute sweep</h2>
+              <p class="probe-card-copy">Observation-oriented services run first. Stateful families run later with restoration and a liveness boundary after every request; a second run resumes from the saved frontier.</p>
+              <ul class="probe-meta-list"><li class="probe-meta-row"><span class="probe-meta-label">Vehicle state</span><span class="probe-meta-value">Not Ready to Drive</span></li><li class="probe-meta-row"><span class="probe-meta-label">Budget</span><span class="probe-meta-value">5 minutes per run</span></li><li class="probe-meta-row"><span class="probe-meta-label">Persistence</span><span class="probe-meta-value">Append-only / resumable</span></li></ul>
+              <div class="probe-subtle-divider"></div>
+              <div class="probe-actions"><div class="probe-note warning" id="warnCard"><strong>Active diagnostic sweep.</strong> This sends every UDS service byte and then sub-functions for answering services. Keep the car in Not Ready to Drive for the full run.</div><button class="run-btn warning" id="runBtn" type="button">Start 5-minute sweep</button></div>
+            </div>
+          </section>
+
+          <section class="probe-card">
+            <div class="probe-card-body">
+              <p class="probe-card-kicker">Evidence</p>
+              <h2 class="probe-card-title">Preserve the result</h2>
+              <p class="probe-card-copy">The evidence bundle includes operation state and persisted transcripts needed to reproduce or review this run.</p>
+              <a class="probe-evidence-link" href="/api/evidence-bundle">Download evidence bundle →</a>
+            </div>
+          </section>
+        </aside>
+
+        <section class="probe-card probe-terminal-card">
+          <div class="probe-terminal-head">
+            <span class="probe-terminal-title">Live output</span>
+            <span class="probe-terminal-hint">Sweep frontier, responders, NRCs, and liveness boundaries</span>
+          </div>
+          <div class="terminal" id="terminal" role="log" aria-live="polite"></div>
+          <textarea class="copy-area" id="copyArea" readonly aria-label="Copyable sweep output"></textarea>
+        </section>
       </div>
-
-      <button class="run-btn" id="runBtn" type="button">Start the 5-minute sweep</button>
-      <div class="terminal" id="terminal"></div>
-      <textarea class="copy-area" id="copyArea" readonly></textarea>
     </main>
 
+    <script src="/js/probe.js"></script>
     <script>
-      const terminal = document.getElementById("terminal");
+const terminal = document.getElementById("terminal");
       const runBtn = document.getElementById("runBtn");
       const copyArea = document.getElementById("copyArea");
 

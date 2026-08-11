@@ -3,115 +3,67 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Application SecurityAccess (0x03/0x04)</title>
-    <style>
-      * { box-sizing: border-box; margin: 0; }
-
-      body {
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
-        background: #f2f2f7;
-        color: #1c1c1e;
-        min-height: 100vh;
-        display: flex;
-        flex-direction: column;
-      }
-
-      .page {
-        width: min(100vw, 460px);
-        margin: 0 auto;
-        display: flex;
-        flex-direction: column;
-        flex: 1;
-        min-height: 100vh;
-      }
-
-      .back-bar { padding: 12px 20px; }
-
-      .back-link {
-        color: #007aff;
-        font-size: 17px;
-        text-decoration: none;
-        -webkit-tap-highlight-color: transparent;
-      }
-
-      .back-link::before { content: "‹ "; }
-
-      .page-header { padding: 0 20px 12px; }
-
-      .page-title { font-size: 26px; font-weight: 700; }
-
-      .warn-card {
-        margin: 0 16px 12px;
-        background: #fff;
-        border-radius: 12px;
-        padding: 16px;
-        font-size: 14px;
-        line-height: 1.45;
-        color: #1c1c1e;
-      }
-
-      .warn-card b { color: #c93400; }
-
-      .run-btn {
-        display: block;
-        width: calc(100% - 32px);
-        margin: 0 16px 12px;
-        padding: 14px;
-        border: none;
-        border-radius: 12px;
-        background: #ff9f0a;
-        color: #1c1c1e;
-        font-size: 17px;
-        font-weight: 600;
-        -webkit-tap-highlight-color: transparent;
-      }
-
-      .run-btn:disabled { background: #d1d1d6; color: #8e8e93; }
-
-      .terminal {
-        margin: 0 16px 16px;
-        background: #1c1c1e;
-        border-radius: 12px;
-        padding: 16px;
-        flex: 1;
-        overflow-y: auto;
-        overflow-x: hidden;
-        font-family: "SF Mono", ui-monospace, monospace;
-        font-size: 12px;
-        line-height: 1.55;
-        color: #e5e5ea;
-        white-space: pre-wrap;
-        word-break: break-all;
-      }
-
-      .terminal .err { color: #ff453a; }
-      .terminal .ok { color: #30d158; }
-      .terminal .warn { color: #ff9f0a; }
-      .terminal .dim { color: #8e8e93; }
-    </style>
+    <title>Application SecurityAccess Comparison · TSK Manager</title>
+    <link rel="stylesheet" href="/css/app.css">
+    <link rel="stylesheet" href="/css/probe.css">
   </head>
-  <body>
-    <main class="page">
-      <div class="back-bar">
-        <a class="back-link" href="/">TSK Manager</a>
+  <body class="probe-body">
+    <header class="probe-topbar">
+      <div class="probe-topbar-inner">
+        <a class="probe-back" href="/#research"><span class="probe-back-arrow">←</span><span>Research</span></a>
+        <div class="probe-context" aria-label="Current vehicle context">
+          <span class="probe-context-item" id="probeVehicle">Loading vehicle…</span>
+          <span class="probe-context-sep"></span>
+          <span class="probe-context-item route" id="probeRoute">Loading route…</span>
+        </div>
       </div>
-      <header class="page-header">
-        <div class="page-title">Application SecurityAccess</div>
-      </header>
-      <div class="warn-card">
-        This tests level <b>0x03/0x04</b> with the firmware-recovered <b>8965B4512000 application secret</b>.
-        It is not the f05f… bootloader 0x01/0x02 secret. A wrong SEND_KEY is a counted attempt.
-        On any other calibration the probe stops before SEND_KEY unless explicitly armed below.
+    </header>
+
+    <main class="probe-page">
+      <section class="probe-heading">
+        <p class="probe-breadcrumb">Research · Memory & security</p>
+        <h1 class="probe-title">Application 0x03/0x04 comparison</h1>
+        <p class="probe-description">Compare a target against the firmware-recovered 8965B4512000 application SecurityAccess derivation. Cross-calibration SEND_KEY is opt-in because a wrong key is counted.</p>
+        <div class="probe-badges"><span class="probe-badge blue">NOT READY</span><span class="probe-badge red">COUNTED ATTEMPT</span><span class="probe-badge amber">EXPERIMENTAL</span></div>
+      </section>
+
+      <div class="probe-layout">
+        <aside class="probe-side">
+          <section class="probe-card">
+            <div class="probe-card-body">
+              <p class="probe-card-kicker">Operation</p>
+              <h2 class="probe-card-title">Application SecurityAccess</h2>
+              <p class="probe-card-copy">This uses the 8965B4512000 application 0x03/0x04 secret, not the f05f… bootloader 0x01/0x02 secret. The target is identified before any key is sent.</p>
+              <ul class="probe-meta-list"><li class="probe-meta-row"><span class="probe-meta-label">Vehicle state</span><span class="probe-meta-value">Not Ready to Drive</span></li><li class="probe-meta-row"><span class="probe-meta-label">Security level</span><span class="probe-meta-value">0x03/0x04</span></li><li class="probe-meta-row"><span class="probe-meta-label">Wrong SEND_KEY</span><span class="probe-meta-value">Counted attempt</span></li></ul>
+              <div class="probe-subtle-divider"></div>
+              <div class="probe-actions"><div class="probe-note danger"><strong>Cross-calibration attempts require explicit arming.</strong> Leave this unchecked to identify the target and stop before SEND_KEY on any other calibration.</div><label class="probe-option danger" for="crossArm"><input type="checkbox" id="crossArm"><span>Arm one counted cross-calibration 0x03/0x04 comparison.</span></label><button class="run-btn danger" id="runBtn" type="button">Run application comparison</button></div>
+            </div>
+          </section>
+
+          <section class="probe-card">
+            <div class="probe-card-body">
+              <p class="probe-card-kicker">Evidence</p>
+              <h2 class="probe-card-title">Preserve the result</h2>
+              <p class="probe-card-copy">The evidence bundle includes operation state and persisted transcripts needed to reproduce or review this run.</p>
+              <a class="probe-evidence-link" href="/api/evidence-bundle">Download evidence bundle →</a>
+            </div>
+          </section>
+        </aside>
+
+        <section class="probe-card probe-terminal-card">
+          <div class="probe-terminal-head">
+            <span class="probe-terminal-title">Live output</span>
+            <span class="probe-terminal-hint">Target identity, seed, SEND_KEY outcome, and post-unlock reads</span>
+          </div>
+          <div class="terminal" id="terminal" role="log" aria-live="polite"></div>
+
+        </section>
       </div>
-      <div class="warn-card">
-        <label><input type="checkbox" id="crossArm"> Arm one counted cross-calibration 0x03/0x04 comparison.</label>
-      </div>
-      <button class="run-btn" id="runBtn">Run application 0x03/0x04 probe</button>
-      <div class="terminal" id="terminal"></div>
     </main>
 
+    <script src="/js/probe.js"></script>
     <script>
-      const terminal = document.getElementById("terminal");
+const terminal = document.getElementById("terminal");
       const runBtn = document.getElementById("runBtn");
       const crossArm = document.getElementById("crossArm");
 
