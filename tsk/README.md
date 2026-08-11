@@ -27,6 +27,28 @@ curl http://127.0.0.1:11111/api/health
 The launcher writes the web-server log to `/cache/tsk/logs/tsk-web.log`. The offroad
 alert shows the reachable web URL.
 
+## Web UI model
+
+The TSK Manager UI is organized around the operator rather than the research chronology:
+
+- **Recovery** is the default dashboard. It projects backend state into one next action and
+  a visible sequence: identify EPS -> capture READY CAN -> confirm PROGRAMMING when the
+  calibration is not already in the established transfer set -> recover key material ->
+  cryptographically verify -> install.
+- **Research** keeps the full diagnostic toolbox grouped by purpose (observe/map,
+  programming, memory/security, and transfer experiments) without giving those tools the
+  same visual weight as the normal recovery path.
+- **System** contains evidence export, cached-data/key management, connection details,
+  software switching, and reboot actions.
+
+Every secondary operation page shares the same responsive shell on phone, tablet, and
+desktop. The page header shows the currently known F181 and physical route, while badges
+make vehicle-state and risk boundaries explicit (`READY`, `NOT READY`, `PASSIVE`,
+`READ ONLY`, `RESETS EPS`, `COUNTED ATTEMPT`, etc.). Stateful or disruptive experiments
+**never start merely because their page was opened**; the operator must press the explicit
+run control after seeing those constraints. The Application `03/04` cross-calibration
+SEND_KEY retains its additional one-attempt arming checkbox.
+
 ## Route model: a Panda bus number is not enough
 
 Every diagnostic route has two independent dimensions:

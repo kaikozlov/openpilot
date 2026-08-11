@@ -94,6 +94,33 @@ class TestServer(unittest.TestCase):
     self.assertEqual(complete["recovery"]["stage"], "complete")
     self.assertTrue(all(step["state"] == "complete" for step in complete["recovery"]["steps"]))
 
+  def test_probe_pages_share_shell_and_active_pages_require_explicit_run(self):
+    probe_pages = (
+      "can-collector.html", "can-sniff.html", "dataflash-collector.html", "dataflash-diag.html",
+      "extractor.html", "ident-map.html", "level3-probe.html", "preamble-probe.html",
+      "prog-probe.html", "read-mem.html", "ready-capture.html", "reset-probe.html",
+      "sendkey-probe.html", "uds-sweep.html",
+    )
+    explicit_run_pages = (
+      "can-collector.html", "can-sniff.html", "dataflash-diag.html", "ident-map.html",
+      "level3-probe.html", "preamble-probe.html", "prog-probe.html", "read-mem.html",
+      "reset-probe.html",
+    )
+
+    for page in probe_pages:
+      html = resolve_asset(f"/{page}").read_text(encoding="utf-8")
+      self.assertIn('href="/css/app.css"', html, page)
+      self.assertIn('href="/css/probe.css"', html, page)
+      self.assertIn('src="/js/probe.js"', html, page)
+      self.assertNotIn("<style>", html, page)
+      self.assertIn('id="probeVehicle"', html, page)
+      self.assertIn('id="probeRoute"', html, page)
+
+    for page in explicit_run_pages:
+      html = resolve_asset(f"/{page}").read_text(encoding="utf-8")
+      self.assertIn('id="runBtn"', html, page)
+      self.assertIn('runBtn.addEventListener("click"', html, page)
+
   def test_operation_vehicle_state_annotations(self):
     self.assertIn("READY", expected_vehicle_state("/api/ready-capture"))
     self.assertIn("Not Ready", expected_vehicle_state("/api/uds-sweep"))

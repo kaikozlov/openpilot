@@ -3,87 +3,68 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Collect CAN Messages</title>
-    <style>
-      * { box-sizing: border-box; margin: 0; }
-
-      body {
-        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
-        background: #f2f2f7;
-        color: #1c1c1e;
-        min-height: 100vh;
-        display: flex;
-        flex-direction: column;
-      }
-
-      .page {
-        width: min(100vw, 460px);
-        margin: 0 auto;
-        display: flex;
-        flex-direction: column;
-        flex: 1;
-        min-height: 100vh;
-      }
-
-      .back-bar {
-        padding: 12px 20px;
-      }
-
-      .back-link {
-        color: #007aff;
-        font-size: 17px;
-        text-decoration: none;
-        -webkit-tap-highlight-color: transparent;
-      }
-
-      .back-link::before {
-        content: "‹ ";
-      }
-
-      .page-header {
-        padding: 0 20px 12px;
-      }
-
-      .page-title {
-        font-size: 28px;
-        font-weight: 700;
-      }
-
-      .terminal {
-        margin: 0 16px 16px;
-        background: #1c1c1e;
-        border-radius: 12px;
-        padding: 16px;
-        flex: 1;
-        overflow-y: auto;
-        overflow-x: hidden;
-        font-family: "SF Mono", ui-monospace, monospace;
-        font-size: 13px;
-        line-height: 1.6;
-        color: #e5e5ea;
-        white-space: pre-wrap;
-        word-break: break-all;
-      }
-
-      .terminal .err { color: #ff453a; }
-      .terminal .ok { color: #30d158; }
-      .terminal .warn { color: #ff9f0a; }
-      .terminal .dim { color: #8e8e93; }
-    </style>
+    <title>Capture CAN Evidence · TSK Manager</title>
+    <link rel="stylesheet" href="/css/app.css">
+    <link rel="stylesheet" href="/css/probe.css">
   </head>
-  <body>
-    <main class="page">
-      <div class="back-bar">
-        <a class="back-link" href="/">TSK Manager</a>
+  <body class="probe-body">
+    <header class="probe-topbar">
+      <div class="probe-topbar-inner">
+        <a class="probe-back" href="/#recovery"><span class="probe-back-arrow">←</span><span>Recovery</span></a>
+        <div class="probe-context" aria-label="Current vehicle context">
+          <span class="probe-context-item" id="probeVehicle">Loading vehicle…</span>
+          <span class="probe-context-sep"></span>
+          <span class="probe-context-item route" id="probeRoute">Loading route…</span>
+        </div>
       </div>
-      <header class="page-header">
-        <div class="page-title">Collect CAN Messages</div>
-      </header>
-      <div class="terminal" id="terminal"></div>
+    </header>
+
+    <main class="probe-page">
+      <section class="probe-heading">
+        <p class="probe-breadcrumb">Recovery · CAN evidence</p>
+        <h1 class="probe-title">Capture CAN evidence</h1>
+        <p class="probe-description">Collect the READY-state SecOC traffic used to cryptographically validate any recovered key candidate.</p>
+        <div class="probe-badges"><span class="probe-badge blue">READY</span><span class="probe-badge green">PASSIVE</span></div>
+      </section>
+
+      <div class="probe-layout">
+        <aside class="probe-side">
+          <section class="probe-card">
+            <div class="probe-card-body">
+              <p class="probe-card-kicker">Operation</p>
+              <h2 class="probe-card-title">60-second CAN capture</h2>
+              <p class="probe-card-copy">Captures every received CAN payload. Known SecOC IDs are annotations only; capture itself remains unfiltered.</p>
+              <ul class="probe-meta-list"><li class="probe-meta-row"><span class="probe-meta-label">Vehicle state</span><span class="probe-meta-value">READY</span></li><li class="probe-meta-row"><span class="probe-meta-label">Bus impact</span><span class="probe-meta-value">Passive receive only</span></li><li class="probe-meta-row"><span class="probe-meta-label">Stops when</span><span class="probe-meta-value">Oracle targets are satisfied</span></li></ul>
+              <div class="probe-subtle-divider"></div>
+              <div class="probe-actions"><button class="run-btn primary" id="runBtn" type="button">Start CAN capture</button></div>
+            </div>
+          </section>
+
+          <section class="probe-card">
+            <div class="probe-card-body">
+              <p class="probe-card-kicker">Evidence</p>
+              <h2 class="probe-card-title">Preserve the result</h2>
+              <p class="probe-card-copy">The evidence bundle includes operation state and persisted transcripts needed to reproduce or review this run.</p>
+              <a class="probe-evidence-link" href="/api/evidence-bundle">Download evidence bundle →</a>
+            </div>
+          </section>
+        </aside>
+
+        <section class="probe-card probe-terminal-card">
+          <div class="probe-terminal-head">
+            <span class="probe-terminal-title">Live output</span>
+            <span class="probe-terminal-hint">Live capture progress and oracle counts</span>
+          </div>
+          <div class="terminal" id="terminal" role="log" aria-live="polite"></div>
+
+        </section>
+      </div>
     </main>
 
+    <script src="/js/probe.js"></script>
     <script>
-      const terminal = document.getElementById("terminal");
+const terminal = document.getElementById("terminal");
+      const runBtn = document.getElementById("runBtn");
 
       function termWrite(text, className) {
         const span = document.createElement("span");
@@ -178,7 +159,15 @@
         }
       }
 
-      runCollect();
+      runBtn.addEventListener("click", async () => {
+        TSKProbe.clearTerminal();
+        TSKProbe.runButton(runBtn, true, "Capturing…");
+        try {
+          await runCollect();
+        } finally {
+          TSKProbe.runButton(runBtn, false);
+        }
+      });
     </script>
   </body>
 </html>

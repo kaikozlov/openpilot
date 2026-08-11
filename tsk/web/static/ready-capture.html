@@ -3,57 +3,67 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>READY Evidence</title>
-    <style>
-      * { box-sizing: border-box; margin: 0; }
-      body { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
-             background: #f2f2f7; color: #1c1c1e; min-height: 100vh; }
-      .page { width: min(100vw, 460px); margin: 0 auto; padding-bottom: 20px; }
-      .back-bar { padding: 12px 20px; }
-      .back-link { color: #007aff; font-size: 17px; text-decoration: none; }
-      .back-link::before { content: "‹ "; }
-      .page-header { padding: 0 20px 12px; }
-      .page-title { font-size: 26px; font-weight: 700; }
-      .card { margin: 0 16px 12px; background: #fff; border-radius: 12px;
-              padding: 14px 16px; font-size: 14px; line-height: 1.45; }
-      .card b { color: #c93400; }
-      .run-btn { display: block; width: calc(100% - 32px); margin: 0 16px 10px;
-                 padding: 14px; border: none; border-radius: 12px; color: #fff;
-                 background: #007aff; font: inherit; font-size: 17px; font-weight: 600; }
-      .run-btn.active { background: #ff9500; }
-      .run-btn:disabled { background: #c7c7cc; }
-      .terminal { margin: 12px 16px 16px; min-height: 260px; background: #1c1c1e;
-                  border-radius: 12px; padding: 16px; overflow: auto;
-                  font: 12px/1.55 "SF Mono", ui-monospace, monospace; color: #e5e5ea;
-                  white-space: pre-wrap; word-break: break-all; }
-      .terminal .err { color: #ff453a; } .terminal .ok { color: #30d158; }
-      .terminal .warn { color: #ff9f0a; } .terminal .dim { color: #8e8e93; }
-      .export-link { display: block; margin: 0 16px; padding: 13px; border-radius: 12px;
-                     background: #fff; color: #007aff; text-align: center; text-decoration: none; }
-    </style>
+    <title>READY Evidence · TSK Manager</title>
+    <link rel="stylesheet" href="/css/app.css">
+    <link rel="stylesheet" href="/css/probe.css">
   </head>
-  <body>
-    <main class="page">
-      <div class="back-bar"><a class="back-link" href="/">TSK Manager</a></div>
-      <header class="page-header"><div class="page-title">READY Evidence</div></header>
-
-      <div class="card">
-        <b>Confirm the vehicle is in Park before either operation.</b><br><br>
-        <b>Passive capture</b> records every received CAN payload for 90 seconds. It sends
-        no UDS or CAN request.<br><br>
-        <b>Active mode diff</b> is separate. It replays only bare service bytes already
-        recorded as silent or condition-gated by the Not Ready to Drive sweep, checks
-        liveness after each request, and restores the default session.
+  <body class="probe-body">
+    <header class="probe-topbar">
+      <div class="probe-topbar-inner">
+        <a class="probe-back" href="/#research"><span class="probe-back-arrow">←</span><span>Research</span></a>
+        <div class="probe-context" aria-label="Current vehicle context">
+          <span class="probe-context-item" id="probeVehicle">Loading vehicle…</span>
+          <span class="probe-context-sep"></span>
+          <span class="probe-context-item route" id="probeRoute">Loading route…</span>
+        </div>
       </div>
+    </header>
 
-      <button class="run-btn" id="passiveBtn" type="button">Start passive READY capture</button>
-      <button class="run-btn active" id="diffBtn" type="button">Run characterized active diff</button>
-      <div class="terminal" id="terminal"></div>
-      <a class="export-link" href="/api/evidence-bundle">Download evidence bundle</a>
+    <main class="probe-page">
+      <section class="probe-heading">
+        <p class="probe-breadcrumb">Research · READY evidence</p>
+        <h1 class="probe-title">READY evidence</h1>
+        <p class="probe-description">Compare the vehicle in READY state using a strictly passive capture and, separately, an explicitly active replay of previously characterized requests.</p>
+        <div class="probe-badges"><span class="probe-badge blue">READY</span><span class="probe-badge amber">PASSIVE + ACTIVE</span></div>
+      </section>
+
+      <div class="probe-layout">
+        <aside class="probe-side">
+          <section class="probe-card">
+            <div class="probe-card-body">
+              <p class="probe-card-kicker">Operation</p>
+              <h2 class="probe-card-title">Choose the operation</h2>
+              <p class="probe-card-copy">Passive capture transmits nothing. Active diff is a separate stateful operation that replays only requests recovered from the Not Ready to Drive transcript.</p>
+              <ul class="probe-meta-list"><li class="probe-meta-row"><span class="probe-meta-label">Vehicle state</span><span class="probe-meta-value">READY / Park</span></li><li class="probe-meta-row"><span class="probe-meta-label">Passive capture</span><span class="probe-meta-value">90 seconds</span></li><li class="probe-meta-row"><span class="probe-meta-label">Active diff</span><span class="probe-meta-value">Explicit separate action</span></li></ul>
+              <div class="probe-subtle-divider"></div>
+              <div class="probe-actions"><button class="run-btn primary" id="passiveBtn" type="button">Start passive READY capture</button><button class="run-btn warning" id="diffBtn" type="button">Run characterized active diff</button></div>
+            </div>
+          </section>
+
+          <section class="probe-card">
+            <div class="probe-card-body">
+              <p class="probe-card-kicker">Evidence</p>
+              <h2 class="probe-card-title">Preserve the result</h2>
+              <p class="probe-card-copy">The evidence bundle includes operation state and persisted transcripts needed to reproduce or review this run.</p>
+              <a class="probe-evidence-link" href="/api/evidence-bundle">Download evidence bundle →</a>
+            </div>
+          </section>
+        </aside>
+
+        <section class="probe-card probe-terminal-card">
+          <div class="probe-terminal-head">
+            <span class="probe-terminal-title">Live output</span>
+            <span class="probe-terminal-hint">READY-state capture or active-diff output</span>
+          </div>
+          <div class="terminal" id="terminal" role="log" aria-live="polite"></div>
+
+        </section>
+      </div>
     </main>
 
+    <script src="/js/probe.js"></script>
     <script>
-      const terminal = document.getElementById("terminal");
+const terminal = document.getElementById("terminal");
       const passiveBtn = document.getElementById("passiveBtn");
       const diffBtn = document.getElementById("diffBtn");
 
