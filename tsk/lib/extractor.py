@@ -3,7 +3,11 @@ import struct
 import subprocess
 import time
 
+from tsk.lib.diagnostic_route import (
+  AmbiguousDiagnosticRouteError, DEFAULT_BUS_ORDER, discover_eps_route_with_routing, route_fields,
+)
 from tsk.lib.env import is_agnos, PAYLOAD_PATH
+from tsk.lib.programming import ProgrammingHandoffError, enter_programming_bootloader, uds_client as make_uds_client
 
 
 class NotAGNOSError(Exception):
@@ -49,9 +53,12 @@ def format_version_for_error_display(version1, version2=None, length=8):
 class TSKExtractor:
   ADDR = 0x7a1
   DEBUG = False
-  BUS = 0
+  CANDIDATE_BUSES = DEFAULT_BUS_ORDER
 
-  SEED_KEY_SECRET = b'\xf0\x5f\x36\xb7\xd7\x8c\x03\xe2\x4a\xb4\xfa\xef\x2a\x57\xd0\x44'
+  # Distinct security domains. The bootloader uses 01/02; the analyzed Sienna
+  # application uses 03/04 with an independent secret.
+  BOOT_SA_SECRET = b'\xf0\x5f\x36\xb7\xd7\x8c\x03\xe2\x4a\xb4\xfa\xef\x2a\x57\xd0\x44'
+  APPLICATION_03_04_SA_SECRET_8965B4512000 = bytes.fromhex("893e08418c741ffa2a9c044bffa55813")
 
   # These are the key and IV used to encrypt the payload in build_payload.py
   DID_201_KEY = b'\x00' * 16
@@ -70,6 +77,7 @@ class TSKExtractor:
   SECOC_KEY_OFFSET = 0x0c
 
   _panda = None
+  _last_extraction_metadata: dict = {}
 
   @classmethod
   def _connect_panda(cls):
@@ -121,8 +129,7 @@ class TSKExtractor:
     from tqdm import tqdm
 
     from opendbc.car.isotp import isotp_send
-    from opendbc.car.structs import CarParams
-    from opendbc.car.uds import UdsClient, ACCESS_TYPE, SESSION_TYPE, DATA_IDENTIFIER_TYPE, SERVICE_TYPE, \
+    from opendbc.car.uds import ACCESS_TYPE, SESSION_TYPE, DATA_IDENTIFIER_TYPE, SERVICE_TYPE, \
       ROUTINE_CONTROL_TYPE, InvalidServiceIdError, MessageTimeoutError, NegativeResponseError
 
     # Kill the manager so it doesn't restart pandad during extraction.
@@ -133,11 +140,27 @@ class TSKExtractor:
     time.sleep(2)
 
     panda = cls._connect_panda()
-    panda.set_safety_mode(CarParams.SafetyModel.elm327)
+    try:
+      route = discover_eps_route_with_routing(
+        panda, cls.CANDIDATE_BUSES, preferred_tx=cls.ADDR, addresses=[cls.ADDR],
+        preferred_timeout=0.4, scan_timeout=0.1,
+      )
+    except AmbiguousDiagnosticRouteError as e:
+      raise RetryError(f"Ambiguous EPS diagnostic route: {e}") from e
+    if route is None:
+      raise RetryError("Car not detected on the normal-harness or OBD diagnostic routes")
+    if route["tx"] != cls.ADDR or route["rx"] != cls.ADDR + 8 or route["tx_bus"] != route["rx_bus"]:
+      raise RetryError(
+        "Diagnostic responder does not match the Sienna payload route "
+        f"({route_fields(route)}); refusing to run the transfer payload"
+      )
 
-    uds_client = UdsClient(panda, cls.ADDR, cls.ADDR + 8, cls.BUS, timeout=0.1, response_pending_timeout=0.1)
+    active_bus = route["tx_bus"]
+    cls._last_extraction_metadata = {"route": route_fields(route), "known_application": False}
+    uds_client = make_uds_client(panda, route, timeout=0.3, response_pending_timeout=5.5)
 
     print("Getting application versions...")
+    print(f" - route: {route_fields(route)}")
 
     try:
       app_version = uds_client.read_data_by_identifier(DATA_IDENTIFIER_TYPE.APPLICATION_SOFTWARE_IDENTIFICATION)
@@ -145,19 +168,38 @@ class TSKExtractor:
     except (AssertionError, InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
       raise RetryError("Car not detected")
 
-    if app_version not in cls.APPLICATION_VERSIONS:
+    known_application = app_version in cls.APPLICATION_VERSIONS
+    cls._last_extraction_metadata.update(
+      application_version=bytes(app_version).hex(), known_application=known_application,
+    )
+    if not known_application:
       print("Application version is outside the known Sienna/RAV4 set. "
             f"Continuing the explicit Sienna-transfer hypothesis: {app_version!r}")
 
-    # Mandatory flow of diagnostic sessions
+    # The first application 10 02 is asynchronous on the analyzed Sienna: it may emit
+    # NRC 0x78 and reset before a final 50 02. Preserve the exact physical route and
+    # require the endpoint to reappear there; the shared helper records Panda/CAN health.
+    try:
+      route, handoff = enter_programming_bootloader(
+        panda, route, prepare_sessions=True, reappearance_timeout=6.0,
+      )
+    except ProgrammingHandoffError as e:
+      cls._last_extraction_metadata["programming_handoff"] = e.telemetry
+      if e.nrc is not None:
+        raise RetryError(f"Programming session rejected with NRC 0x{e.nrc:02x}")
+      raise RetryError(f"Programming handoff failed: {e}")
+
+    active_bus = route["tx_bus"]
+    cls._last_extraction_metadata.update(
+      programming_handoff=handoff,
+      route_after_programming=route_fields(route),
+    )
+    uds_client = make_uds_client(panda, route, timeout=0.3, response_pending_timeout=3.0)
     try:
       uds_client.diagnostic_session_control(SESSION_TYPE.DEFAULT)
       uds_client.diagnostic_session_control(SESSION_TYPE.EXTENDED_DIAGNOSTIC)
-      uds_client.diagnostic_session_control(SESSION_TYPE.PROGRAMMING)
-      uds_client.diagnostic_session_control(SESSION_TYPE.DEFAULT)
-      uds_client.diagnostic_session_control(SESSION_TYPE.EXTENDED_DIAGNOSTIC)
-    except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-      raise RetryError("Car not in 'Not Ready To Drive' mode")
+    except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError) as e:
+      raise RetryError("Bootloader reappeared but did not accept DEFAULT -> EXTENDED") from e
 
     # Get bootloader version
     try:
@@ -185,7 +227,7 @@ class TSKExtractor:
       seed_payload = b"\x00" * 16
       seed = uds_client.security_access(ACCESS_TYPE.REQUEST_SEED, data_record=seed_payload)
 
-      key = AES.new(cls.SEED_KEY_SECRET, AES.MODE_ECB).decrypt(seed_payload)
+      key = AES.new(cls.BOOT_SA_SECRET, AES.MODE_ECB).decrypt(seed_payload)
       key = AES.new(key, AES.MODE_ECB).encrypt(seed)
 
       print("\nSecurity Access...")
@@ -204,10 +246,11 @@ class TSKExtractor:
     print("\nPreparing to upload payload...")
 
     try:
-      # Write something to DID 203, not sure why but needed for state machine
+      # Firmware requires the bootloader WDBI sequence 0x0203 -> 0x0201 -> 0x0202
+      # before RequestDownload. 0x0201/0x0202 feed the authenticated payload gate.
       uds_client.write_data_by_identifier(0x203, b"\x00" * 5)
 
-      # Write KEY and IV to DID 201/202, prerequisite for request download
+      # Write KEY and IV to DID 201/202, prerequisite for request download.
       print(" - Write data by identifier 0x201", cls.DID_201_KEY.hex())
       uds_client.write_data_by_identifier(0x201, cls.DID_201_KEY)
 
@@ -273,7 +316,7 @@ class TSKExtractor:
 
     # Manually send so we don't get stuck waiting for the response
     erase = b"\x31\x01\xff\x00" + data
-    isotp_send(panda, erase, cls.ADDR, bus=cls.BUS)
+    isotp_send(panda, erase, route["tx"], bus=active_bus)
 
     print("\nDumping keys...")
     start = 0xfebe6e34
@@ -292,7 +335,7 @@ class TSKExtractor:
           raise RetryError("Key dumping timed out")
 
         for addr, *_, data, bus in panda.can_recv():
-          if bus != cls.BUS:
+          if bus != active_bus:
             continue
 
           if data == b"\x03\x7f\x31\x78\x00\x00\x00\x00":  # Skip response pending
@@ -325,6 +368,10 @@ class TSKExtractor:
 
     print("\nECU_MASTER_KEY   ", key_1.hex())
     print("SecOC Key (KEY_4)", key_4.hex())
+    cls._last_extraction_metadata.update(
+      ram_struct_checksums={"key_1": True, "key_4": True},
+      candidate_key=key_4.hex(),
+    )
 
     return key_4.hex()
 

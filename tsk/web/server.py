@@ -13,7 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
 from tsk.lib.collect_can import collect as collect_can, count_oracle_frames, oracle_path as can_oracle_path, PROTECTED_TARGET, SYNC_TARGET
-from tsk.lib.dump_dataflash import DUMP_TOTAL, dump as dump_dataflash, dump_path
+from tsk.lib.dump_dataflash import (
+  DUMP_TOTAL, dump as dump_dataflash, dump_path, partial_coverage_path, partial_dump_path,
+)
 from tsk.lib.env import is_agnos
 from tsk.lib.evidence import create_evidence_bundle, record_operation
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
@@ -26,7 +28,7 @@ from tsk.lib.read_mem import read_key_region
 from tsk.lib.ident_map import map_surface
 from tsk.lib.reset_probe import probe_reset_window
 from tsk.lib.level3_probe import probe_level3
-from tsk.lib.sendkey_probe import send_willem_key
+from tsk.lib.sendkey_probe import send_sienna_application_key
 from tsk.lib.preamble_probe import probe_preamble
 from tsk.lib.sweep_uds import sweep
 from tsk.lib.capture_ready import capture_ready, run_ready_diff
@@ -262,6 +264,12 @@ can_state = {
   "status": "idle",   # idle | running | complete | insufficient | failed
   "sync_count": 0,
   "protected_count": 0,
+  "protected_by_id": {},
+  "counts_by_bus": {},
+  "control_ready": False,
+  "control_counts": {},
+  "elm327_param": -1,
+  "semantic_path": "",
   "seconds": 0.0,
   "message": "",
 }
@@ -272,12 +280,18 @@ can_state = {
 df_lock = threading.Lock()
 df_state = {
   "ready": False,
-  "status": "idle",   # idle | running | complete | partial | key_missed | failed
+  "status": "idle",   # idle | running | complete | partial | unusable_partial | failed
   "frames": 0,
   "bytes": 0,
   "total": DUMP_TOTAL,
   "message": "",
   "size": 0,
+  "payload_variant": "standard",
+  "coverage_path": "",
+  "longest_covered_run": 0,
+  "known_key_window_covered": False,
+  "route": {},
+  "programming_handoff": {},
 }
 
 # CAN sniffer runs as a background job like the others. Read-only diagnostic: it
@@ -314,8 +328,9 @@ diag_state = {
   "message": "",
 }
 
-# Programming-session entry probe. Tries several ways to enter the PROGRAMMING session
-# on the EPS the sweep finds, and holds the per-sequence outcomes + the security result.
+# Firmware-informed programming handoff probe. One controlled DEFAULT -> EXTENDED ->
+# PROGRAMMING transition is judged by endpoint reappearance on the preserved physical
+# route, with Panda/CAN health captured around the reset.
 probe_lock = threading.Lock()
 probe_state = {
   "status": "idle",   # idle | running | entered | blocked | unreachable | failed
@@ -328,6 +343,11 @@ probe_state = {
   "security_levels": [],
   "did_it_take": {},
   "all_bus": [],
+  "route": {},
+  "application_f181": {},
+  "bootloader_f181": {},
+  "functional_0x777": {},
+  "programming_handoff": {},
   "message": "",
 }
 
@@ -387,10 +407,11 @@ level3_state = {
   "message": "",
 }
 
-# Send-key probe — one Willem key at level 0x03/0x04.
+# Application 0x03/0x04 comparison — exact Sienna secret; cross-calibration SEND_KEY
+# is explicitly armed because a wrong key is a counted attempt.
 sendkey_lock = threading.Lock()
 sendkey_state = {
-  "status": "idle",   # idle | running | unlocked | invalid_key | locked | denied | rejected | no_seed | unreachable | failed
+  "status": "idle",   # idle | running | armed_required | unlocked | invalid_key | locked | denied | rejected | no_seed | unreachable | failed
   "last": "",
   "panda": "",
   "eps_bus": -1,
@@ -399,6 +420,10 @@ sendkey_state = {
   "key": "",
   "send_key": "",
   "post_unlock_reads": [],
+  "target_f181": "",
+  "target_f181_hex": "",
+  "cross_calibration": False,
+  "armed": False,
   "message": "",
 }
 
@@ -490,6 +515,12 @@ ready_diff_state = {
 }
 
 
+def _route_metadata(result: dict) -> dict:
+  """Preserve physical-route dimensions that a logical Panda bus number omits."""
+  keys = ("elm327_param", "semantic_path", "alternate_routes")
+  return {key: result[key] for key in keys if key in result}
+
+
 def operation_states_snapshot() -> dict:
   """Copy current job states into the evidence manifest without holding locks during I/O."""
   snapshots = {}
@@ -523,7 +554,7 @@ def _df_progress(status=None, frames=None, bytes_done=None, total=None, message=
 
 def _run_dataflash_mock() -> None:
   # Laptop dry run: ramp progress over a couple of seconds so the collector page
-  # shows movement, then land on complete. The partial/key_missed paths only happen
+  # shows movement, then land on complete. The partial/unusable_partial paths only happen
   # on a real device.
   for done in (4096, 8192, 16384, 24576, DUMP_TOTAL):
     time.sleep(0.4)
@@ -534,9 +565,9 @@ def _run_dataflash_mock() -> None:
                     message=f"Dump complete: {DUMP_TOTAL} bytes (mock).")
 
 
-def _run_dataflash_job() -> None:
+def _run_dataflash_job(use_recovery_payload: bool = False) -> None:
   try:
-    result = dump_dataflash(progress_cb=_df_progress)
+    result = dump_dataflash(progress_cb=_df_progress, auto_reset=use_recovery_payload)
     status = result.get("status", "failed")
     with df_lock:
       df_state.update(
@@ -547,6 +578,12 @@ def _run_dataflash_job() -> None:
         message=result.get("message", ""),
         ready=(status == "complete"),
         size=result.get("bytes", 0) if status == "complete" else 0,
+        payload_variant=result.get("payload_variant", "standard"),
+        coverage_path=result.get("coverage_path", ""),
+        longest_covered_run=result.get("longest_covered_run", 0),
+        known_key_window_covered=result.get("known_key_window_covered", False),
+        route=result.get("route", {}),
+        programming_handoff=result.get("programming_handoff", {}),
       )
   except NotAGNOSError:
     _run_dataflash_mock()
@@ -558,16 +595,19 @@ def _run_dataflash_job() -> None:
     panda_lock.release()
 
 
-def start_dataflash_job() -> bool:
+def start_dataflash_job(*, use_recovery_payload: bool = False) -> bool:
   # panda_lock is the gate: a running extract/dump/collect holds it, so a
   # concurrent dump is rejected here. The job thread releases it in its finally.
   if not panda_lock.acquire(blocking=False):
     return False
   with df_lock:
     df_state.update(status="running", frames=0, bytes=0, total=DUMP_TOTAL,
-                    message="", ready=False, size=0)
+                    message="", ready=False, size=0,
+                    payload_variant="auto-reset-experimental" if use_recovery_payload else "standard",
+                    coverage_path="", longest_covered_run=0, known_key_window_covered=False,
+                    route={}, programming_handoff={})
   try:
-    threading.Thread(target=_run_dataflash_job, name="tsk_dataflash_dump", daemon=True).start()
+    threading.Thread(target=_run_dataflash_job, args=(use_recovery_payload,), name="tsk_dataflash_dump", daemon=True).start()
   except Exception:
     # The job thread never took ownership, so release the lock and clear the state
     # here — otherwise panda_lock would wedge every panda op until a restart.
@@ -585,8 +625,10 @@ def clear_dataflash() -> bool:
     if df_state["status"] == "running":
       return False
     df_state.update(ready=False, status="idle", frames=0, bytes=0,
-                    total=DUMP_TOTAL, message="", size=0)
-  for path in (dump_path(), Path(str(dump_path()) + ".partial")):
+                    total=DUMP_TOTAL, message="", size=0, payload_variant="standard",
+                    coverage_path="", longest_covered_run=0, known_key_window_covered=False,
+                    route={}, programming_handoff={})
+  for path in (dump_path(), partial_dump_path(), partial_coverage_path()):
     try:
       path.unlink()
     except FileNotFoundError:
@@ -610,17 +652,22 @@ def rehydrate_dataflash_state() -> None:
                       bytes=DUMP_TOTAL, total=DUMP_TOTAL, size=DUMP_TOTAL,
                       message="Dump complete.")
     return
-  # No complete dump, but a .partial sidecar means a near-complete run is on disk.
-  # Reflect it as partial so Find stays enabled and the matcher falls back to it
-  # after a restart (it finds the key in the captured range or asks for a re-dump).
+  # No complete dump, but a .partial sidecar means candidate-sized coverage was
+  # retained. Reflect it as partial so Find stays enabled after a restart; new
+  # partials also carry a byte-coverage map used by the matcher.
   try:
-    Path(str(dump_path()) + ".partial").stat()
+    partial_size = partial_dump_path().stat().st_size
   except OSError:
     return
+  try:
+    coverage_known = partial_coverage_path().stat().st_size == DUMP_TOTAL
+  except OSError:
+    coverage_known = False
   with df_lock:
-    df_state.update(ready=False, status="partial", total=DUMP_TOTAL,
-                    message="Partial dump on disk.\nTry the Find Toyota Security Key button.\n"
-                            "If it doesn't work, restart the car into Not Ready To Drive mode and dump again.")
+    df_state.update(ready=False, status="partial", total=DUMP_TOTAL, size=partial_size,
+                    message=("Partial dump on disk with byte coverage map.\n" if coverage_known else
+                             "Legacy partial dump on disk without a coverage map.\n") +
+                            "Try the Find Toyota Security Key button; only cryptographically verified candidates are trusted.")
 
 
 def _can_progress(seconds=None, sync=None, protected=None) -> None:
@@ -641,7 +688,11 @@ def _run_can_mock() -> None:
   with can_lock:
     can_state.update(status="complete", ready=True, seconds=60.0,
                      sync_count=60, protected_count=3600,
-                     message="Collected 60 sync and 3600 protected frames (mock).")
+                     protected_by_id={"0x131": 1200, "0x2e4": 1200, "0x344": 1200},
+                     counts_by_bus={1: {"sync": 60, "protected": 3600}},
+                     control_ready=True, control_counts={"0x131": 1200, "0x2e4": 1200},
+                     elm327_param=1, semantic_path="normal-harness",
+                     message="Collected 60 sync and 3600 protected frames; control-domain oracle is ready (mock).")
 
 
 def _run_can_job() -> None:
@@ -653,8 +704,13 @@ def _run_can_job() -> None:
         status=status,
         sync_count=result.get("sync", can_state["sync_count"]),
         protected_count=result.get("protected", can_state["protected_count"]),
+        protected_by_id=result.get("protected_by_id", {}),
+        counts_by_bus=result.get("counts_by_bus", {}),
+        control_ready=result.get("control_ready", False),
+        control_counts=result.get("control_counts", {}),
         message=result.get("message", ""),
         ready=(status == "complete"),
+        **_route_metadata(result),
       )
   except NotAGNOSError:
     _run_can_mock()
@@ -673,7 +729,8 @@ def start_can_job() -> bool:
     return False
   with can_lock:
     can_state.update(status="running", sync_count=0, protected_count=0,
-                     seconds=0.0, message="", ready=False)
+                     protected_by_id={}, counts_by_bus={}, control_ready=False, control_counts={},
+                     seconds=0.0, message="", ready=False, elm327_param=-1, semantic_path="")
   try:
     threading.Thread(target=_run_can_job, name="tsk_can_collect", daemon=True).start()
   except Exception:
@@ -693,7 +750,8 @@ def clear_can() -> bool:
     if can_state["status"] == "running":
       return False
     can_state.update(ready=False, status="idle", sync_count=0,
-                     protected_count=0, seconds=0.0, message="")
+                     protected_count=0, protected_by_id={}, counts_by_bus={}, control_ready=False,
+                     control_counts={}, seconds=0.0, elm327_param=-1, semantic_path="", message="")
   try:
     can_oracle_path().unlink()
   except FileNotFoundError:
@@ -756,6 +814,7 @@ def _run_sniff_job() -> None:
         markers=result.get("markers", []),
         fd_buses=result.get("fd_buses", []),
         message=result.get("message", ""),
+        **_route_metadata(result),
       )
   except NotAGNOSError:
     _run_sniff_mock()
@@ -797,7 +856,7 @@ def _diag_progress(steps=None, last=None) -> None:
 
 def _run_diag_mock() -> None:
   # Laptop dry run: a realistic out-of-family result — identity reads return, the
-  # session flow passes, and the EPS rejects the Willem key at security access.
+  # session flow passes, and the EPS rejects the known 8965B4x bootloader 01/02 key.
   for i, name in enumerate(("connect panda", "session EXTENDED", "identity", "security SEND_KEY"), 1):
     time.sleep(0.3)
     _diag_progress(steps=i, last=name)
@@ -826,7 +885,7 @@ def _run_diag_mock() -> None:
       exception="NegativeResponseError: securityAccess - invalid key",
       traceback="(mock traceback)",
       frames=0, bytes=0,
-      message="EPS rejected the Willem key at security access — not in the exploit family (mock).",
+      message="EPS rejected the known 8965B4x bootloader 01/02 key — secret/algorithm differs (mock).",
     )
 
 
@@ -847,6 +906,7 @@ def _run_diag_job() -> None:
         frames=result.get("frames", 0),
         bytes=result.get("bytes", 0),
         message=result.get("message", ""),
+        **_route_metadata(result),
       )
   except NotAGNOSError:
     _run_diag_mock()
@@ -885,47 +945,38 @@ def _probe_progress(attempts=None, last=None) -> None:
 
 
 def _run_probe_mock() -> None:
-  # Laptop dry run: EPS on bus 1, every entry sequence times out, and the security
-  # attempt returns a seed but rejects the Willem key — the expected out-of-family shape.
-  names = ("extended -> programming (3s)", "double programming (1s settle)",
-           "default -> programming direct", "tester-present -> programming",
-           "security-first -> programming")
-  for i, name in enumerate(names, 1):
+  # Laptop dry run: model the now-understood Sienna shape — 10 02 times out while the
+  # application resets, then the bootloader reappears on the exact same physical route.
+  for i, name in enumerate(("discover physical route", "programming handoff"), 1):
     time.sleep(0.3)
     _probe_progress(attempts=i, last=name)
-  timeout = "MessageTimeoutError: timeout waiting for response"
+  route = {"eps_bus": 1, "eps_rx_bus": 1, "eps_tx": "0x7a1", "eps_rx": "0x7a9",
+           "elm327_param": 1, "semantic_path": "normal-harness"}
   with probe_lock:
     probe_state.update(
-      status="blocked",
-      attempt_count=8,
-      last="all-bus-listen",
+      status="entered",
+      attempt_count=2,
+      last="bootloader reappeared",
       panda="1.7.0-mock",
       eps_bus=1,
       attempts=[
-        {"name": names[0], "ok": False, "detail": timeout, "programming": True},
-        {"name": names[1], "ok": False, "detail": timeout, "programming": True},
-        {"name": names[2], "ok": False, "detail": timeout, "programming": True},
-        {"name": names[3], "ok": False, "detail": timeout, "programming": True},
-        {"name": "safety-system session (0x04)", "ok": False, "detail": timeout, "programming": False},
-        {"name": names[4], "ok": False, "detail": "send_key NRC 0x35 invalid key", "programming": True},
+        {"name": "route discovery", "ok": True, "detail": str(route), "programming": False},
+        {"name": "DEFAULT -> EXTENDED -> PROGRAMMING", "ok": True,
+         "detail": "endpoint reappeared on preserved route after response timeout", "programming": True},
       ],
-      security={"seed": "0011223344556677", "send_key": "NRC 0x35 invalid key", "programming": ""},
-      security_levels=[
-        {"level": "0x01", "detail": "NRC 0x7e subFunctionNotSupportedInActiveSession"},
-        {"level": "0x03", "detail": "NRC 0x7e subFunctionNotSupportedInActiveSession"},
-        {"level": "0x05", "detail": "NRC 0x31 requestOutOfRange"},
-        {"level": "0x07", "detail": "NRC 0x31 requestOutOfRange"},
-        {"level": "0x09", "detail": "NRC 0x31 requestOutOfRange"},
-        {"level": "0x0b", "detail": "NRC 0x31 requestOutOfRange"},
-      ],
-      did_it_take={"before": "0x03", "after": "NRC 0x31 requestOutOfRange", "switched": None},
-      all_bus=[
-        {"bus": 0, "unique": 22, "saw_eps_response": False, "ids": ["0x25", "0xaa", "0xb4"]},
-        {"bus": 1, "unique": 3, "saw_eps_response": False, "ids": ["0x1c4", "0x3bc"]},
-        {"bus": 2, "unique": 22, "saw_eps_response": False, "ids": ["0x25", "0xaa", "0xb4"]},
-      ],
-      message="No sequence entered on bus 1; the session DID was unreadable so did-it-take is "
-              "inconclusive. Use all-bus-listen (a reroute) as the deciding signal. (mock)",
+      security={}, security_levels=[], all_bus=[],
+      did_it_take={"switched": True,
+                   "evidence": "diagnostic endpoint reappeared on preserved route after application PROGRAMMING reset",
+                   "response_timeout": True},
+      route=route,
+      application_f181={"hex": "0138393635463132303830303000000000", "ascii": ".8965F1208000...."},
+      bootloader_f181={"hex": "0121212121212121212121212121212121", "ascii": ".!!!!!!!!!!!!!!!"},
+      functional_0x777={"before": {"address": "0x777", "observed": True, "rx": "0x7a9", "rx_bus": 1},
+                        "after": {"address": "0x777", "observed": True, "rx": "0x7a9", "rx_bus": 1}},
+      programming_handoff={"route_before": route, "route_after": route,
+                           "programming_response_timeout": True,
+                           "health_before": {"bus": 1}, "health_after_reappearance": {"bus": 1}},
+      message="Programming handoff completed on the preserved normal-harness route. (mock)",
     )
 
 
@@ -943,6 +994,11 @@ def _run_probe_job() -> None:
         security_levels=result.get("security_levels", []),
         did_it_take=result.get("did_it_take", {}),
         all_bus=result.get("all_bus", []),
+        route=result.get("route", {}),
+        application_f181=result.get("application_f181", {}),
+        bootloader_f181=result.get("bootloader_f181", {}),
+        functional_0x777=result.get("functional_0x777", {}),
+        programming_handoff=result.get("programming_handoff", {}),
         message=result.get("message", ""),
       )
   except NotAGNOSError:
@@ -961,7 +1017,9 @@ def start_probe_job() -> bool:
     return False
   with probe_lock:
     probe_state.update(status="running", attempt_count=0, last="", panda="", eps_bus=-1,
-                       attempts=[], security={}, message="")
+                       attempts=[], security={}, security_levels=[], did_it_take={}, all_bus=[],
+                       route={}, application_f181={}, bootloader_f181={}, functional_0x777={},
+                       programming_handoff={}, message="")
   try:
     threading.Thread(target=_run_probe_job, name="tsk_prog_probe", daemon=True).start()
   except Exception:
@@ -1011,6 +1069,7 @@ def _run_readmem_job() -> None:
         status=result.get("status", "failed"), panda=result.get("panda", ""),
         eps_bus=result.get("eps_bus", -1), reads=result.get("reads", []),
         count=len(result.get("reads", [])), message=result.get("message", ""),
+        **_route_metadata(result),
       )
   except NotAGNOSError:
     _run_readmem_mock()
@@ -1083,6 +1142,7 @@ def _run_ident_job() -> None:
         identity=result.get("identity", []), services=result.get("services", []),
         count=len(result.get("identity", [])) + len(result.get("services", [])),
         message=result.get("message", ""),
+        **_route_metadata(result),
       )
   except NotAGNOSError:
     _run_ident_mock()
@@ -1148,6 +1208,7 @@ def _run_reset_job() -> None:
         eps_bus=result.get("eps_bus", -1), reset=result.get("reset", ""),
         attempts=result.get("attempts", []), count=len(result.get("attempts", [])),
         session_after=result.get("session_after", ""), message=result.get("message", ""),
+        **_route_metadata(result),
       )
   except NotAGNOSError:
     _run_reset_mock()
@@ -1240,6 +1301,7 @@ def _run_level3_job() -> None:
         eps_bus=result.get("eps_bus", -1), tests=result.get("tests", []),
         seeds=result.get("seeds", []), primer=result.get("primer", ""),
         count=len(result.get("tests", [])), message=result.get("message", ""),
+        **_route_metadata(result),
       )
   except NotAGNOSError:
     _run_level3_mock()
@@ -1273,26 +1335,41 @@ def _sendkey_progress(step=None, last=None) -> None:
       sendkey_state["last"] = last
 
 
-def _run_sendkey_mock() -> None:
-  # Laptop dry run: the target calibration rejects the known Sienna secret.
+def _run_sendkey_mock(allow_cross_calibration: bool = False) -> None:
+  # Laptop dry run defaults to the safe cross-calibration boundary: identify an
+  # unknown target and stop before a counted SEND_KEY unless explicitly armed.
+  _sendkey_progress(step="identity", last="8965F1208000")
+  time.sleep(0.2)
+  with sendkey_lock:
+    if not allow_cross_calibration:
+      sendkey_state.update(
+        status="armed_required", last="identity", panda="1.7.0-mock", eps_bus=1,
+        session="", seed="", key="", send_key="", post_unlock_reads=[],
+        target_f181=".8965F1208000....", target_f181_hex="0138393635463132303830303000000000",
+        cross_calibration=True, armed=False,
+        message="Unknown calibration identified; no SEND_KEY sent without explicit arming. (mock)",
+      )
+      return
+
   for step in ("extended", "seed", "key", "send_key"):
-    time.sleep(0.25)
+    time.sleep(0.2)
     _sendkey_progress(step=step, last=step)
   with sendkey_lock:
     sendkey_state.update(
       status="invalid_key", last="send_key", panda="1.7.0-mock", eps_bus=1, session="extended",
       seed="da2df2eff64d95f5426bf3af70bb49aa",
       key="3f9c1a04d8b27e6510c23a9fbe4d7182",
-      send_key="NRC 0x35 invalidKey",
-      post_unlock_reads=[],
-      message="Known Sienna key derivation rejected as invalid; the target uses a different "
-              "secret or algorithm. Export the evidence bundle. (mock)",
+      send_key="NRC 0x35 invalidKey", post_unlock_reads=[],
+      target_f181=".8965F1208000....", target_f181_hex="0138393635463132303830303000000000",
+      cross_calibration=True, armed=True,
+      message="8965B4512000 application 0x03/0x04 derivation rejected on the armed target. (mock)",
     )
 
 
-def _run_sendkey_job() -> None:
+def _run_sendkey_job(allow_cross_calibration: bool = False) -> None:
   try:
-    result = send_willem_key(progress_cb=_sendkey_progress)
+    result = send_sienna_application_key(progress_cb=_sendkey_progress,
+                                         allow_cross_calibration=allow_cross_calibration)
     with sendkey_lock:
       sendkey_state.update(
         status=result.get("status", "failed"), panda=result.get("panda", ""),
@@ -1300,10 +1377,15 @@ def _run_sendkey_job() -> None:
         seed=result.get("seed", ""), key=result.get("key", ""),
         send_key=result.get("send_key", ""),
         post_unlock_reads=result.get("post_unlock_reads", []),
+        target_f181=result.get("target_f181", ""),
+        target_f181_hex=result.get("target_f181_hex", ""),
+        cross_calibration=result.get("cross_calibration", False),
+        armed=result.get("armed", False),
         message=result.get("message", ""),
+        **_route_metadata(result),
       )
   except NotAGNOSError:
-    _run_sendkey_mock()
+    _run_sendkey_mock(allow_cross_calibration)
   except Exception as e:
     with sendkey_lock:
       sendkey_state.update(status="failed", message=str(e))
@@ -1312,14 +1394,17 @@ def _run_sendkey_job() -> None:
     panda_lock.release()
 
 
-def start_sendkey_job() -> bool:
+def start_sendkey_job(*, allow_cross_calibration: bool = False) -> bool:
   if not panda_lock.acquire(blocking=False):
     return False
   with sendkey_lock:
     sendkey_state.update(status="running", last="", panda="", eps_bus=-1, session="",
-                         seed="", key="", send_key="", post_unlock_reads=[], message="")
+                         seed="", key="", send_key="", post_unlock_reads=[], target_f181="",
+                         target_f181_hex="", cross_calibration=False, armed=allow_cross_calibration,
+                         message="")
   try:
-    threading.Thread(target=_run_sendkey_job, name="tsk_sendkey_probe", daemon=True).start()
+    threading.Thread(target=_run_sendkey_job, args=(allow_cross_calibration,),
+                     name="tsk_sendkey_probe", daemon=True).start()
   except Exception:
     with sendkey_lock:
       sendkey_state.update(status="failed", message="Could not start the send-key probe.")
@@ -1421,6 +1506,7 @@ def _run_preamble_job() -> None:
         variants=result.get("variants", []), dtc=result.get("dtc", {}),
         reads=result.get("reads", []), liveness=result.get("liveness", ""),
         message=result.get("message", ""),
+        **_route_metadata(result),
       )
   except NotAGNOSError:
     _run_preamble_mock()
@@ -1507,6 +1593,7 @@ def _run_sweep_job() -> None:
         responder_routes=result.get("responder_routes", []), records=result.get("records", 0),
         frontier=result.get("frontier", ""),
         hypotheses=result.get("hypotheses", []), message=result.get("message", ""),
+        **_route_metadata(result),
       )
   except NotAGNOSError:
     _run_sweep_mock()
@@ -1587,6 +1674,7 @@ def _run_ready_job() -> None:
         diff=[], responders=[], cross=[], seeds=[], frames=result.get("frames", 0),
         tx_echoes_filtered=result.get("tx_echoes_filtered", 0),
         path=result.get("path", ""), message=result.get("message", ""),
+        **_route_metadata(result),
       )
   except NotAGNOSError:
     _run_ready_mock()
@@ -1657,6 +1745,7 @@ def _run_ready_diff_job() -> None:
         diff=result.get("diff", []),
         frames=result.get("frames", 0), path=result.get("path", ""),
         message=result.get("message", ""),
+        **_route_metadata(result),
       )
   except NotAGNOSError:
     _run_ready_diff_mock()
@@ -1750,12 +1839,77 @@ class TSKWebHandler(BaseHTTPRequestHandler):
         return
 
       try:
+        # Do not spend a programming/extraction attempt unless enough persisted CAN
+        # evidence already exists to cryptographically validate the returned bytes.
+        from tsk.lib.matcher import (
+          MATCH_FLOOR, MIN_CONTROL_MATCHES_PER_ID, MIN_SYNC_MATCHES,
+          load_oracle_samples, verify_candidate_from_oracle,
+        )
+        from tsk.lib.secoc_profile import OPENPILOT_CONTROL_PROTECTED_ADDRS
+        try:
+          sync_samples, protected_samples, _ = load_oracle_samples(can_oracle_path())
+        except OSError:
+          sync_samples, protected_samples = [], []
+        sync_count, protected_count = len(sync_samples), len(protected_samples)
+        control_samples = {
+          addr: sum(1 for sample in protected_samples if sample["addr"] == addr)
+          for addr in OPENPILOT_CONTROL_PROTECTED_ADDRS
+        }
+        control_missing = [
+          f"0x{addr:03x}" for addr in sorted(OPENPILOT_CONTROL_PROTECTED_ADDRS)
+          if control_samples[addr] < MIN_CONTROL_MATCHES_PER_ID
+        ]
+        if (sync_count < MIN_SYNC_MATCHES or (sync_count + protected_count) < MATCH_FLOOR or
+            control_missing):
+          self._send_json({
+            "ok": False,
+            "status": "oracle_required",
+            "control_samples": {f"0x{k:03x}": v for k, v in sorted(control_samples.items())},
+            "message": (f"Collect CAN evidence before extraction. Current usable oracle: {sync_count} sync + "
+                        f"{protected_count} protected. Installation requires at least {MIN_SYNC_MATCHES} sync, "
+                        f"{MATCH_FLOOR} total samples, and {MIN_CONTROL_MATCHES_PER_ID} samples for each current "
+                        f"openpilot control ID. Missing: {', '.join(control_missing) or 'none'}. "
+                        "No programming request was sent."),
+          }, status=HTTPStatus.CONFLICT)
+          return
+
         secoc_key = TSKExtractor.hack()
+        verification = verify_candidate_from_oracle(bytes.fromhex(secoc_key))
+        if verification.get("status") != "found":
+          self._send_json({
+            "ok": False,
+            "status": "candidate_unverified",
+            "candidate": secoc_key,
+            "verification": verification,
+            "extraction": dict(TSKExtractor._last_extraction_metadata),
+            "message": ("RAM extraction produced a checksum-valid KEY_4 candidate, but it did not pass "
+                        "the persisted SecOC CAN oracle. The candidate was NOT installed. "
+                        + verification.get("message", "")),
+          }, status=HTTPStatus.UNPROCESSABLE_ENTITY)
+          return
+        if not verification.get("control_ready", False):
+          self._send_json({
+            "ok": False,
+            "status": "candidate_verified_noncontrol_domain",
+            "candidate": secoc_key,
+            "verification": verification,
+            "extraction": dict(TSKExtractor._last_extraction_metadata),
+            "message": ("The candidate is cryptographically real, but it was not verified for every current "
+                        "openpilot control SecOC ID and was NOT installed. " + verification.get("message", "")),
+          }, status=HTTPStatus.UNPROCESSABLE_ENTITY)
+          return
+
         KeyFileManager().install_key(secoc_key)
         self._send_json({
           "ok": True,
+          "status": "verified",
           "key": secoc_key,
-          "message": f"Success!\n\nThis is your key:\n{format_key(secoc_key)}\n\nExport the evidence bundle now.",
+          "verification": verification,
+          "extraction": dict(TSKExtractor._last_extraction_metadata),
+          "message": (f"Success!\n\nCryptographically verified key:\n{format_key(secoc_key)}\n\n"
+                      f"{verification['matches']} CAN-oracle matches "
+                      f"(sync {verification['sync']}, protected {verification['protected']}).\n\n"
+                      "Export the evidence bundle now."),
         })
       except NotAGNOSError:
         self._send_extract_dry_run()
@@ -1783,7 +1937,7 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       try:
         from tsk.lib.matcher import run as run_matcher
         result = run_matcher()
-        if result["status"] == "found":
+        if result["status"] == "found" and result.get("control_ready", False):
           KeyFileManager().install_key(result["key"])
           # Same body for a complete or a partial recovery — the title carries
           # "Success!", so the body opens straight at the key.
@@ -1794,13 +1948,36 @@ class TSKWebHandler(BaseHTTPRequestHandler):
           message = (
             f"This is your key:\n{format_key(result['key'])}\n\n"
             f"{detail}\n\n"
+            "Control-domain verification passed for 0x131 and 0x2E4.\n\n"
             "Export the evidence bundle now."
           )
           self._send_json({
             "ok": True,
             "status": "found",
             "key": result["key"],
+            "protected_by_id": result.get("protected_by_id", {}),
+            "protected_by_bus": result.get("protected_by_bus", {}),
+            "domain": result.get("domain", ""),
+            "control_ready": True,
+            "control_matches_by_id": result.get("control_matches_by_id", {}),
+            "alternate_verified": result.get("alternate_verified", []),
             "message": message,
+            **RebootManager.key_status_payload(),
+          })
+        elif result["status"] == "found":
+          self._send_json({
+            "ok": True,
+            "status": "verified_noncontrol_domain",
+            "key": result["key"],
+            "message": ("A cryptographically valid key candidate was found, but it was not verified for "
+                        "all current openpilot control SecOC IDs and was NOT installed. " + result.get("message", "")),
+            "protected_by_id": result.get("protected_by_id", {}),
+            "protected_by_bus": result.get("protected_by_bus", {}),
+            "domain": result.get("domain", ""),
+            "control_ready": False,
+            "control_matches_by_id": result.get("control_matches_by_id", {}),
+            "control_missing": result.get("control_missing", []),
+            "alternate_verified": result.get("alternate_verified", []),
             **RebootManager.key_status_payload(),
           })
         else:
@@ -1813,9 +1990,18 @@ class TSKWebHandler(BaseHTTPRequestHandler):
             "matches": result["matches"],
             "sync": result["sync"],
             "protected": result["protected"],
+            "protected_by_id": result.get("protected_by_id", {}),
+            "protected_by_bus": result.get("protected_by_bus", {}),
+            "domain": result.get("domain", ""),
+            "control_ready": result.get("control_ready", False),
+            "control_matches_by_id": result.get("control_matches_by_id", {}),
+            "control_missing": result.get("control_missing", []),
+            "alternate_verified": result.get("alternate_verified", []),
             "address": result["address"],
             "offset": result["offset"],
             "windows_scanned": result["windows_scanned"],
+            "windows_eligible": result.get("windows_eligible", result["windows_scanned"]),
+            "coverage_known": result.get("coverage_known", False),
             "survivors": result["survivors"],
             "malformed": result["malformed"],
             "dump_partial": result["dump_partial"],
@@ -1882,14 +2068,17 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       return
 
     if path == "/api/dataflash-dump":
-      if not start_dataflash_job():
+      request = self._read_json_body()
+      use_recovery_payload = bool(request.get("use_recovery_payload", False))
+      if not start_dataflash_job(use_recovery_payload=use_recovery_payload):
         self._send_json({
           "ok": False,
           "status": "running",
           "message": "A DataFlash dump or another panda operation is already in progress.",
         }, status=HTTPStatus.CONFLICT)
         return
-      self._send_json({"ok": True, "status": "running"})
+      self._send_json({"ok": True, "status": "running",
+                       "payload_variant": "auto-reset-experimental" if use_recovery_payload else "standard"})
       return
 
     if path == "/api/can-sniff":
@@ -2014,14 +2203,16 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       return
 
     if path == "/api/sendkey-probe":
-      if not start_sendkey_job():
+      request = self._read_json_body()
+      allow_cross_calibration = bool(request.get("allow_cross_calibration", False))
+      if not start_sendkey_job(allow_cross_calibration=allow_cross_calibration):
         self._send_json({
           "ok": False,
           "status": "running",
           "message": "A panda operation is already in progress.",
         }, status=HTTPStatus.CONFLICT)
         return
-      self._send_json({"ok": True, "status": "running"})
+      self._send_json({"ok": True, "status": "running", "armed": allow_cross_calibration})
       return
 
     if path == "/api/clear-cache":
@@ -2056,16 +2247,21 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       return
 
     if path == "/api/health":
+      # Keep health cheap and deterministic off-device. Hostname/address discovery can
+      # block for seconds on macOS when mDNS/DNS is unhappy and is not needed by the
+      # workstation health check. AGNOS still reports the reachable device addresses.
+      agnos = is_agnos()
+      addresses = get_ipv4_addresses() if agnos else []
       self._send_json({
         "status": "ok",
         "service": "tsk_web",
         "host": HOST,
         "port": PORT,
-        "url": get_tsk_url(),
-        "addresses": get_ipv4_addresses(),
+        "url": f"http://{addresses[0]}:{PORT}" if addresses else None,
+        "addresses": addresses,
         "asset_dir": str(ASSET_DIR),
-        "dry_run": not is_agnos(),
-        "is_agnos": is_agnos(),
+        "dry_run": not agnos,
+        "is_agnos": agnos,
       }, send_body=send_body)
       return
 

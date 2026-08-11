@@ -333,7 +333,7 @@
         <a class="group-item action" href="/uds-sweep.html">Exhaustive UDS sweep <span class="chevron">›</span></a>
         <a class="group-item action" href="/preamble-probe.html">Programming preamble <span class="chevron">›</span></a>
         <a class="group-item action" href="/read-mem.html">Read-memory characterization <span class="chevron">›</span></a>
-        <a class="group-item action" href="/prog-probe.html">Programming &amp; security probe <span class="chevron">›</span></a>
+        <a class="group-item action" href="/prog-probe.html">Programming handoff probe <span class="chevron">›</span></a>
         <a class="group-item action" href="/level3-probe.html">Security level 0x03 isolation <span class="chevron">›</span></a>
         <a class="group-item action" href="/reset-probe.html">Reset-window probe <span class="chevron">›</span></a>
       </div>
@@ -347,7 +347,7 @@
       <div class="group">
         <a class="group-item action" href="/extractor.html">Known Sienna RAM path <span class="chevron">›</span></a>
         <a class="group-item action" href="/dataflash-diag.html">Instrumented DataFlash path <span class="chevron">›</span></a>
-        <a class="group-item action" href="/sendkey-probe.html">Test known seed/key hypothesis <span class="chevron">›</span></a>
+        <a class="group-item action" href="/sendkey-probe.html">Application 0x03/0x04 comparison <span class="chevron">›</span></a>
       </div>
 
       <div class="section-label">Key candidate validation</div>
@@ -356,7 +356,7 @@
           <div class="prereq-dot" id="canDot"></div>
           <div class="prereq-body">
             <div class="prereq-title">Capture all CAN; annotate prior SecOC IDs</div>
-            <div class="prereq-detail" id="canDetail">Sync 0 / 50<br>Protected 0 / 30</div>
+            <div class="prereq-detail" id="canDetail">Sync 0 / 50<br>Protected 0 / 30<br>Control 0x131 0 / 2 · 0x2E4 0 / 2</div>
           </div>
           <div class="prereq-chevron">›</div>
         </a>
@@ -664,7 +664,7 @@
           els.dfDetail.style.display = "";
           els.dfDetail.style.color = "#ff9500";
           els.dfDetail.textContent = df.message || "Partial dump. Try Find, or dump again.";
-        } else if (status === "key_missed") {
+        } else if (status === "unusable_partial") {
           els.dfDetail.style.display = "";
           els.dfDetail.style.color = "#ff3b30";
           els.dfDetail.textContent = df.message || "Not enough data. Dump again.";
@@ -686,7 +686,10 @@
           state.dfBytes = df.bytes || 0;
           state.dfTotal = df.total || 32768;
           els.canDot.className = can.ready ? "prereq-dot ready" : "prereq-dot";
-          els.canDetail.innerHTML = `Sync ${can.sync_count} / 50<br>Protected ${can.protected_count} / 30`;
+          const controlCounts = can.control_counts || {};
+          const controlLine = can.control_ready ? "Control IDs ready" :
+            `Control 0x131 ${controlCounts["0x131"] || 0} / 2 · 0x2E4 ${controlCounts["0x2e4"] || 0} / 2`;
+          els.canDetail.innerHTML = `Sync ${can.sync_count} / 50<br>Protected ${can.protected_count} / 30<br>${controlLine}`;
           if (df.ready) {
             els.dfDot.className = "prereq-dot ready";
           } else if (df.status === "partial") {
@@ -754,7 +757,7 @@
           state.dfReady = false;
           state.dfPartial = false;
           els.canDot.className = "prereq-dot";
-          els.canDetail.innerHTML = "Sync 0 / 50<br>Protected 0 / 30";
+          els.canDetail.innerHTML = "Sync 0 / 50<br>Protected 0 / 30<br>Control 0x131 0 / 2 · 0x2E4 0 / 2";
           els.dfDot.className = "prereq-dot";
           els.dfDetail.style.display = "none";
           els.dfDetail.textContent = "";
@@ -796,6 +799,8 @@
             setKey(result.key);
             await loadRebootActions();
             showAlert("Success!", result.message);
+          } else if (result.status === "verified_noncontrol_domain") {
+            showAlert("Candidate verified — not installed", result.message);
           } else if (!response.ok || result.status === "error") {
             showAlert("Unexpected error", result.message || "The key finder failed.");
           } else if (result.dump_partial) {

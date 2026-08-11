@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Send Willem Key (0x03/0x04)</title>
+    <title>Application SecurityAccess (0x03/0x04)</title>
     <style>
       * { box-sizing: border-box; margin: 0; }
 
@@ -96,21 +96,24 @@
         <a class="back-link" href="/">TSK Manager</a>
       </div>
       <header class="page-header">
-        <div class="page-title">Send Willem Key</div>
+        <div class="page-title">Application SecurityAccess</div>
       </header>
       <div class="warn-card">
-        This sends <b>one</b> security key (level 0x03/0x04) computed with the Sienna secret,
-        to test whether the target calibration shares it. A wrong key can <b>temporarily lock</b> the EPS
-        security. Run it <b>once</b>; if it says invalid or locked, power-cycle the panda /
-        re-enter Not Ready to Drive before trying again.
+        This tests level <b>0x03/0x04</b> with the firmware-recovered <b>8965B4512000 application secret</b>.
+        It is not the f05f… bootloader 0x01/0x02 secret. A wrong SEND_KEY is a counted attempt.
+        On any other calibration the probe stops before SEND_KEY unless explicitly armed below.
       </div>
-      <button class="run-btn" id="runBtn">Send the key once</button>
+      <div class="warn-card">
+        <label><input type="checkbox" id="crossArm"> Arm one counted cross-calibration 0x03/0x04 comparison.</label>
+      </div>
+      <button class="run-btn" id="runBtn">Run application 0x03/0x04 probe</button>
       <div class="terminal" id="terminal"></div>
     </main>
 
     <script>
       const terminal = document.getElementById("terminal");
       const runBtn = document.getElementById("runBtn");
+      const crossArm = document.getElementById("crossArm");
 
       function termWrite(text, className) {
         const span = document.createElement("span");
@@ -137,9 +140,11 @@
 
       function render(s) {
         termWrite("");
-        termWrite("Send Willem key — level 0x03/0x04", "ok");
+        termWrite("8965B4512000 application key — level 0x03/0x04", "ok");
         termWrite("Panda: " + (s.panda || "?"));
         epsBusLine(s);
+        termWrite("Target F181: " + (s.target_f181 || "?"), s.cross_calibration ? "warn" : "");
+        termWrite("Cross-calibration armed: " + (s.armed ? "yes" : "no"), s.armed ? "warn" : "dim");
         termWrite("Session: " + (s.session || "?"), s.session === "extended" ? "" : "warn");
         termWrite("");
         termWrite("Seed: " + (s.seed || "-"), s.seed ? "" : "dim");
@@ -168,22 +173,28 @@
         runBtn.disabled = true;
         runBtn.textContent = "Sending...";
         try {
-          const r = await fetch("/api/sendkey-probe", { method: "POST", cache: "no-store" });
+          const r = await fetch("/api/sendkey-probe", {
+            method: "POST",
+            cache: "no-store",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ allow_cross_calibration: crossArm.checked }),
+          });
           const started = await r.json();
           if (!started.ok && started.status !== "running") {
             termWrite(started.message || "Could not start.", "err");
             runBtn.disabled = false;
-            runBtn.textContent = "Send the key once";
+            runBtn.textContent = "Run application 0x03/0x04 probe";
             return;
           }
         } catch (err) {
           termWrite(String(err), "err");
           runBtn.disabled = false;
-          runBtn.textContent = "Send the key once";
+          runBtn.textContent = "Run application 0x03/0x04 probe";
           return;
         }
 
-        termWrite("Requesting seed, computing key, sending once...");
+        termWrite(crossArm.checked ? "Cross-calibration attempt armed; identifying target first..." :
+                                      "Identifying target before any counted SEND_KEY...");
         let s = null;
         while (true) {
           await sleep(500);

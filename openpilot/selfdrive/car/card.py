@@ -129,7 +129,10 @@ class Car:
 
       secoc_key = self.params.get("SecOCKey")
       if secoc_key is not None:
-        saved_secoc_key = bytes.fromhex(secoc_key.strip())
+        try:
+          saved_secoc_key = bytes.fromhex(secoc_key.strip())
+        except ValueError:
+          saved_secoc_key = b""
         if len(saved_secoc_key) == 16:
           self.CP.secOcKeyAvailable = True
           self.CI.CS.secoc_key = saved_secoc_key

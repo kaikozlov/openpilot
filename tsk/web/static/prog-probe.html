@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Programming Session Probe</title>
+    <title>Programming Handoff Probe</title>
     <style>
       * { box-sizing: border-box; margin: 0; }
 
@@ -68,7 +68,7 @@
         <a class="back-link" href="/">TSK Manager</a>
       </div>
       <header class="page-header">
-        <div class="page-title">Programming Session Probe</div>
+        <div class="page-title">Programming Handoff Probe</div>
       </header>
       <div class="terminal" id="terminal"></div>
     </main>
@@ -93,70 +93,66 @@
 
       function renderProbe(s) {
         termWrite("");
-        termWrite("Programming Session Probe", "ok");
+        termWrite("Programming Handoff Probe", "ok");
         termWrite("Panda: " + (s.panda || "?"));
+
+        const route = s.route || {};
         if (s.eps_bus === undefined || s.eps_bus === -1) {
-          termWrite("EPS bus: no response on 0/1/2", "err");
+          termWrite("EPS route: no response", "err");
         } else {
-          termWrite("EPS bus: " + s.eps_bus, s.eps_bus === 0 ? "" : "warn");
+          termWrite("Route: " + (route.eps_tx || "?") + "/b" + s.eps_bus +
+                    " -> " + (route.eps_rx || "?") + "/b" + (route.eps_rx_bus ?? "?"));
+          termWrite("Panda physical route: ELM param " + (route.elm327_param ?? "?") +
+                    " (" + (route.semantic_path || "?") + ")",
+                    route.semantic_path === "normal-harness" ? "ok" : "warn");
+        }
+
+        const app = s.application_f181 || {};
+        const boot = s.bootloader_f181 || {};
+        if (app.ascii || boot.ascii) {
+          termWrite("");
+          termWrite("F181 identity:");
+          termWrite("  application: " + (app.ascii || "-"));
+          termWrite("  after handoff: " + (boot.ascii || "-"));
         }
 
         termWrite("");
-        termWrite("Entry sequences:");
+        termWrite("Controlled transition:");
         for (const a of (s.attempts || [])) {
           const mark = a.ok ? "✓ " : "✗ ";
           termWrite("  " + mark + a.name, a.ok ? "ok" : "err");
           termWrite("      " + a.detail, a.ok ? "ok" : "dim");
         }
 
-        const levels = s.security_levels || [];
-        if (levels.length) {
-          termWrite("");
-          termWrite("Security seed by level (extended):");
-          for (const lv of levels) {
-            const got = String(lv.detail).indexOf("seed ") === 0;
-            termWrite("  " + lv.level + " : " + lv.detail, got ? "ok" : "dim");
-          }
-        }
-
         const dit = s.did_it_take || {};
-        if (dit.after !== undefined) {
+        if (dit.switched !== undefined) {
           termWrite("");
-          termWrite("Did programming take? (0xF186)");
-          termWrite("  before : " + (dit.before || "-"));
-          let ditCls = "warn";
-          if (dit.switched === true) ditCls = "ok";
-          else if (dit.switched === false) ditCls = "err";
-          termWrite("  after  : " + (dit.after || "-"), ditCls);
-          if (dit.switched === true) termWrite("  -> switched to programming silently", "ok");
-          else if (dit.switched === false) termWrite("  -> session did not change (refused)", "err");
-          else termWrite("  -> session unreadable (inconclusive)", "warn");
+          termWrite("Handoff discriminator:");
+          termWrite("  endpoint reappeared: " + (dit.switched ? "yes" : "no"), dit.switched ? "ok" : "warn");
+          termWrite("  initial 10 02 response timed out: " + (dit.response_timeout ? "yes" : "no"),
+                    dit.response_timeout ? "warn" : "dim");
+          if (dit.evidence) termWrite("  " + dit.evidence, "dim");
         }
 
-        const allbus = s.all_bus || [];
-        if (allbus.length) {
+        const functional = s.functional_0x777 || {};
+        if (functional.before || functional.after) {
           termWrite("");
-          termWrite("All-bus listen after PROGRAMMING:");
-          for (const b of allbus) {
-            let line = "  bus " + b.bus + ": " + b.unique + " IDs";
-            if (b.saw_eps_response) line += "  <- EPS response seen here";
-            termWrite(line, b.saw_eps_response ? "ok" : "dim");
-          }
+          termWrite("Sienna-calibration functional 0x777 check:");
+          termWrite("  before: " + ((functional.before || {}).observed ? "observed" : "not observed"));
+          termWrite("  after : " + ((functional.after || {}).observed ? "observed" : "not observed"));
         }
 
-        const sec = s.security || {};
-        if (sec.seed || sec.send_key) {
+        const handoff = s.programming_handoff || {};
+        if (handoff.health_before || handoff.health_after_request || handoff.health_after_reappearance) {
           termWrite("");
-          termWrite("Security access:");
-          termWrite("  seed     : " + (sec.seed || "-"));
-          termWrite("  send_key : " + (sec.send_key || "-"), sec.send_key === "accepted" ? "ok" : "warn");
-          if (sec.programming) termWrite("  programming after key : " + sec.programming);
+          termWrite("Panda health telemetry captured around transition.", "dim");
+          termWrite("Export the evidence bundle for complete health/can_health fields.", "dim");
         }
 
         termWrite("");
         if (s.message) termWrite(s.message, s.status === "entered" ? "ok" : "warn");
         termWrite("");
-        termWrite("Export the evidence bundle to preserve the complete result.", "dim");
+        termWrite("No SecurityAccess key, payload, download, or flash request is sent by this probe.", "dim");
       }
 
       async function runProbe() {
@@ -167,7 +163,7 @@
           termWrite("A probe is already in progress — attaching...");
         } else {
           termWrite("Starting programming-session probe.");
-          termWrite("The car will freak out — don't worry. This tries a few ways in; nothing is dumped.", "warn");
+          termWrite("The car may reset the EPS. One firmware-informed handoff is tested; nothing is dumped.", "warn");
           try {
             const r = await fetch("/api/prog-probe", { method: "POST", cache: "no-store" });
             const started = await r.json();
@@ -181,7 +177,7 @@
           }
         }
 
-        termWrite("Trying entry sequences (this takes ~30s)...");
+        termWrite("Testing one route-preserving programming handoff...");
         let last = -1;
         while (true) {
           await sleep(500);
@@ -189,7 +185,7 @@
           if (s.status === "running") {
             if ((s.attempt_count || 0) !== last) {
               last = s.attempt_count || 0;
-              termWrite("  sequence " + last + (s.last ? "  " + s.last : ""));
+              termWrite("  step " + last + (s.last ? "  " + s.last : ""));
             }
             continue;
           }

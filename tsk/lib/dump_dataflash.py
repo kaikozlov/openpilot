@@ -17,21 +17,26 @@ import subprocess
 import time
 from pathlib import Path
 
-from tsk.lib.env import is_agnos, DATAFLASH_DIR, DATAFLASH_PAYLOAD_PATH
+from tsk.lib.diagnostic_route import (
+  AmbiguousDiagnosticRouteError, discover_eps_route_with_routing, route_fields,
+)
+from tsk.lib.env import (
+  is_agnos, DATAFLASH_AUTORESET_PAYLOAD_PATH, DATAFLASH_DIR, DATAFLASH_PAYLOAD_PATH,
+)
 from tsk.lib.extractor import NotAGNOSError, RetryError, TSKExtractor
+from tsk.lib.programming import ProgrammingHandoffError, enter_programming_bootloader, uds_client
 
 # EPS UDS parameters (shared with the extractor)
 ADDR = TSKExtractor.ADDR  # 0x7a1
-BUS = TSKExtractor.BUS    # 0
+CANDIDATE_BUSES = TSKExtractor.CANDIDATE_BUSES
 
 # Dump range
 DUMP_START = 0xFF200000
 DUMP_END = 0xFF208000
 DUMP_TOTAL = DUMP_END - DUMP_START  # 0x8000 == 32768
 
-# Known SecOC key location (offset from DUMP_START). The 2021+ Sienna and Yaris EPS
-# keys both sit at 0x6e14; a partial dump is only usable if it captured this 16-byte
-# window, since the matcher can't find a key that landed in a dropped (zeroed) gap.
+# Historical Sienna/Yaris candidate location. Retained for targeted diagnostics only;
+# partial-dump usability is no longer gated on this cross-calibration assumption.
 KEY_SIZE = 16
 KNOWN_KEY_OFFSET = 0x6E14
 
@@ -43,6 +48,11 @@ PAYLOAD_LOAD_SIZE = 0x1000
 TRIGGER_ADDR = 0x000E0000
 TRIGGER_SIZE = 0x8000
 PAYLOAD_SHA256 = "d48988366b5e6d2ddd7438caca5e6f6f02daba9b650263c323a2ffd770a06e34"
+# Local derivative of Vance candidate-f05: identical verified RH850 body/CRC region,
+# but CMAC + ciphertext rebuilt under the analyzed Sienna's normal PAYLOAD_BUILD_SECRET
+# instead of candidate-f05's unusual bootloader-SecurityAccess-secret build. The original external
+# candidate ciphertext is 296d87d2... and is provenance evidence only, not sent.
+AUTORESET_PAYLOAD_SHA256 = "bf62449f85648ea24708961749bf53f75f36083c01bcf54114d567da0e178725"
 
 # Frame collection timing
 IDLE_TIMEOUT = 10.0
@@ -56,75 +66,108 @@ def dump_path() -> Path:
   return Path(DATAFLASH_DIR) / DUMP_FILENAME
 
 
+def partial_dump_path() -> Path:
+  return Path(str(dump_path()) + ".partial")
+
+
+def partial_coverage_path() -> Path:
+  return Path(str(partial_dump_path()) + ".coverage")
+
+
 def _noop(**kwargs) -> None:
   pass
 
 
-def _finalize(dump_buf, received, frames_count, bytes_received) -> dict:
-  """Classify a finished collection into complete | partial | key_missed and persist it.
+def _longest_covered_run(received) -> int:
+  longest = 0
+  current = 0
+  for covered in received:
+    if covered:
+      current += 1
+      longest = max(longest, current)
+    else:
+      current = 0
+  return longest
 
-  Pure post-collection logic (no car I/O), so it is unit-testable off-device. A
-  partial is only "allowed" — written as the .partial sidecar and offered to Find —
-  when the known key window (KNOWN_KEY_OFFSET) is fully covered; otherwise it's
-  key_missed: a partial dump that didn't capture the key, whether it got one frame or
-  nearly all of it. key_missed persists no file, since Find can't use it.
+
+def _finalize(dump_buf, received, frames_count, bytes_received) -> dict:
+  """Persist complete dumps or any partial with a candidate-sized covered window.
+
+  The old collector kept a partial only when the Sienna/Yaris 0x6E14 key window was
+  present. That silently discarded useful cross-calibration evidence. New partials
+  carry a byte-coverage sidecar and are eligible whenever at least one contiguous
+  16-byte window exists; the CMAC matcher decides whether any covered window is a key.
   """
-  # Complete: full coverage.
+  path = dump_path()
+  partial_path = partial_dump_path()
+  coverage_path = partial_coverage_path()
+
+  # Complete: full coverage. Remove stale partial artifacts from an earlier run.
   if bytes_received >= DUMP_TOTAL:
-    path = dump_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(bytes(dump_buf))
+    for stale in (partial_path, coverage_path):
+      try:
+        stale.unlink()
+      except FileNotFoundError:
+        pass
     return {
       "status": "complete",
       "frames": frames_count,
       "bytes": bytes_received,
       "total": DUMP_TOTAL,
       "dump_path": str(path),
+      "coverage_path": "",
       "message": "Dump complete.",
     }
 
-  # A dump that didn't capture the key window is unusable no matter how much it got —
-  # one frame or nearly all of it, it's a partial dump without enough data. Same
-  # remedy either way: restart the car and dump again (a 30s-later restart is just a
-  # cold start, nothing special). Persist no file — Find can't use it.
-  key_covered = all(received[KNOWN_KEY_OFFSET:KNOWN_KEY_OFFSET + KEY_SIZE])
-  if not key_covered:
+  longest_run = _longest_covered_run(received)
+  known_key_covered = all(received[KNOWN_KEY_OFFSET:KNOWN_KEY_OFFSET + KEY_SIZE])
+  if longest_run < KEY_SIZE:
     return {
-      "status": "key_missed",
+      "status": "unusable_partial",
       "frames": frames_count,
       "bytes": bytes_received,
       "total": DUMP_TOTAL,
       "dump_path": "",
-      "message": (f"Partial dump ({bytes_received}/{DUMP_TOTAL} bytes).\nNot enough data.\n"
-                  "Restart the car into Not Ready To Drive mode and dump again."),
+      "coverage_path": "",
+      "longest_covered_run": longest_run,
+      "known_key_window_covered": known_key_covered,
+      "message": (f"Partial dump ({bytes_received}/{DUMP_TOTAL} bytes) has no contiguous "
+                  f"{KEY_SIZE}-byte candidate window. Restart the car into Not Ready To Drive mode and dump again."),
     }
 
-  # Usable partial: the key window is covered even though the full range isn't. Save
-  # to a sidecar so it can't masquerade as the canonical complete dump the matcher
-  # prefers; its existence is what enables Find on a partial.
-  partial_path = Path(str(dump_path()) + ".partial")
   partial_path.parent.mkdir(parents=True, exist_ok=True)
   partial_path.write_bytes(bytes(dump_buf))
+  coverage_path.write_bytes(bytes(received))
   return {
     "status": "partial",
     "frames": frames_count,
     "bytes": bytes_received,
     "total": DUMP_TOTAL,
     "dump_path": str(partial_path),
-    "message": (f"Partial dump ({bytes_received}/{DUMP_TOTAL} bytes).\n"
-                "Try the Find Toyota Security Key button.\n"
-                "If it doesn't work, restart the car into Not Ready To Drive mode and dump again."),
+    "coverage_path": str(coverage_path),
+    "longest_covered_run": longest_run,
+    "known_key_window_covered": known_key_covered,
+    "message": (f"Partial dump ({bytes_received}/{DUMP_TOTAL} bytes; longest covered run {longest_run}).\n"
+                "All fully covered 16-byte windows are eligible for cryptographic matching.\n"
+                "If no key verifies, restart the car into Not Ready To Drive mode and dump again."),
   }
 
 
-def dump(progress_cb=None) -> dict:
+def dump(progress_cb=None, *, auto_reset: bool = False) -> dict:
   """Upload the payload and dump 0xFF200000-0xFF208000 from the EPS.
+
+  ``auto_reset`` explicitly opts into a local derivative of the statically recovered
+  candidate-f05 body: the same full dump + boot-reset code, re-authenticated under
+  the analyzed Sienna's normal payload-build gate. The raw external candidate
+  ciphertext is never sent. This variant is never selected implicitly.
 
   progress_cb, if given, is called as
     progress_cb(status=, frames=, bytes_done=, total=, message=)
   with whichever keys changed. Returns a dict:
     {status, frames, bytes, total, dump_path, message}
-  where status is one of: complete | partial | key_missed | failed.
+  where status is one of: complete | partial | unusable_partial | failed.
   Raises NotAGNOSError off-device.
   """
   if not is_agnos():
@@ -135,13 +178,14 @@ def dump(progress_cb=None) -> dict:
   from Crypto.Cipher import AES
 
   from opendbc.car.isotp import isotp_send
-  from opendbc.car.structs import CarParams
-  from opendbc.car.uds import UdsClient, ACCESS_TYPE, SESSION_TYPE, SERVICE_TYPE, \
+  from opendbc.car.uds import ACCESS_TYPE, SESSION_TYPE, SERVICE_TYPE, \
     ROUTINE_CONTROL_TYPE, InvalidServiceIdError, MessageTimeoutError, NegativeResponseError
 
-  # Verify the payload before touching the car.
-  payload = Path(DATAFLASH_PAYLOAD_PATH).read_bytes()
-  if hashlib.sha256(payload).hexdigest() != PAYLOAD_SHA256:
+  # Verify the explicitly selected payload before touching the car.
+  payload_path = DATAFLASH_AUTORESET_PAYLOAD_PATH if auto_reset else DATAFLASH_PAYLOAD_PATH
+  expected_payload_sha = AUTORESET_PAYLOAD_SHA256 if auto_reset else PAYLOAD_SHA256
+  payload = Path(payload_path).read_bytes()
+  if hashlib.sha256(payload).hexdigest() != expected_payload_sha:
     raise RetryError("DataFlash payload SHA256 mismatch")
   if len(payload) != PAYLOAD_LOAD_SIZE:
     raise RetryError("DataFlash payload wrong size")
@@ -154,29 +198,44 @@ def dump(progress_cb=None) -> dict:
   time.sleep(2)
 
   panda = TSKExtractor._connect_panda()
-  panda.set_safety_mode(CarParams.SafetyModel.elm327)
-
-  uds = UdsClient(panda, ADDR, ADDR + 8, BUS, timeout=0.1, response_pending_timeout=0.1)
-
-  # Mandatory programming-session flow. Inter-transition sleeps match the Bk2ol
-  # reference's known-good dataflash timing; the PROGRAMMING -> PROGRAMMING repeat
-  # in particular is not exercised back-to-back by the extractor.
   try:
+    route = discover_eps_route_with_routing(
+      panda, CANDIDATE_BUSES, preferred_tx=ADDR, addresses=[ADDR],
+      preferred_timeout=0.4, scan_timeout=0.1,
+    )
+  except AmbiguousDiagnosticRouteError as e:
+    raise RetryError(f"Ambiguous EPS diagnostic route: {e}") from e
+  if route is None:
+    raise RetryError("EPS did not answer under normal-harness or OBD routing")
+  if route["tx"] != ADDR or route["rx"] != ADDR + 8 or route["tx_bus"] != route["rx_bus"]:
+    raise RetryError(f"Responder does not match the Sienna payload route: {route_fields(route)}")
+
+  # Application -> bootloader is an asynchronous reset handoff. Preserve the exact
+  # physical route; a missing final 50 02 is not failure if the bootloader reappears.
+  try:
+    route, handoff = enter_programming_bootloader(panda, route, prepare_sessions=True,
+                                                  settle_extended=0.7)
+  except ProgrammingHandoffError as e:
+    detail = f" ({e.telemetry})" if e.telemetry else ""
+    raise RetryError(f"Can't enter programming bootloader: {e}{detail}")
+
+  bus = route["tx_bus"]
+  uds = uds_client(panda, route, timeout=0.3, response_pending_timeout=3.0)
+  try:
+    # Re-establish the known-good bootloader sequence explicitly after the application
+    # reset rather than relying on the session left by reappearance probing.
     uds.diagnostic_session_control(SESSION_TYPE.DEFAULT)
-    time.sleep(0.5)
     uds.diagnostic_session_control(SESSION_TYPE.EXTENDED_DIAGNOSTIC)
-    time.sleep(0.7)
+    time.sleep(0.2)
     uds.diagnostic_session_control(SESSION_TYPE.PROGRAMMING)
-    time.sleep(1.0)
-    uds.diagnostic_session_control(SESSION_TYPE.PROGRAMMING)
-  except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-    raise RetryError("Can't enter programming session.")
+  except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError) as e:
+    raise RetryError("Bootloader reappeared but did not enter programming session") from e
 
   # Security access.
   try:
     seed_payload = b"\x00" * 16
     seed = uds.security_access(ACCESS_TYPE.REQUEST_SEED, data_record=seed_payload)
-    key = AES.new(TSKExtractor.SEED_KEY_SECRET, AES.MODE_ECB).decrypt(seed_payload)
+    key = AES.new(TSKExtractor.BOOT_SA_SECRET, AES.MODE_ECB).decrypt(seed_payload)
     key = AES.new(key, AES.MODE_ECB).encrypt(seed)
     uds.security_access(ACCESS_TYPE.SEND_KEY, key)
   except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
@@ -204,7 +263,7 @@ def dump(progress_cb=None) -> dict:
   # Trigger the payload via the erase routine. Send manually so we don't block
   # waiting for a response that never comes. Same vector as extractor.hack().
   erase = b"\x31\x01\xff\x00" + b"\x45\x00" + struct.pack("!I", TRIGGER_ADDR) + struct.pack("!I", TRIGGER_SIZE)
-  isotp_send(panda, erase, ADDR, bus=BUS)
+  isotp_send(panda, erase, route["tx"], bus=bus)
 
   # Collect dump frames. Each frame carries a 24-bit pointer (low 3 bytes of the
   # address) plus 4 data bytes; the top address byte comes from DUMP_START.
@@ -221,7 +280,7 @@ def dump(progress_cb=None) -> dict:
 
     made_progress = False
     for addr, *_, data, bus in panda.can_recv():
-      if bus != BUS or addr != ADDR + 8 or len(data) < 8:
+      if bus != route["rx_bus"] or addr != route["rx"] or len(data) < 8:
         continue
       if data == RESPONSE_PENDING:
         continue
@@ -256,4 +315,11 @@ def dump(progress_cb=None) -> dict:
 
   bytes_received = bytes_covered
   cb(status="running", frames=frames_count, bytes_done=bytes_received, total=DUMP_TOTAL)
-  return _finalize(dump_buf, received, frames_count, bytes_received)
+  result = _finalize(dump_buf, received, frames_count, bytes_received)
+  result.update(
+    route=route_fields(route),
+    programming_handoff=handoff,
+    payload_variant="auto-reset-experimental" if auto_reset else "standard",
+    payload_sha256=expected_payload_sha,
+  )
+  return result

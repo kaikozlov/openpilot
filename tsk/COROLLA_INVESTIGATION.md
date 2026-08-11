@@ -53,6 +53,95 @@ Sienna exploit requires all of them. Two undocumented services, `0xAB` and `0xBA
 answer and have never been probed further. The extraction path is blocked at the
 programming-session boundary and the reason for the silence is not yet determined.
 
+### 0.4 2026-08-10 static-analysis reconciliation — current operational interpretation
+
+The five July field sessions above remain the authoritative record of what Spanconstant
+observed. Several **instrument assumptions used to interpret those observations have since
+been disproved or materially refined** by firmware-static analysis of the related Sienna
+EPS `8965B4512000` and by an end-to-end Panda routing trace. This section supersedes the
+old operational assumptions without rewriting the chronology that produced them.
+
+1. **“Panda bus 1” was not a complete route description.** `UdsClient.bus` selects a
+   logical Panda CAN queue. Independently, ELM327 safety parameter 0 multiplexes logical
+   bus 1/FDCAN2 to the OBD-II path, while parameter 1/non-zero selects the normal harness
+   path. The July tools called `set_safety_mode(elm327)` with implicit parameter 0. A
+   software test that changed only bus 0 -> bus 1 therefore still left FDCAN2 on the OBD
+   physical route and was not equivalent to a physical Toyota-B CAN0/CAN1 repin. Current
+   TSKM discovers and records `(elm327_param, tx_bus, rx_bus, tx_id, rx_id, F181)`, tries
+   normal-harness parameter 1 first, and preserves that exact tuple through stateful work.
+
+2. **The best current software equivalent to the reported physical repin is
+   `ELM327 param=1 + logical bus 1`, not merely `bus=1`.** This is a high-confidence static
+   equivalence derived from Panda/Cuatro FDCAN2 mux behavior. It still requires a live
+   PROGRAMMING transition on the relevant Toyota-B setup before being called a universal
+   vehicle fix.
+
+3. **A missing final positive response to the first `10 02` does not prove PROGRAMMING
+   failed.** On analyzed Sienna firmware the application transition is asynchronous:
+   DEFAULT -> EXTENDED -> PROGRAMMING can emit response-pending, queue shutdown/reset, and
+   lose the application endpoint before a final `50 02` is sent. Application and bootloader
+   both use the same EPS CAN controller. Current tooling therefore treats endpoint
+   reappearance on the preserved physical route as the discriminator and records
+   `panda.health()` plus `panda.can_health(bus)` around the transition. An explicit NRC is
+   still a rejection. For the Sienna calibration, NRC `0x88` is the speed guard and NRC
+   `0x22` can be the recovered handoff prerequisite gate.
+
+4. **The Sienna firmware's functional diagnostic request ID is `0x777`, not `0x7DF`.**
+   Physical `0x7A1 -> 0x7A9` remains correct. July tests that sent generic OBD functional
+   requests to `0x7DF` are retained below as historical observations, but they are not
+   evidence about the firmware-configured Sienna functional endpoint. Current code labels
+   `0x777` explicitly as calibration-scoped rather than projecting it onto Corolla.
+
+5. **The July `0x03/0x04` SEND_KEY experiment used the wrong Sienna security domain.**
+   Static analysis proves two independent `8965B4512000` SecurityAccess implementations:
+   bootloader `01/02` uses `f05f36b7d78c03e24ab4faef2a57d044`, while application
+   `03/04` uses `893e08418c741ffa2a9c044bffa55813`. The 2026-07-24 probe sent a key
+   derived from the bootloader `01/02` secret against Corolla's application `03/04`
+   challenge. Its NRC `0x35` establishes only that this mismatched derivation was invalid;
+   it did **not** test whether Corolla shares the analyzed Sienna application `03/04`
+   secret. The corrected probe identifies F181 first and refuses a counted
+   cross-calibration SEND_KEY unless explicitly armed.
+
+6. **A checksum-valid recovered key structure is no longer trusted by itself.** Related
+   EPS calibrations differ in key storage. The old CPU-visible RAM key-table technique is
+   valid on some `8965B4x` siblings, but `8965B4512000` does not maintain that key mirror;
+   its corresponding `FEBE6E**` region is ordinary application data. Current `/api/extract`
+   requires a usable CAN oracle *before* spending the programming attempt. A candidate is
+   first AES-CMAC verified generically; installation as openpilot `SecOCKey` additionally
+   requires evidence on both current control streams (`0x131` and `0x2E4`). A key that
+   authenticates only another classic domain is preserved as research evidence but is not
+   installed.
+
+7. **The oracle is no longer Sienna-three-ID/two-bus-specific.** Passive capture remains
+   unfiltered, while the classic matcher recognizes sync `0x00F` and protected IDs
+   `0x116/0x131/0x177/0x183/0x24D/0x283/0x2E4/0x344` on arbitrary observed buses,
+   reporting matches per ID and per bus. Its DataFlash first pass now considers
+   sync-domain and per-ID protected-domain matches independently, so a protected key is
+   not lost merely because a different key authenticates `0x00F`. This directly corrects
+   the old failure mode in which genuine bus-1 Corolla-style `0x116`/`0x24D` traffic could
+   be reported as “0 protected.”
+
+8. **The DataFlash payload has a now-understood optional recovery variant, but the raw
+   Vance ciphertext is not directly usable on the analyzed Sienna gate.** `candidate-f05`
+   is not an ICU-S/key-slot probe: static analysis recovers the same complete
+   `0xFF200000..0xFF207FFF` sequential dump as the standard payload, followed by a
+   boot-reset call to `0x157E` instead of an infinite loop. However, Vance's retained
+   ciphertext was authenticated under the bootloader SecurityAccess secret (`0xBFE8`),
+   not the normal payload-build secret (`0xBFD8`), and fails the normal gate. Current TSKM
+   therefore does **not** send the external `296d87d2...` artifact. Its optional
+   experimental payload is a local derivative that preserves the verified candidate body
+   and CRC region while recomputing CMAC/encryption under the normal payload-build gate;
+   its ciphertext SHA-256 is `bf62449f85648ea24708961749bf53f75f36083c01bcf54114d567da0e178725`.
+   The reset-ending body is still not vehicle-confirmed, so the derivative remains behind
+   an explicit experimental checkbox.
+
+The unresolved Corolla question is therefore narrower than the July document originally
+made it: **what exactly happens to `8965F1208000` across the PROGRAMMING transition on the
+correct physical Panda route?** The Sienna firmware findings explain how the old
+instrumentation could misclassify that transition; they do not prove the Corolla shares
+Sienna's session policy, reset sequence, SecurityAccess secrets, payload gate, or key
+storage.
+
 ---
 
 ## 1. Background
@@ -70,11 +159,12 @@ The method works on 2021–2023 RAV4 Prime and Sienna Hybrid, and with modificat
 Yaris. It has been validated in-car many times on the Sienna, including by Calvin on his
 own 2023 Sienna Hybrid.
 
-### 1.2 The Sienna reference pipeline — what "working" looks like
+### 1.2 Historical Sienna reference pipeline — what the July instrument assumed
 
-This matters because every Corolla observation is a deviation from this baseline. The
-working Sienna flow, as implemented in `tsk/lib/extractor.py` and
-`tsk/lib/dump_dataflash.py`:
+This section intentionally preserves the pipeline against which the July Corolla sessions
+were compared. It describes the **then-current implementation**, not the corrected current
+code; §0.4 and `tsk/README.md` are the operational source of truth after the 2026-08-10
+routing/programming/security reconciliation. The historical Sienna flow was:
 
 1. Connect to the panda, set safety mode `elm327`.
 2. UDS on **bus 0**, request address `0x7A1`, response address `0x7A9`.
@@ -1657,9 +1747,11 @@ lean on resume.
   not damage and not the auto-off. A power cycle or re-entering NRtD restores it.
 - **Do not trust any "silent" result recorded after a failed liveness check.** As shipped,
   `sweep_uds.py` keeps going. See §9.18.
-- **`sendkey_probe` is spent.** Re-running it costs another counted SecurityAccess attempt
-  at a level Willem's secret does not even belong to. It is hidden from the UI for that
-  reason.
+- **The historical 2026-07-24 `sendkey_probe` attempt is spent and must not simply be
+  repeated.** It applied the bootloader `01/02` secret to an application `03/04` challenge
+  (§0.4). Current TSKM replaces that experiment with the recovered `8965B4512000`
+  application `03/04` secret and stops before any cross-calibration SEND_KEY unless the
+  operator explicitly arms one counted attempt.
 - **Spanconstant is a volunteer running these in his own car.** Every run costs him real
   effort, and screenshots are the default transport for results. Fold as much as possible
   into one tap, and prefer the copy-as-text box over expecting six scrolling screenshots.
