@@ -34,8 +34,9 @@ The TSK Manager UI is organized around the operator rather than the research chr
 - **Recovery** is the default dashboard. It projects backend state into one next action and
   a visible sequence: identify EPS -> discover the target SecOC surface -> confirm a
   recovery route when needed -> recover/cryptographically verify key material -> review
-  the target-specific openpilot integration -> validate a stationary/bench session ->
-  install the already recovered key. Key recovery and operational installation are
+  the target-specific openpilot integration -> implement/audit that exact target in
+  `opendbc_repo` -> validate a stationary/bench session -> install the already recovered
+  key. Key recovery and operational installation are
   deliberately different states.
 - **Research** keeps the full diagnostic toolbox grouped by purpose (observe/map,
   programming, memory/security, and transfer experiments) without giving those tools the
@@ -150,13 +151,15 @@ Accordingly, `/api/extract` and `/api/match` now have a staged trust boundary:
 5. TSK builds an evidence-bound target profile containing identity, physical route,
    observed buses/IDs/DLC/rates, per-stream cryptographic matches, and compatibility with
    the current Toyota openpilot sender;
-6. every target-specific openpilot field (DBC, safety flags, steering mode, EPS scale,
-   lateral command/status role, longitudinal topology) must be filled with an evidence
-   source and reviewed for that exact profile ID;
-7. a normalized stationary/bench session must prove stationary state, a signed
+6. every target-specific openpilot field (DBC, complete safetyParam, steering mode, EPS
+   scale, lateral command/status role, explicit longitudinal-control mode/topology) must
+   be filled with an evidence source and reviewed for that exact profile ID;
+7. the checked-out `opendbc_repo` must then pass the source audit for the exact platform,
+   EPS F181, DBC, steering mode, EPS scale, longitudinal ownership, and derived safetyParam;
+8. a normalized stationary/bench session must prove stationary state, a signed
    zero-actuation command on a target-verified stream, EPS acceptance/status feedback,
    and no new fault latch;
-8. only then can `/api/install-recovered-key` copy the private recovered key into the
+9. only then can `/api/install-recovered-key` copy the private recovered key into the
    existing `SecOCKey` interface.
 
 A failed cryptographic verification never persists or installs the candidate. A key that
@@ -189,8 +192,10 @@ historical `0x6E14` offset remains an annotation/targeted diagnostic, not a trus
 ## SecOC capture and matcher profile
 
 Passive capture remains unfiltered: every non-echo CAN payload on every observed bus is
-persisted for the full observation window. Known IDs are annotations/hypotheses, not
-capture filters or an early-stop gate.
+persisted for the full observation window. The target profile additionally materializes a
+full `(bus, arbitration ID, DLC)` inventory with sample counts and observed cadence, so
+CAN-FD widths and unknown non-classic streams do not remain trapped only in raw NDJSON.
+Known IDs are annotations/hypotheses, not capture filters or an early-stop gate.
 
 The current known classic family remains:
 
@@ -230,11 +235,14 @@ sender framing is independently pinned; CAN-FD frames are never reinterpreted as
    streams and persist it privately; do not install it yet.
 8. **Target integration review** — fill every openpilot/DBC/safety/control field with an
    explicit evidence source in `target-profile.html`.
-9. **Stationary/bench acceptance** — capture a zero-actuation signed-command session and
+9. **opendbc implementation audit** — implement the exact target/F181 in `opendbc_repo`,
+   then use **Re-audit opendbc** to prove source agreement with the reviewed profile. See
+   [`OPENPILOT_TARGET_INTEGRATION.md`](OPENPILOT_TARGET_INTEGRATION.md).
+10. **Stationary/bench acceptance** — capture a zero-actuation signed-command session and
    validate target-specific status feedback plus before/after fault state.
-10. **Operational install** — only after the profile-bound gates pass, install the
+11. **Operational install** — only after the profile-bound gates pass, install the
     already recovered key through `/api/install-recovered-key`.
-11. **Evidence export** — download the bundle before clearing data or moving to another
+12. **Evidence export** — download the bundle before clearing data or moving to another
     target/session.
 
 ## DataFlash payload variants

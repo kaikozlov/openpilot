@@ -84,6 +84,17 @@ class TestRecoveredKeyAndTargetProfile(unittest.TestCase):
         self.assertTrue(profile["current_openpilot_compatibility"]["longitudinal_crypto_compatible"])
         self.assertFalse(profile["readiness"]["operational_install_allowed"])
         self.assertTrue(profile["integration"]["missing_fields"])
+        original_profile_id = profile["profile_id"]
+        original_oracle_hash = profile["oracle"]["sha256"]
+        with oracle.open("a", encoding="utf-8") as fh:
+          fh.write(json.dumps({"event": "can", "addr": 0x090, "bus": 1, "len": 32,
+                               "data": "11" * 32}) + "\n")
+        recaptured = target_profile.build_target_profile(identity, verification=verification,
+                                                         oracle_path=oracle)
+        self.assertEqual(recaptured["profile_id"], original_profile_id)
+        self.assertNotEqual(recaptured["oracle"]["sha256"], original_oracle_hash)
+        self.assertTrue(any(row["addr_int"] == 0x090 and row["length"] == 32
+                            for row in recaptured["can_inventory"]))
 
         integration_path.write_text(json.dumps({
           "profile_id": profile["profile_id"],
@@ -96,9 +107,12 @@ class TestRecoveredKeyAndTargetProfile(unittest.TestCase):
           "status": "passed",
           "checks": [{"name": "status_response", "passed": True}],
         }), encoding="utf-8")
-        ready = target_profile.build_target_profile(identity, verification=verification,
-                                                    oracle_path=oracle)
+        with patch("tsk.lib.opendbc_integration_audit.audit_opendbc_implementation",
+                   return_value={"ready": True, "checks": []}):
+          ready = target_profile.build_target_profile(identity, verification=verification,
+                                                      oracle_path=oracle)
         self.assertTrue(ready["integration"]["ready"])
+        self.assertTrue(ready["opendbc_implementation"]["ready"])
         self.assertTrue(ready["stationary_verification"]["passed"])
         self.assertTrue(ready["readiness"]["operational_install_allowed"])
 

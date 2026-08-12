@@ -105,12 +105,16 @@ class TestServer(unittest.TestCase):
     recovered_projection = projected(dumped, recovered=True)
     self.assertEqual(recovered_projection["recovery"]["stage"], "integration")
 
-    integrated = {"openpilot_integration_reviewed": True, "stationary_acceptance_verified": False,
-                  "operational_install_allowed": False}
-    self.assertEqual(projected(dumped, recovered=True, readiness=integrated)["recovery"]["stage"], "stationary")
+    integrated = {"openpilot_integration_reviewed": True, "openpilot_code_ready": False,
+                  "stationary_acceptance_verified": False, "operational_install_allowed": False}
+    self.assertEqual(projected(dumped, recovered=True, readiness=integrated)["recovery"]["stage"], "implementation")
 
-    verified = {"openpilot_integration_reviewed": True, "stationary_acceptance_verified": True,
-                "operational_install_allowed": True}
+    implemented = {"openpilot_integration_reviewed": True, "openpilot_code_ready": True,
+                   "stationary_acceptance_verified": False, "operational_install_allowed": False}
+    self.assertEqual(projected(dumped, recovered=True, readiness=implemented)["recovery"]["stage"], "stationary")
+
+    verified = {"openpilot_integration_reviewed": True, "openpilot_code_ready": True,
+                "stationary_acceptance_verified": True, "operational_install_allowed": True}
     self.assertEqual(projected(dumped, recovered=True, readiness=verified)["recovery"]["stage"], "install")
     complete = projected(dumped, installed=True, recovered=True, readiness=verified)
     self.assertEqual(complete["recovery"]["stage"], "complete")

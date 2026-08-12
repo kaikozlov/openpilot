@@ -13,6 +13,7 @@ class TestIntegrationGates(unittest.TestCase):
       "profile_id": "profile-123",
       "readiness": {"key_recovered": True},
       "integration": {"ready": True},
+      "opendbc_implementation": {"ready": True},
       "secoc_streams": [
         {"bus": 1, "addr_int": 0x456, "cryptographically_verified": True},
         {"bus": 1, "addr_int": 0x555, "cryptographically_verified": False},

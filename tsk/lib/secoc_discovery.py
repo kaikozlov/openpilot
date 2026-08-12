@@ -16,7 +16,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tsk.lib.secoc_profile import CLASSIC_PROTECTED_ADDRS, SYNC_ADDR
+from tsk.lib.secoc_profile import ADDITIONAL_PROTECTED_HYPOTHESES, CLASSIC_PROTECTED_ADDRS, SYNC_ADDR
 
 MAX_SYNC_SAMPLES = 1024
 MAX_PROTECTED_PER_ADDR = 250
@@ -25,6 +25,41 @@ MIN_RESET_FLAG_AGREEMENT = 0.875
 MIN_AUTH_DISTINCT_RATIO = 0.50
 MIN_MSG_COUNTER_VALUES = 2
 MAX_UNKNOWN_SCAN_STREAMS = 24
+
+
+@dataclass
+@dataclass
+class _InventoryStream:
+  bus: int
+  addr: int
+  length: int
+  samples: int = 0
+  first_ms: float | None = None
+  last_ms: float | None = None
+
+  def observe(self, rel_ms: float | None) -> None:
+    self.samples += 1
+    if rel_ms is not None:
+      if self.first_ms is None or rel_ms < self.first_ms:
+        self.first_ms = rel_ms
+      if self.last_ms is None or rel_ms > self.last_ms:
+        self.last_ms = rel_ms
+
+  def summary(self) -> dict:
+    rate_hz = None
+    if self.first_ms is not None and self.last_ms is not None and self.last_ms > self.first_ms:
+      rate_hz = round(max(0, self.samples - 1) / ((self.last_ms - self.first_ms) / 1000.0), 3)
+    return {
+      "bus": self.bus,
+      "addr": f"0x{self.addr:03x}",
+      "addr_int": self.addr,
+      "length": self.length,
+      "samples": self.samples,
+      "rate_hz": rate_hz,
+      "sync_hypothesis": self.addr == SYNC_ADDR,
+      "known_classic_secoc_hypothesis": self.addr in CLASSIC_PROTECTED_ADDRS,
+      "known_additional_secoc_hypothesis": self.addr in ADDITIONAL_PROTECTED_HYPOTHESES,
+    }
 
 
 @dataclass
@@ -117,6 +152,7 @@ def load_oracle_discovery(path: Path, *, run_id: str | None = None) -> dict:
   sync_by_bus: dict[int, tuple[int, int, int]] = {}
   sync_seen: set[tuple[int, int, int, int]] = set()
   streams: dict[tuple[int, int], _Stream] = {}
+  can_inventory: dict[tuple[int, int, int], _InventoryStream] = {}
   malformed = 0
 
   with Path(path).open("r", encoding="utf-8") as fh:
@@ -142,6 +178,11 @@ def load_oracle_discovery(path: Path, *, run_id: str | None = None) -> dict:
       except (KeyError, TypeError, ValueError):
         malformed += 1
         continue
+      rel_ms = _relative_ms(record)
+      inventory_key = (bus, addr, len(data))
+      can_inventory.setdefault(
+        inventory_key, _InventoryStream(bus=bus, addr=addr, length=len(data))
+      ).observe(rel_ms)
       if len(data) < 8:
         continue
 
@@ -172,7 +213,7 @@ def load_oracle_discovery(path: Path, *, run_id: str | None = None) -> dict:
         "reset": reset,
       }
       stream = streams.setdefault((bus, addr), _Stream(bus=bus, addr=addr))
-      stream.observe(sample, length=len(data), rel_ms=_relative_ms(record))
+      stream.observe(sample, length=len(data), rel_ms=rel_ms)
 
   summaries = [stream.summary() for _, stream in sorted(streams.items())]
   unknown_candidates = [
@@ -211,6 +252,7 @@ def load_oracle_discovery(path: Path, *, run_id: str | None = None) -> dict:
     "sync_samples": sync_samples,
     "protected_samples": protected_samples,
     "streams": [summary_by_key[key] for key in sorted(summary_by_key)],
+    "can_inventory": [can_inventory[key].summary() for key in sorted(can_inventory)],
     "malformed": malformed,
     "unknown_structural_candidates": len(unknown_candidates),
     "unknown_scan_streams": len(admitted_unknown),

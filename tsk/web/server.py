@@ -591,6 +591,7 @@ def dashboard_payload() -> dict:
   can_ready = bool(can.get("ready") or can.get("status") == "complete")
   key_recovered = bool(recovered.get("recovered"))
   integration_ready = bool(readiness.get("openpilot_integration_reviewed"))
+  code_ready = bool(readiness.get("openpilot_code_ready"))
   stationary_ready = bool(readiness.get("stationary_acceptance_verified"))
   operational_profile_ready = bool(readiness.get("operational_install_allowed"))
   programming_status = str(programming.get("status", "idle"))
@@ -666,6 +667,13 @@ def dashboard_payload() -> dict:
       "description": "The key is recovered. Pin the target DBC, safety flags, steering mode, EPS scale, command/status roles, and longitudinal topology before openpilot can use it.",
       "href": "/target-profile.html", "label": "Review target profile", "vehicle_state": "Any", "tone": "primary",
     }
+  elif not code_ready:
+    stage = "implementation"
+    next_action = {
+      "id": "implementation", "title": "Implement and audit the target in opendbc",
+      "description": "The reviewed manifest is complete, but the checked-out opendbc must contain this exact platform and EPS F181 and agree on DBC, steering mode, EPS scale, longitudinal ownership, and panda safetyParam.",
+      "href": "/target-profile.html", "label": "Review implementation audit", "vehicle_state": "Any", "tone": "primary",
+    }
   elif not stationary_ready:
     stage = "stationary"
     next_action = {
@@ -713,6 +721,8 @@ def dashboard_payload() -> dict:
      "detail": (f"Recovered key {recovered.get('key_sha256_prefix', '')}" if key_recovered else "No operational install at this step")},
     {"id": "integration", "title": "Review target integration", "state": step_state(integration_ready, "integration"),
      "detail": "Reviewed target-specific DBC/safety/control profile" if integration_ready else "Target-specific fields still required"},
+    {"id": "implementation", "title": "Audit opendbc implementation", "state": step_state(code_ready, "implementation"),
+     "detail": "Exact target/F181 and reviewed parameters agree with source" if code_ready else "No source-verified target implementation yet"},
     {"id": "stationary", "title": "Stationary verification", "state": step_state(stationary_ready, "stationary"),
      "detail": "Profile-bound acceptance passed" if stationary_ready else "Not yet proven on target"},
     {"id": "install", "title": "Install operational key", "state": step_state(installed and operational_profile_ready, "install"),
@@ -1027,6 +1037,7 @@ def rehydrate_can_state() -> None:
       legacy_longitudinal_counts=longitudinal_counts,
       profile_discovery={
         "streams": streams,
+        "can_inventory": analysis["can_inventory"],
         "unknown_structural_candidates": analysis["unknown_structural_candidates"],
         "unknown_scan_streams": analysis["unknown_scan_streams"],
         "scan_included_samples": included_samples,
@@ -2132,7 +2143,8 @@ class TSKWebHandler(BaseHTTPRequestHandler):
           self._send_json({
             "ok": False,
             "status": "oracle_required",
-            "profile_discovery": {"streams": oracle_analysis.get("streams", [])},
+            "profile_discovery": {"streams": oracle_analysis.get("streams", []),
+                                  "can_inventory": oracle_analysis.get("can_inventory", [])},
             "message": (f"Collect target-profile CAN evidence before extraction. Current usable oracle: "
                         f"{sync_count} sync + {protected_count} known/structurally discovered classic SecOC samples; "
                         f"need at least {MIN_SYNC_MATCHES} sync and {MATCH_FLOOR} total samples. "
@@ -2260,6 +2272,23 @@ class TSKWebHandler(BaseHTTPRequestHandler):
         }, status=HTTPStatus.INTERNAL_SERVER_ERROR)
       finally:
         matcher_lock.release()
+      return
+
+    if path == "/api/refresh-target-profile":
+      try:
+        if not public_recovered_key_status().get("recovered"):
+          self._send_json({"ok": False, "status": "no_recovered_key",
+                           "message": "Recover a cryptographically verified key before refreshing the target profile."},
+                          status=HTTPStatus.CONFLICT)
+          return
+        with ident_lock:
+          identity_snapshot = dict(ident_state)
+          identity_snapshot["identity"] = [dict(row) for row in ident_state.get("identity", [])]
+        profile = refresh_target_profile_from_recovered(identity_snapshot, oracle_path=can_oracle_path())
+        self._send_json({"ok": True, "target_profile": profile})
+      except Exception as e:
+        self._send_json({"ok": False, "status": "error", "message": str(e),
+                         "traceback": traceback.format_exc()}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
       return
 
     if path == "/api/target-profile-manifest":

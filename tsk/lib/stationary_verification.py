@@ -57,6 +57,8 @@ def stationary_plan() -> dict:
     blocked.append("target key has not been cryptographically recovered")
   if not profile.get("integration", {}).get("ready"):
     blocked.append("openpilot integration manifest is not reviewed/complete")
+  if not profile.get("opendbc_implementation", {}).get("ready"):
+    blocked.append("reviewed target platform is not yet implemented/audited in the checked-out opendbc source")
   verified_streams = [
     f"{row['bus']}:0x{int(row['addr_int']):03x}"
     for row in profile.get("secoc_streams", []) if row.get("cryptographically_verified")
@@ -99,6 +101,8 @@ def verify_stationary_evidence(evidence: dict, *, capture_path: str) -> dict:
     raise ValueError("stationary evidence is not bound to the current target profile")
   if not profile.get("integration", {}).get("ready"):
     raise ValueError("target integration manifest must be reviewed before stationary verification")
+  if not profile.get("opendbc_implementation", {}).get("ready"):
+    raise ValueError("target opendbc implementation must pass the source audit before stationary verification")
 
   capture = _resolve_capture(capture_path)
   stationary = evidence.get("stationary", {})
