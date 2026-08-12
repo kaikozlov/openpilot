@@ -267,7 +267,7 @@ function renderEvidence(dashboard) {
   const can = dashboard.can || {};
   const df = dashboard.dataflash || {};
   const canProgress = Number(can.sync_count || 0) + Number(can.protected_count || 0) > 0;
-  const canReady = Boolean(can.control_ready);
+  const canReady = Boolean(can.ready || can.status === "complete");
   const dfReady = Boolean(df.ready);
 
   let canLabel = "Not collected";
@@ -283,10 +283,12 @@ function renderEvidence(dashboard) {
   else if (df.status === "unusable_partial") dfLabel = "Unusable partial";
   else if (df.status === "failed") dfLabel = "Failed";
 
-  const controls = can.control_counts || {};
-  const canDetail = canReady
-    ? `${can.protected_count || 0} protected frames · 0x131 and 0x2E4 verified present`
-    : `${can.sync_count || 0} sync · ${can.protected_count || 0} protected · 0x131 ${controls["0x131"] || 0}/2 · 0x2E4 ${controls["0x2e4"] || 0}/2`;
+  const discovery = can.profile_discovery || {};
+  const eligibleStreams = (discovery.streams || []).filter((stream) => stream.scan_included);
+  const inventoryCount = (discovery.can_inventory || []).length;
+  const unknownCount = Number(discovery.unknown_structural_candidates || 0);
+  const canDetail = `${can.sync_count || 0} sync · ${eligibleStreams.length} eligible classic SecOC stream${eligibleStreams.length === 1 ? "" : "s"} · ${inventoryCount} CAN ID/DLC stream${inventoryCount === 1 ? "" : "s"}` +
+    (unknownCount ? ` · ${unknownCount} unknown structural candidate${unknownCount === 1 ? "" : "s"}` : "");
   const dfDetail = dfReady
     ? `${df.bytes || df.total || 32768} / ${df.total || 32768} bytes · ${df.payload_variant || "standard"} payload`
     : df.status === "partial"

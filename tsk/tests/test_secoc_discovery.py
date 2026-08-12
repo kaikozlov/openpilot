@@ -31,15 +31,20 @@ class TestSecocDiscovery(unittest.TestCase):
     reset = 0x54321
 
     rows = [{"event": "run_start", "run_id": "unknown-profile"}]
-    rows.append({
-      "event": "can", "run_id": "unknown-profile", "addr": 0x0F, "bus": 2,
-      "len": 8, "ts_ms": 0.0, "data": self._sync_frame(sync_key, trip, reset).hex(),
-    })
+    for i in range(40):
+      current_trip = (trip + i) & 0xFFFF
+      current_reset = (reset + i) & 0xFFFFF
+      rows.append({
+        "event": "can", "run_id": "unknown-profile", "addr": 0x0F, "bus": 2,
+        "len": 8, "ts_ms": i * 5.0, "data": self._sync_frame(sync_key, current_trip, current_reset).hex(),
+      })
+    trip = (trip + 39) & 0xFFFF
+    reset = (reset + 39) & 0xFFFFF
     for i in range(32):
       payload = bytes((i, i ^ 0x55, i ^ 0xAA, (i * 13) & 0xFF))
       rows.append({
         "event": "can", "run_id": "unknown-profile", "addr": unknown_addr, "bus": 2,
-        "len": 8, "ts_ms": 10.0 + i * 20.0,
+        "len": 8, "ts_ms": 210.0 + i * 20.0,
         "data": self._protected_frame(control_key, unknown_addr, trip, reset, i, payload).hex(),
       })
     # An ordinary unrelated stream should not pass the reset-flag structural test.
@@ -69,13 +74,17 @@ class TestSecocDiscovery(unittest.TestCase):
     self.assertEqual(inventory[(2, unknown_addr, 8)]["samples"], 32)
     self.assertEqual(inventory[(2, 0x555, 8)]["samples"], 16)
 
-    dump = b"\xA5" * 41 + control_key + b"\x5A" * 37
+    # Put a higher-volume valid sync key earlier in the dump. The target/control
+    # protected-domain key must still win candidate selection.
+    dump = b"\xA5" * 7 + sync_key + b"\x5A" * 18 + control_key + b"\xC3" * 37
     result = find_key(dump, analysis["sync_samples"], analysis["protected_samples"])
     self.assertEqual(result["status"], "found")
     self.assertEqual(result["offset"], 41)
     self.assertEqual(result["domain"], "protected-only")
     self.assertEqual(result["protected_by_id"], {"0x456": 32})
     self.assertFalse(result["legacy_lateral_ready"])
+    self.assertTrue(any(candidate["domain"] == "sync-only" and candidate["matches"] == 40
+                        for candidate in result["alternate_verified"]))
 
   def test_can_fd_frame_is_never_reinterpreted_as_classic_candidate(self):
     rows = [

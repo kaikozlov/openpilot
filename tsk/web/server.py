@@ -280,8 +280,6 @@ can_state = {
   "legacy_longitudinal_observed": False,
   "legacy_longitudinal_counts": {},
   "profile_discovery": {},
-  "control_ready": False,
-  "control_counts": {},
   "elm327_param": -1,
   "semantic_path": "",
   "seconds": 0.0,
@@ -914,7 +912,6 @@ def _run_can_mock() -> None:
                        {"bus": 1, "addr": "0x183", "addr_int": 0x183, "samples": 1200, "lengths": [8], "scan_included": True},
                        {"bus": 1, "addr": "0x2e4", "addr_int": 0x2E4, "samples": 1200, "lengths": [8], "scan_included": True},
                      ], "unknown_structural_candidates": 0, "unknown_scan_streams": 0, "scan_included_samples": 3600},
-                     control_ready=True, control_counts={"0x131": 1200, "0x2e4": 1200},
                      elm327_param=1, semantic_path="normal-harness",
                      message="Collected target-profile CAN evidence (mock).")
 
@@ -930,13 +927,11 @@ def _run_can_job() -> None:
         protected_count=result.get("protected", can_state["protected_count"]),
         protected_by_id=result.get("protected_by_id", {}),
         counts_by_bus=result.get("counts_by_bus", {}),
-        legacy_lateral_observed=result.get("legacy_lateral_observed", result.get("control_ready", False)),
-        legacy_lateral_counts=result.get("legacy_lateral_counts", result.get("control_counts", {})),
+        legacy_lateral_observed=result.get("legacy_lateral_observed", False),
+        legacy_lateral_counts=result.get("legacy_lateral_counts", {}),
         legacy_longitudinal_observed=result.get("legacy_longitudinal_observed", False),
         legacy_longitudinal_counts=result.get("legacy_longitudinal_counts", {}),
         profile_discovery=result.get("profile_discovery", {}),
-        control_ready=result.get("control_ready", False),
-        control_counts=result.get("control_counts", {}),
         message=result.get("message", ""),
         ready=(status == "complete"),
         **_route_metadata(result),
@@ -971,7 +966,7 @@ def start_can_job() -> bool:
                      protected_by_id={}, counts_by_bus={},
                      legacy_lateral_observed=False, legacy_lateral_counts={},
                      legacy_longitudinal_observed=False, legacy_longitudinal_counts={},
-                     profile_discovery={}, control_ready=False, control_counts={},
+                     profile_discovery={},
                      seconds=0.0, message="", ready=False, elm327_param=-1, semantic_path="")
   try:
     threading.Thread(target=_run_can_job, name="tsk_can_collect", daemon=True).start()
@@ -995,7 +990,7 @@ def clear_can() -> bool:
                      protected_count=0, protected_by_id={}, counts_by_bus={},
                      legacy_lateral_observed=False, legacy_lateral_counts={},
                      legacy_longitudinal_observed=False, legacy_longitudinal_counts={},
-                     profile_discovery={}, control_ready=False, control_counts={},
+                     profile_discovery={},
                      seconds=0.0, elm327_param=-1, semantic_path="", message="")
   try:
     can_oracle_path().unlink()
@@ -1042,8 +1037,6 @@ def rehydrate_can_state() -> None:
         "unknown_scan_streams": analysis["unknown_scan_streams"],
         "scan_included_samples": included_samples,
       },
-      control_ready=lateral_observed,
-      control_counts=lateral_counts,
       message=(f"Persisted target-profile evidence: {len(analysis['sync_samples'])} sync samples, "
                f"{included_samples} structurally eligible classic SecOC samples across {len(included)} stream(s)."),
     )
@@ -2249,9 +2242,12 @@ class TSKWebHandler(BaseHTTPRequestHandler):
             "protected_by_id": result.get("protected_by_id", {}),
             "protected_by_bus": result.get("protected_by_bus", {}),
             "domain": result.get("domain", ""),
-            "control_ready": result.get("control_ready", False),
-            "control_matches_by_id": result.get("control_matches_by_id", {}),
-            "control_missing": result.get("control_missing", []),
+            "legacy_lateral_ready": result.get("legacy_lateral_ready", False),
+            "legacy_lateral_matches_by_id": result.get("legacy_lateral_matches_by_id", {}),
+            "legacy_lateral_missing": result.get("legacy_lateral_missing", []),
+            "legacy_longitudinal_ready": result.get("legacy_longitudinal_ready", False),
+            "legacy_longitudinal_matches_by_id": result.get("legacy_longitudinal_matches_by_id", {}),
+            "legacy_longitudinal_missing": result.get("legacy_longitudinal_missing", []),
             "alternate_verified": result.get("alternate_verified", []),
             "address": result["address"],
             "offset": result["offset"],

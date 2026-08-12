@@ -378,19 +378,30 @@ def find_key(dump: bytes, sync_samples, protected_samples, progress_cb=None, cov
     return result
 
   verified = [candidate for candidate in evaluated if candidate["verified"]]
-  control_verified = [candidate for candidate in verified if candidate["control_ready"]]
-  if control_verified:
-    best = max(
-      control_verified,
-      key=lambda candidate: (
-        sum(candidate["by_id"].get(addr, 0) for addr in CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS),
-        candidate["total"],
-      ),
+
+  def candidate_rank(candidate: dict) -> tuple:
+    # Prefer a key that authenticates the current openpilot lateral domain when it
+    # genuinely exists. Otherwise, a cryptographically verified protected domain
+    # must outrank a high-volume sync-only key: unknown/newer targets may use a
+    # separate synchronization key and entirely different protected control IDs.
+    lateral_matches = sum(
+      candidate["by_id"].get(addr, 0) for addr in CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS
     )
-  elif verified:
-    best = max(verified, key=lambda candidate: candidate["total"])
+    return (
+      bool(candidate["control_ready"]),
+      lateral_matches,
+      candidate["protected"] > 0,
+      len(candidate["by_stream"]),
+      candidate["protected"],
+      candidate["sync"],
+      candidate["total"],
+      -candidate["offset"],
+    )
+
+  if verified:
+    best = max(verified, key=candidate_rank)
   else:
-    best = max(evaluated, key=lambda candidate: candidate["total"])
+    best = max(evaluated, key=candidate_rank)
 
   result["sync"] = f"{best['sync']}/{n_sync}"
   result["protected"] = f"{best['protected']}/{n_prot}"

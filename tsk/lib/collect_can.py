@@ -194,9 +194,6 @@ def collect(progress_cb=None, seconds=COLLECT_SECONDS) -> dict:
     "legacy_lateral_counts": legacy_lateral_counts,
     "legacy_longitudinal_observed": legacy_longitudinal_observed,
     "legacy_longitudinal_counts": legacy_longitudinal_counts,
-    # Compatibility aliases for the existing UI while it is migrated.
-    "control_ready": legacy_lateral_observed,
-    "control_counts": legacy_lateral_counts,
     "profile_discovery": {
       "streams": discovery["streams"],
       "can_inventory": discovery["can_inventory"],
