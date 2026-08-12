@@ -40,8 +40,10 @@ from tsk.lib.dump_dataflash import (
   DUMP_START, DUMP_TOTAL, dump_path, partial_coverage_path, partial_dump_path,
 )
 from tsk.lib.env import CAN_ORACLE_PATH
+from tsk.lib.secoc_discovery import load_oracle_discovery
 from tsk.lib.secoc_profile import (
-  CLASSIC_PROTECTED_ADDRS, OPENPILOT_CONTROL_PROTECTED_ADDRS, SYNC_ADDR,
+  CLASSIC_PROTECTED_ADDRS, CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS,
+  CURRENT_OPENPILOT_LONGITUDINAL_PROTECTED_ADDRS, SYNC_ADDR,
 )
 
 # Acceptance: a window must authenticate at least MATCH_FLOOR oracle samples
@@ -57,12 +59,10 @@ MIN_CONTROL_MATCHES_PER_ID = 2
 FIRST_PASS_SAMPLES = 5
 FIRST_PASS_PROTECTED_PER_ID = 2
 
-# Oracle framing (matches the reference loader and collector). Each known classic
-# protected ID is evaluated independently; membership is not evidence that a given
-# vehicle uses that PDU.
+# Oracle framing matches the reference sender. Known Toyota IDs are hypotheses, not
+# a parser filter: secoc_discovery can admit unknown classic streams when their
+# trailer behavior is structurally consistent with the current same-bus sync state.
 PROTECTED_ADDRS = CLASSIC_PROTECTED_ADDRS
-MAX_SYNC_SAMPLES = 1024
-MAX_PROTECTED_PER_ADDR = 250
 
 def oracle_path() -> Path:
   return Path(CAN_ORACLE_PATH)
@@ -132,66 +132,15 @@ def _freshness(trip: int, reset: int, msg_cnt: int) -> bytes:
                      ((reset & 0xFFFFF) << 12) | ((msg_cnt & 0xFF) << 4) | ((reset & 3) << 2))
 
 
+def load_oracle_analysis(path: Path) -> dict:
+  """Return sync samples plus known/structurally discovered classic SecOC streams."""
+  return load_oracle_discovery(Path(path))
+
+
 def load_oracle_samples(path: Path):
-  """Parse a can_oracle.ndjson file into (sync_samples, protected_samples, malformed).
-
-  CAN records are {event:"can", addr, bus, data(hex)}. Sync frames (0x0F) carry a
-  (trip, reset, auth); known classic protected IDs inherit trip/reset only from the
-  most recent sync in the same capture run and bus. ``run_start`` explicitly clears
-  that freshness state so append-only captures cannot borrow stale sync state across
-  runs. Metadata records are ignored; malformed CAN rows are skipped and counted.
-  """
-  sync_samples = []
-  protected_samples = []
-  sync_by_bus = {}
-  sync_seen = set()
-  prot_counts = {}
-  malformed = 0
-
-  with path.open("r", encoding="utf-8") as f:
-    for line in f:
-      if not line.strip():
-        continue
-      try:
-        r = json.loads(line)
-        if r.get("event") == "run_start":
-          sync_by_bus.clear()
-          continue
-        if r.get("event") not in (None, "can"):
-          continue
-        addr = int(r["addr"])
-        bus = int(r["bus"])
-        data = bytes.fromhex(r["data"][:16])
-      except (ValueError, KeyError, TypeError):
-        malformed += 1
-        continue
-      if len(data) < 8:
-        continue
-
-      if addr == SYNC_ADDR:
-        trip = int.from_bytes(data[0:2], "big")
-        reset = (data[2] << 12) | (data[3] << 4) | (data[4] >> 4)
-        auth = _tail28(data)
-        sync_by_bus[bus] = (trip, reset, auth)
-        k = (bus, trip, reset, auth)
-        if k not in sync_seen and len(sync_samples) < MAX_SYNC_SAMPLES:
-          sync_seen.add(k)
-          sync_samples.append({"bus": bus, "trip": trip, "reset": reset, "auth": auth})
-
-      elif addr in PROTECTED_ADDRS:
-        count_key = (bus, addr)
-        if prot_counts.get(count_key, 0) >= MAX_PROTECTED_PER_ADDR:
-          continue
-        if bus not in sync_by_bus:
-          continue
-        trip, reset, _ = sync_by_bus[bus]
-        prot_counts[count_key] = prot_counts.get(count_key, 0) + 1
-        protected_samples.append({
-          "addr": addr, "bus": bus, "payload4": data[:4], "flag": data[4] >> 4,
-          "auth": _tail28(data), "trip": trip, "reset": reset,
-        })
-
-  return sync_samples, protected_samples, malformed
+  """Compatibility tuple wrapper around the generalized discovery parser."""
+  analysis = load_oracle_analysis(path)
+  return analysis["sync_samples"], analysis["protected_samples"], analysis["malformed"]
 
 
 def _verify_sync(key: bytes, samples, subkeys) -> int:
@@ -230,16 +179,24 @@ def _verify_protected(key: bytes, samples, subkeys) -> int:
   return _verify_protected_breakdown(key, samples, subkeys)[0]
 
 
-def _verify_protected_breakdown(key: bytes, samples, subkeys):
+def _verify_protected_details(key: bytes, samples, subkeys):
   matches = 0
   by_id: dict[int, int] = {}
   by_bus: dict[int, int] = {}
+  by_stream: dict[tuple[int, int], int] = {}
   cipher = AES.new(key, AES.MODE_ECB)
   for s in samples:
     if _protected_sample_matches(cipher, s, subkeys):
       matches += 1
       by_id[s["addr"]] = by_id.get(s["addr"], 0) + 1
       by_bus[s["bus"]] = by_bus.get(s["bus"], 0) + 1
+      stream = (int(s["bus"]), int(s["addr"]))
+      by_stream[stream] = by_stream.get(stream, 0) + 1
+  return matches, by_id, by_bus, by_stream
+
+
+def _verify_protected_breakdown(key: bytes, samples, subkeys):
+  matches, by_id, by_bus, _ = _verify_protected_details(key, samples, subkeys)
   return matches, by_id, by_bus
 
 
@@ -267,14 +224,41 @@ def _select_protected_probes(samples) -> list[dict]:
   return probes
 
 
-def _control_domain_fields(by_id: dict[int, int]) -> dict:
-  matches = {f"0x{addr:03x}": int(by_id.get(addr, 0)) for addr in sorted(OPENPILOT_CONTROL_PROTECTED_ADDRS)}
-  missing = [addr for addr in sorted(OPENPILOT_CONTROL_PROTECTED_ADDRS)
-             if by_id.get(addr, 0) < MIN_CONTROL_MATCHES_PER_ID]
+def _compatibility_fields(by_id: dict[int, int]) -> dict:
+  """Report compatibility with the *current* Toyota openpilot sender surface.
+
+  These fields are never target discovery. A new target can have a valid key and a
+  different protected control surface; that is why generic cryptographic validity is
+  kept separate from this compatibility report.
+  """
+  lateral_matches = {
+    f"0x{addr:03x}": int(by_id.get(addr, 0))
+    for addr in sorted(CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS)
+  }
+  lateral_missing = [
+    addr for addr in sorted(CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS)
+    if by_id.get(addr, 0) < MIN_CONTROL_MATCHES_PER_ID
+  ]
+  longitudinal_matches = {
+    f"0x{addr:03x}": int(by_id.get(addr, 0))
+    for addr in sorted(CURRENT_OPENPILOT_LONGITUDINAL_PROTECTED_ADDRS)
+  }
+  longitudinal_missing = [
+    addr for addr in sorted(CURRENT_OPENPILOT_LONGITUDINAL_PROTECTED_ADDRS)
+    if by_id.get(addr, 0) < MIN_CONTROL_MATCHES_PER_ID
+  ]
   return {
-    "control_ready": not missing,
-    "control_matches_by_id": matches,
-    "control_missing": [f"0x{addr:03x}" for addr in missing],
+    "legacy_lateral_ready": not lateral_missing,
+    "legacy_lateral_matches_by_id": lateral_matches,
+    "legacy_lateral_missing": [f"0x{addr:03x}" for addr in lateral_missing],
+    "legacy_longitudinal_ready": not longitudinal_missing,
+    "legacy_longitudinal_matches_by_id": longitudinal_matches,
+    "legacy_longitudinal_missing": [f"0x{addr:03x}" for addr in longitudinal_missing],
+    # Backward-compatible aliases. They now explicitly mean legacy/current
+    # openpilot lateral compatibility, not generic target-profile readiness.
+    "control_ready": not lateral_missing,
+    "control_matches_by_id": lateral_matches,
+    "control_missing": [f"0x{addr:03x}" for addr in lateral_missing],
   }
 
 
@@ -288,10 +272,17 @@ def _base_result() -> dict:
     "protected": "",
     "protected_by_id": {},
     "protected_by_bus": {},
+    "protected_by_stream": {},
     "domain": "unverified",
+    "legacy_lateral_ready": False,
+    "legacy_lateral_matches_by_id": {},
+    "legacy_lateral_missing": [f"0x{addr:03x}" for addr in sorted(CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS)],
+    "legacy_longitudinal_ready": False,
+    "legacy_longitudinal_matches_by_id": {},
+    "legacy_longitudinal_missing": [f"0x{addr:03x}" for addr in sorted(CURRENT_OPENPILOT_LONGITUDINAL_PROTECTED_ADDRS)],
     "control_ready": False,
     "control_matches_by_id": {},
-    "control_missing": [f"0x{addr:03x}" for addr in sorted(OPENPILOT_CONTROL_PROTECTED_ADDRS)],
+    "control_missing": [f"0x{addr:03x}" for addr in sorted(CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS)],
     "alternate_verified": [],
     "matches": 0,
     "windows_scanned": 0,
@@ -361,9 +352,9 @@ def find_key(dump: bytes, sync_samples, protected_samples, progress_cb=None, cov
     window = dump[off:off + 16]
     subkeys = _cmac_subkeys(window)
     sync_matches = _verify_sync(window, sync_samples, subkeys)
-    prot_matches, by_id, by_bus = _verify_protected_breakdown(window, protected_samples, subkeys)
+    prot_matches, by_id, by_bus, by_stream = _verify_protected_details(window, protected_samples, subkeys)
     total = sync_matches + prot_matches
-    control = _control_domain_fields(by_id)
+    compatibility = _compatibility_fields(by_id)
     evaluated.append({
       "offset": off,
       "key": window,
@@ -372,8 +363,9 @@ def find_key(dump: bytes, sync_samples, protected_samples, progress_cb=None, cov
       "total": total,
       "by_id": by_id,
       "by_bus": by_bus,
+      "by_stream": by_stream,
       "domain": _domain_kind(sync_matches, prot_matches),
-      **control,
+      **compatibility,
       "verified": (total >= MATCH_FLOOR and
                    (sync_matches >= MIN_SYNC_MATCHES or prot_matches >= MIN_PROTECTED_MATCHES)),
     })
@@ -392,7 +384,7 @@ def find_key(dump: bytes, sync_samples, protected_samples, progress_cb=None, cov
     best = max(
       control_verified,
       key=lambda candidate: (
-        sum(candidate["by_id"].get(addr, 0) for addr in OPENPILOT_CONTROL_PROTECTED_ADDRS),
+        sum(candidate["by_id"].get(addr, 0) for addr in CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS),
         candidate["total"],
       ),
     )
@@ -405,8 +397,11 @@ def find_key(dump: bytes, sync_samples, protected_samples, progress_cb=None, cov
   result["protected"] = f"{best['protected']}/{n_prot}"
   result["protected_by_id"] = {f"0x{k:03x}": v for k, v in sorted(best["by_id"].items())}
   result["protected_by_bus"] = {str(k): v for k, v in sorted(best["by_bus"].items())}
+  result["protected_by_stream"] = {
+    f"{bus}:0x{addr:03x}": count for (bus, addr), count in sorted(best["by_stream"].items())
+  }
   result["domain"] = best["domain"]
-  result.update(**_control_domain_fields(best["by_id"]))
+  result.update(**_compatibility_fields(best["by_id"]))
   result["matches"] = best["total"]
   result["offset"] = best["offset"]
   addr = DUMP_START + best["offset"]
@@ -429,9 +424,11 @@ def find_key(dump: bytes, sync_samples, protected_samples, progress_cb=None, cov
   if accepted:
     message = (f"SecOC key candidate found and cryptographically verified at 0x{addr:08x} " +
                f"({best['total']} matches: sync {result['sync']}, protected {result['protected']}).")
-    if not result["control_ready"]:
-      message += (" It is not installable as openpilot SecOCKey yet: control-domain " +
-                  f"evidence is missing for {', '.join(result['control_missing'])}.")
+    if result["legacy_lateral_ready"]:
+      message += " It also matches the current openpilot Toyota lateral SecOC IDs."
+    else:
+      message += (" Current-openpilot lateral compatibility remains incomplete for " +
+                  f"{', '.join(result['legacy_lateral_missing'])}; this does not invalidate a different target profile.")
     result.update(status="found", key=best["key"].hex(), address=f"0x{addr:08x}", message=message)
   else:
     if best["total"] < MATCH_FLOOR:
@@ -470,24 +467,27 @@ def verify_candidate_key(key: bytes, sync_samples, protected_samples) -> dict:
 
   subkeys = _cmac_subkeys(key)
   sync_matches = _verify_sync(key, sync_samples, subkeys)
-  protected_matches, by_id, by_bus = _verify_protected_breakdown(key, protected_samples, subkeys)
+  protected_matches, by_id, by_bus, by_stream = _verify_protected_details(key, protected_samples, subkeys)
   matches = sync_matches + protected_matches
   result.update(
     sync=f"{sync_matches}/{n_sync}",
     protected=f"{protected_matches}/{n_prot}",
     protected_by_id={f"0x{k:03x}": v for k, v in sorted(by_id.items())},
     protected_by_bus={str(k): v for k, v in sorted(by_bus.items())},
+    protected_by_stream={f"{bus}:0x{addr:03x}": count for (bus, addr), count in sorted(by_stream.items())},
     domain=_domain_kind(sync_matches, protected_matches),
     matches=matches,
-    **_control_domain_fields(by_id),
+    **_compatibility_fields(by_id),
   )
   if (matches >= MATCH_FLOOR and
       (sync_matches >= MIN_SYNC_MATCHES or protected_matches >= MIN_PROTECTED_MATCHES)):
     message = (f"Candidate key cryptographically verified ({matches} matches: " +
                f"sync {result['sync']}, protected {result['protected']}).")
-    if not result["control_ready"]:
-      message += (" The candidate is not installable as openpilot SecOCKey yet: control-domain " +
-                  f"evidence is missing for {', '.join(result['control_missing'])}.")
+    if result["legacy_lateral_ready"]:
+      message += " It also matches the current openpilot Toyota lateral SecOC IDs."
+    else:
+      message += (" Current-openpilot lateral compatibility remains incomplete for " +
+                  f"{', '.join(result['legacy_lateral_missing'])}; this does not invalidate a different target profile.")
     result.update(status="found", key=key.hex(), message=message)
   else:
     result.update(status="not_found",
@@ -499,13 +499,18 @@ def verify_candidate_key(key: bytes, sync_samples, protected_samples) -> dict:
 def verify_candidate_from_oracle(key: bytes, path: Path | None = None) -> dict:
   """Load the persisted oracle and verify one 16-byte candidate key."""
   try:
-    sync_samples, protected_samples, malformed = load_oracle_samples(path or oracle_path())
+    analysis = load_oracle_analysis(path or oracle_path())
   except OSError:
     result = _base_result()
     result.update(status="insufficient_oracle", message="No CAN oracle found. Collect CAN messages first.")
     return result
-  result = verify_candidate_key(key, sync_samples, protected_samples)
-  result["malformed"] = malformed
+  result = verify_candidate_key(key, analysis["sync_samples"], analysis["protected_samples"])
+  result["malformed"] = analysis["malformed"]
+  result["profile_discovery"] = {
+    "streams": analysis["streams"],
+    "unknown_structural_candidates": analysis["unknown_structural_candidates"],
+    "unknown_scan_streams": analysis["unknown_scan_streams"],
+  }
   return result
 
 
@@ -545,12 +550,20 @@ def run(progress_cb=None) -> dict:
     return result
 
   try:
-    sync_samples, protected_samples, malformed = load_oracle_samples(oracle_path())
+    analysis = load_oracle_analysis(oracle_path())
   except OSError:
     result.update(status="insufficient_oracle", message="No CAN oracle found. Collect CAN messages first.")
     return result
 
+  sync_samples = analysis["sync_samples"]
+  protected_samples = analysis["protected_samples"]
+  malformed = analysis["malformed"]
   result["malformed"] = malformed
+  result["profile_discovery"] = {
+    "streams": analysis["streams"],
+    "unknown_structural_candidates": analysis["unknown_structural_candidates"],
+    "unknown_scan_streams": analysis["unknown_scan_streams"],
+  }
   total = len(sync_samples) + len(protected_samples)
   if len(sync_samples) < MIN_SYNC_MATCHES or total < MATCH_FLOOR:
     msg = (f"Not enough CAN data (sync {len(sync_samples)}, protected {len(protected_samples)}; " +
@@ -563,6 +576,7 @@ def run(progress_cb=None) -> dict:
 
   res = find_key(dump, sync_samples, protected_samples, progress_cb=progress_cb, coverage=coverage)
   res["malformed"] = malformed
+  res["profile_discovery"] = result["profile_discovery"]
   res["dump_partial"] = dump_is_partial
   # A partial that fails to find the key most likely never captured the key's region.
   # The collapsed message is deliberate: the modal shows no debug block for a partial.

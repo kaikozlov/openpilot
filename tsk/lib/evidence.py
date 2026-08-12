@@ -69,8 +69,9 @@ def _candidate_files() -> list[Path]:
   if not EVIDENCE_ROOT.exists():
     return []
   files = []
+  private_dir = EVIDENCE_ROOT / "private"
   for path in EVIDENCE_ROOT.rglob("*"):
-    if not path.is_file() or BUNDLE_DIR in path.parents:
+    if not path.is_file() or BUNDLE_DIR in path.parents or private_dir in path.parents:
       continue
     files.append(path)
   return sorted(files)

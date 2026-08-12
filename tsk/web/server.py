@@ -13,6 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
 from tsk.lib.collect_can import collect as collect_can, count_oracle_frames, oracle_path as can_oracle_path, PROTECTED_TARGET, SYNC_TARGET
+from tsk.lib.secoc_discovery import load_oracle_discovery
+from tsk.lib.secoc_profile import CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS, CURRENT_OPENPILOT_LONGITUDINAL_PROTECTED_ADDRS
 from tsk.lib.dump_dataflash import (
   DUMP_TOTAL, dump as dump_dataflash, dump_path, partial_coverage_path, partial_dump_path,
 )
@@ -266,6 +268,11 @@ can_state = {
   "protected_count": 0,
   "protected_by_id": {},
   "counts_by_bus": {},
+  "legacy_lateral_observed": False,
+  "legacy_lateral_counts": {},
+  "legacy_longitudinal_observed": False,
+  "legacy_longitudinal_counts": {},
+  "profile_discovery": {},
   "control_ready": False,
   "control_counts": {},
   "elm327_param": -1,
@@ -834,11 +841,18 @@ def _run_can_mock() -> None:
   with can_lock:
     can_state.update(status="complete", ready=True, seconds=60.0,
                      sync_count=60, protected_count=3600,
-                     protected_by_id={"0x131": 1200, "0x2e4": 1200, "0x344": 1200},
+                     protected_by_id={"0x131": 1200, "0x183": 1200, "0x2e4": 1200},
                      counts_by_bus={1: {"sync": 60, "protected": 3600}},
+                     legacy_lateral_observed=True, legacy_lateral_counts={"0x131": 1200, "0x2e4": 1200},
+                     legacy_longitudinal_observed=True, legacy_longitudinal_counts={"0x183": 1200},
+                     profile_discovery={"streams": [
+                       {"bus": 1, "addr": "0x131", "addr_int": 0x131, "samples": 1200, "lengths": [8], "scan_included": True},
+                       {"bus": 1, "addr": "0x183", "addr_int": 0x183, "samples": 1200, "lengths": [8], "scan_included": True},
+                       {"bus": 1, "addr": "0x2e4", "addr_int": 0x2E4, "samples": 1200, "lengths": [8], "scan_included": True},
+                     ], "unknown_structural_candidates": 0, "unknown_scan_streams": 0, "scan_included_samples": 3600},
                      control_ready=True, control_counts={"0x131": 1200, "0x2e4": 1200},
                      elm327_param=1, semantic_path="normal-harness",
-                     message="Collected 60 sync and 3600 protected frames; control-domain oracle is ready (mock).")
+                     message="Collected target-profile CAN evidence (mock).")
 
 
 def _run_can_job() -> None:
@@ -852,6 +866,11 @@ def _run_can_job() -> None:
         protected_count=result.get("protected", can_state["protected_count"]),
         protected_by_id=result.get("protected_by_id", {}),
         counts_by_bus=result.get("counts_by_bus", {}),
+        legacy_lateral_observed=result.get("legacy_lateral_observed", result.get("control_ready", False)),
+        legacy_lateral_counts=result.get("legacy_lateral_counts", result.get("control_counts", {})),
+        legacy_longitudinal_observed=result.get("legacy_longitudinal_observed", False),
+        legacy_longitudinal_counts=result.get("legacy_longitudinal_counts", {}),
+        profile_discovery=result.get("profile_discovery", {}),
         control_ready=result.get("control_ready", False),
         control_counts=result.get("control_counts", {}),
         message=result.get("message", ""),
@@ -875,7 +894,10 @@ def start_can_job() -> bool:
     return False
   with can_lock:
     can_state.update(status="running", sync_count=0, protected_count=0,
-                     protected_by_id={}, counts_by_bus={}, control_ready=False, control_counts={},
+                     protected_by_id={}, counts_by_bus={},
+                     legacy_lateral_observed=False, legacy_lateral_counts={},
+                     legacy_longitudinal_observed=False, legacy_longitudinal_counts={},
+                     profile_discovery={}, control_ready=False, control_counts={},
                      seconds=0.0, message="", ready=False, elm327_param=-1, semantic_path="")
   try:
     threading.Thread(target=_run_can_job, name="tsk_can_collect", daemon=True).start()
@@ -896,8 +918,11 @@ def clear_can() -> bool:
     if can_state["status"] == "running":
       return False
     can_state.update(ready=False, status="idle", sync_count=0,
-                     protected_count=0, protected_by_id={}, counts_by_bus={}, control_ready=False,
-                     control_counts={}, seconds=0.0, elm327_param=-1, semantic_path="", message="")
+                     protected_count=0, protected_by_id={}, counts_by_bus={},
+                     legacy_lateral_observed=False, legacy_lateral_counts={},
+                     legacy_longitudinal_observed=False, legacy_longitudinal_counts={},
+                     profile_discovery={}, control_ready=False, control_counts={},
+                     seconds=0.0, elm327_param=-1, semantic_path="", message="")
   try:
     can_oracle_path().unlink()
   except FileNotFoundError:
@@ -908,13 +933,45 @@ def clear_can() -> bool:
 
 
 def rehydrate_can_state() -> None:
-  # Reflect a persisted oracle as ready after a restart, mirroring the dump.
+  # Re-run the generalized structural discovery over persisted evidence after a
+  # restart; do not collapse the profile back to the legacy 0x131/0x2E4 gate.
   sync, protected = count_oracle_frames()
-  if sync >= SYNC_TARGET and protected >= PROTECTED_TARGET:
-    with can_lock:
-      can_state.update(ready=True, status="complete", sync_count=sync,
-                       protected_count=protected,
-                       message=f"Collected {sync} sync and {protected} protected frames.")
+  try:
+    analysis = load_oracle_discovery(can_oracle_path())
+  except OSError:
+    return
+  streams = analysis["streams"]
+  included = [row for row in streams if row["scan_included"]]
+  included_samples = sum(int(row["samples"]) for row in included)
+  by_addr = {int(row["addr_int"]): int(row["samples"]) for row in streams}
+  lateral_counts = {f"0x{addr:03x}": by_addr.get(addr, 0)
+                    for addr in sorted(CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS)}
+  longitudinal_counts = {f"0x{addr:03x}": by_addr.get(addr, 0)
+                         for addr in sorted(CURRENT_OPENPILOT_LONGITUDINAL_PROTECTED_ADDRS)}
+  lateral_observed = all(value >= 2 for value in lateral_counts.values())
+  longitudinal_observed = all(value >= 2 for value in longitudinal_counts.values())
+  ready = len(analysis["sync_samples"]) >= SYNC_TARGET and included_samples >= PROTECTED_TARGET
+  with can_lock:
+    can_state.update(
+      ready=ready,
+      status="complete" if ready else "insufficient",
+      sync_count=sync,
+      protected_count=protected,
+      legacy_lateral_observed=lateral_observed,
+      legacy_lateral_counts=lateral_counts,
+      legacy_longitudinal_observed=longitudinal_observed,
+      legacy_longitudinal_counts=longitudinal_counts,
+      profile_discovery={
+        "streams": streams,
+        "unknown_structural_candidates": analysis["unknown_structural_candidates"],
+        "unknown_scan_streams": analysis["unknown_scan_streams"],
+        "scan_included_samples": included_samples,
+      },
+      control_ready=lateral_observed,
+      control_counts=lateral_counts,
+      message=(f"Persisted target-profile evidence: {len(analysis['sync_samples'])} sync samples, "
+               f"{included_samples} structurally eligible classic SecOC samples across {len(included)} stream(s)."),
+    )
 
 
 def _sniff_progress(seconds=None, frames=None, buses=None) -> None:
