@@ -147,7 +147,7 @@ function renderKey(dashboard) {
   const key = dashboard.key?.key || "";
 
   els.sidebarKeyDot.className = `dot ${installed ? "green" : ""}`.trim();
-  els.sidebarKeyText.textContent = installed ? "SecOC key installed" : "No SecOC key installed";
+  els.sidebarKeyText.textContent = installed ? "Key installed" : "Key: none";
 
   els.keyChip.replaceChildren(dot(installed ? "green" : ""), node("span", "", installed ? "Key installed" : "Key not installed"));
   els.systemKeyValue.textContent = formatKey(key);
