@@ -102,24 +102,28 @@ old operational assumptions without rewriting the chronology that produced them.
    secret. The corrected probe identifies F181 first and refuses a counted
    cross-calibration SEND_KEY unless explicitly armed.
 
-6. **A checksum-valid recovered key structure is no longer trusted by itself.** Related
-   EPS calibrations differ in key storage. The old CPU-visible RAM key-table technique is
-   valid on some `8965B4x` siblings, but `8965B4512000` does not maintain that key mirror;
-   its corresponding `FEBE6E**` region is ordinary application data. Current `/api/extract`
-   requires a usable CAN oracle *before* spending the programming attempt. A candidate is
-   first AES-CMAC verified generically; installation as openpilot `SecOCKey` additionally
-   requires evidence on both current control streams (`0x131` and `0x2E4`). A key that
-   authenticates only another classic domain is preserved as research evidence but is not
-   installed.
+6. **A checksum-valid recovered key structure is no longer trusted by itself, and key
+   recovery is no longer equivalent to openpilot installation.** Related EPS calibrations
+   differ in key storage. The old CPU-visible RAM key-table technique is valid on some
+   `8965B4x` siblings, but `8965B4512000` does not maintain that key mirror; its
+   corresponding `FEBE6E**` region is ordinary application data. Current `/api/extract`
+   requires a usable target-profile CAN oracle *before* spending the programming attempt.
+   A candidate is AES-CMAC verified generically and stored privately as recovered
+   evidence. It is not copied to `SecOCKey` until an exact profile-bound openpilot
+   integration manifest and stationary/bench acceptance artifact pass. `0x131/0x2E4`
+   matches are current-lateral compatibility evidence, not a universal target gate;
+   `0x183` is separately tracked because current Toyota `CarController` signs
+   `ACC_CONTROL_2` when openpilot longitudinal is enabled.
 
-7. **The oracle is no longer Sienna-three-ID/two-bus-specific.** Passive capture remains
-   unfiltered, while the classic matcher recognizes sync `0x00F` and protected IDs
-   `0x116/0x131/0x177/0x183/0x24D/0x283/0x2E4/0x344` on arbitrary observed buses,
-   reporting matches per ID and per bus. Its DataFlash first pass now considers
-   sync-domain and per-ID protected-domain matches independently, so a protected key is
-   not lost merely because a different key authenticates `0x00F`. This directly corrects
-   the old failure mode in which genuine bus-1 Corolla-style `0x116`/`0x24D` traffic could
-   be reported as “0 protected.”
+7. **The oracle is no longer bounded by any fixed protected-ID list.** Passive capture
+   remains unfiltered for the full window. Known classic IDs
+   `0x116/0x131/0x177/0x183/0x24D/0x283/0x2E4/0x344` remain hypotheses, but every 8-byte
+   same-bus stream after sync `0x00F` is now checked for classic trailer structure
+   (reset-low-bit agreement, message-counter-low2 variation, authenticator variation).
+   Strong unknown candidates enter the cryptographic scan and are trusted only if AES-CMAC
+   verification succeeds. A regression fixture proves a separate-key unknown `0x456`
+   stream survives the exhaustive DataFlash first pass. CAN-FD traffic is retained as
+   evidence but never reinterpreted as an 8-byte classic frame.
 
 8. **The DataFlash payload has a now-understood optional recovery variant, but the raw
    Vance ciphertext is not directly usable on the analyzed Sienna gate.** `candidate-f05`
@@ -1474,8 +1478,10 @@ The single key ever sent: `36c20b4723967a953d1cb888625fa0eb` (rejected, NRC `0x3
    chosen-input oracle against ECU key material.
 6. **Does Willem's secret work at level `0x01`?** Untestable until PROGRAMMING opens, but it
    is the single shot most likely to simply work.
-7. **Which arbitration IDs does the Corolla sign?** Needed for any future matcher oracle.
-   Tool built, capture not yet obtained in the right vehicle mode.
+7. **Which arbitration IDs does the Corolla sign, and what roles do they have?** The
+   matcher no longer needs those IDs in advance: a correct READY capture can surface
+   unknown classic SecOC candidates structurally and verify them cryptographically. The
+   IDs/roles still matter for the final target/openpilot profile.
 8. **Which RH850 part is this?** Gates the memory-map search and the transferability of a
    glitch attack.
 
@@ -1682,8 +1688,9 @@ lean on resume.
 6. **The level-`0x03` data-record experiment** (§9.14). Free, no counter touched, and it
    tests whether the seed is a pure nonce or a function of client input.
 7. **Re-run the READY capture with a mode guard** that refuses to start until it observes
-   READY traffic. Produces the signed-ID list and the sync-counter behaviour, both required
-   by any future matcher.
+   READY traffic. The full-window capture now feeds structural unknown-stream discovery;
+   it should produce the signed-ID candidate list, sync-counter behavior, buses, DLCs, and
+   cadence needed for the target profile without requiring the IDs beforehand.
 8. **The gateway discriminator** (§9.9): in READY, capture background traffic on bus 1 and
    check whether the thirteen responding addresses also transmit periodic frames on our
    segment. Settles whether a repin is pointless.
@@ -1758,16 +1765,22 @@ lean on resume.
 
 ### 15.2 What "done" would look like
 
-Extraction succeeds when a 16-byte value is recovered that verifies against captured SecOC
-traffic. TSKM's matcher does that verification: an exhaustive stride-1 scan over every
-16-byte window of a memory dump, computing an AES-CMAC per window and accepting at ≥30
-matches with ≥2 sync samples. A wrong window clears a 28-bit MAC at 2⁻²⁸, so with two sync
-samples a false install sits at 2⁻⁵⁶ — no bad install is possible.
+Key **recovery** succeeds when a 16-byte value verifies against captured SecOC traffic.
+TSKM's matcher performs an exhaustive stride-1 scan over every 16-byte window of a memory
+dump and requires a real authenticated domain. The capture no longer needs a pre-known
+signed-ID list: unknown classic streams can be admitted structurally and then proved by
+AES-CMAC. A recovered value is stored privately and deliberately **not installed**.
 
-That machinery is built and validated on the Sienna. For the Corolla it needs two inputs
-neither of which exists yet: a memory dump containing the key, and a CAN oracle of signed
-frames. The oracle needs the signed arbitration IDs, which needs the READY capture. The
-dump needs the programming session, which is the wall.
+End-to-end openpilot integration is a later state. The exact Corolla/target profile must
+pin DBC, safety flags, steering mode, EPS scaling, protected command/status roles, and
+longitudinal topology with evidence; then a profile-bound stationary/bench artifact must
+show a signed zero-actuation command, target status acceptance, and no new fault latch.
+Only the final gated endpoint may write `SecOCKey`.
+
+The remaining physical inputs are therefore narrower: obtain a READY capture with enough
+sync/stream evidence and a key-bearing memory path or signer. Arbitration IDs can now be
+discovered from that capture rather than supplied in advance; programming/key storage and
+target-specific control semantics remain the artifact/hardware walls.
 
 ### 15.3 The thing most likely to be overlooked
 

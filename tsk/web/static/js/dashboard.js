@@ -144,13 +144,16 @@ function routeText(route) {
 
 function renderKey(dashboard) {
   const installed = Boolean(dashboard.key?.installed);
+  const recovered = Boolean(dashboard.recovered_key?.recovered);
   const key = dashboard.key?.key || "";
+  const fingerprint = dashboard.recovered_key?.key_sha256_prefix || "";
 
-  els.sidebarKeyDot.className = `dot ${installed ? "green" : ""}`.trim();
-  els.sidebarKeyText.textContent = installed ? "Key installed" : "Key: none";
+  els.sidebarKeyDot.className = `dot ${installed ? "green" : recovered ? "blue" : ""}`.trim();
+  els.sidebarKeyText.textContent = installed ? "Key installed" : recovered ? "Key recovered" : "Key: none";
 
-  els.keyChip.replaceChildren(dot(installed ? "green" : ""), node("span", "", installed ? "Key installed" : "Key not installed"));
-  els.systemKeyValue.textContent = formatKey(key);
+  const label = installed ? "Operational key installed" : recovered ? "Key recovered — not installed" : "No recovered key";
+  els.keyChip.replaceChildren(dot(installed ? "green" : recovered ? "blue" : ""), node("span", "", label));
+  els.systemKeyValue.textContent = installed ? formatKey(key) : recovered ? `Recovered key · SHA-256 ${fingerprint}` : "No key installed";
   els.uninstallBtn.disabled = !installed || state.busy;
 }
 
@@ -202,10 +205,14 @@ function renderNextAction(dashboard) {
   if (action.id === "programming") els.nextMeta.appendChild(pill("Resets EPS"));
   if (action.id === "dataflash") els.nextMeta.appendChild(pill("Programs EPS"));
   if (action.id === "verify") els.nextMeta.appendChild(pill("Offline verification"));
+  if (action.id === "integration") els.nextMeta.appendChild(pill("No key install"));
+  if (action.id === "stationary") els.nextMeta.appendChild(pill("Zero-actuation gate"));
 
   els.nextActions.replaceChildren();
   if (action.action === "match") {
     els.nextActions.appendChild(button(action.label || "Find & verify key", "btn primary", runMatcher));
+  } else if (action.action === "install-key") {
+    els.nextActions.appendChild(button(action.label || "Install verified key", "btn primary", installRecoveredKey));
   } else if (action.action === "research") {
     els.nextActions.appendChild(button(action.label || "Open Research", "btn primary", () => selectView("research")));
   } else if (action.href) {
@@ -391,15 +398,31 @@ async function runMatcher() {
   setBusy(true, "Finding & verifying key…");
   try {
     const { response, result } = await postJson("/api/match", {}, 120000);
-    if (result.status === "found") {
-      showModal("Key verified and installed", result.message || "The control-domain SecOC key was verified and installed.");
-    } else if (result.status === "verified_noncontrol_domain") {
-      showModal("Candidate verified — not installed", result.message || "A key was cryptographically verified, but not for the openpilot control domain.");
+    if (result.status === "key_recovered") {
+      showModal("Key recovered — not installed", result.message || "The SecOC key was cryptographically recovered and stored privately. Integration verification remains.");
     } else {
-      showModal(response.ok ? "Key not found" : "Verification failed", result.message || "No installable key was found.");
+      showModal(response.ok ? "Key not found" : "Verification failed", result.message || "No cryptographically verified key was found.");
     }
   } catch (error) {
     showModal("Verification failed", String(error));
+  } finally {
+    setBusy(false);
+    await refreshDashboard();
+  }
+}
+
+async function installRecoveredKey() {
+  if (state.busy) return;
+  setBusy(true, "Installing profile-verified key…");
+  try {
+    const { response, result } = await postJson("/api/install-recovered-key");
+    if (response.ok) {
+      showModal("Operational key installed", result.message || "The profile-verified recovered key is now installed.");
+    } else {
+      showModal("Installation blocked", result.message || "Target profile gates are not complete.");
+    }
+  } catch (error) {
+    showModal("Installation blocked", String(error));
   } finally {
     setBusy(false);
     await refreshDashboard();

@@ -86,8 +86,10 @@ class TestRecoveredKeyAndTargetProfile(unittest.TestCase):
         self.assertTrue(profile["integration"]["missing_fields"])
 
         integration_path.write_text(json.dumps({
+          "profile_id": profile["profile_id"],
           "reviewed": True,
           "fields": {name: f"known:{name}" for name in target_profile.REQUIRED_INTEGRATION_FIELDS},
+          "evidence": {name: f"unit-test source for {name}" for name in target_profile.REQUIRED_INTEGRATION_FIELDS},
         }), encoding="utf-8")
         stationary_path.write_text(json.dumps({
           "profile_id": profile["profile_id"],

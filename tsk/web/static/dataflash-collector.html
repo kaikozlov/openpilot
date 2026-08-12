@@ -33,7 +33,7 @@
             <div class="probe-card-body">
               <p class="probe-card-kicker">Operation</p>
               <h2 class="probe-card-title">DataFlash recovery</h2>
-              <p class="probe-card-copy">Uses the known 32 KiB dump payload. The recovered bytes are evidence only until a candidate authenticates captured control-domain SecOC traffic.</p>
+              <p class="probe-card-copy">Uses the known 32 KiB dump payload. The recovered bytes are evidence only until a candidate cryptographically authenticates the captured target SecOC traffic; recovery still does not install SecOCKey.</p>
               <ul class="probe-meta-list"><li class="probe-meta-row"><span class="probe-meta-label">Vehicle state</span><span class="probe-meta-value">Not Ready to Drive</span></li><li class="probe-meta-row"><span class="probe-meta-label">Range</span><span class="probe-meta-value">0xFF200000–0xFF208000</span></li><li class="probe-meta-row"><span class="probe-meta-label">Default payload</span><span class="probe-meta-value">Standard / no auto-reset</span></li></ul>
               <div class="probe-subtle-divider"></div>
               <div class="probe-actions"><label class="probe-option" for="recoveryPayload"><input type="checkbox" id="recoveryPayload"><span><strong>Experimental auto-reset after dump</strong><br>Uses the locally re-authenticated reset-ending derivative. The raw external candidate is never sent and this variant is not yet vehicle-confirmed.</span></label><button class="run-btn primary" id="startBtn" type="button">Start DataFlash dump</button></div>

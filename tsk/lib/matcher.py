@@ -29,7 +29,6 @@ this is an implementation optimization, not a framing change.
 This module does not install the key. It returns the key hex to the caller, which
 installs via KeyFileManager (same split as /api/extract).
 """
-import json
 import struct
 import time
 from pathlib import Path
