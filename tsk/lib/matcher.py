@@ -507,6 +507,7 @@ def verify_candidate_from_oracle(key: bytes, path: Path | None = None) -> dict:
   result["malformed"] = analysis["malformed"]
   result["profile_discovery"] = {
     "streams": analysis["streams"],
+    "can_inventory": analysis["can_inventory"],
     "unknown_structural_candidates": analysis["unknown_structural_candidates"],
     "unknown_scan_streams": analysis["unknown_scan_streams"],
   }
@@ -560,6 +561,7 @@ def run(progress_cb=None) -> dict:
   result["malformed"] = malformed
   result["profile_discovery"] = {
     "streams": analysis["streams"],
+    "can_inventory": analysis["can_inventory"],
     "unknown_structural_candidates": analysis["unknown_structural_candidates"],
     "unknown_scan_streams": analysis["unknown_scan_streams"],
   }

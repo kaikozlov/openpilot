@@ -199,6 +199,7 @@ def collect(progress_cb=None, seconds=COLLECT_SECONDS) -> dict:
     "control_counts": legacy_lateral_counts,
     "profile_discovery": {
       "streams": discovery["streams"],
+      "can_inventory": discovery["can_inventory"],
       "unknown_structural_candidates": discovery["unknown_structural_candidates"],
       "unknown_scan_streams": discovery["unknown_scan_streams"],
       "scan_included_samples": discovered_samples,

@@ -38,6 +38,7 @@ REQUIRED_INTEGRATION_FIELDS = (
   "eps_scale",
   "lateral_command_role",
   "lateral_status_feedback",
+  "longitudinal_control",
   "longitudinal_topology",
 )
 
@@ -153,17 +154,17 @@ def build_target_profile(identity_state: dict, *, verification: dict | None = No
     "ecu_serial": _identity_value(identity_state, "ecu_serial"),
     "panda": identity_state.get("panda", ""),
   }
+  oracle_sha256 = _sha256(oracle)
+  # Profile identity should survive an equivalent re-capture. Bind it to the
+  # exact ECU/route plus cryptographically verified classic streams, not to the
+  # raw oracle file hash or incidental ordinary CAN traffic. The raw oracle hash
+  # remains pinned below as evidence for this profile generation.
   stable_identity = {
-    "identity": identity,
+    "identity": {key: value for key, value in identity.items() if key != "panda"},
     "route": route,
-    "oracle_sha256": _sha256(oracle),
-    "streams": [
-      {
-        "bus": row["bus"], "addr": row["addr"], "lengths": row["lengths"],
-        "structural_candidate": row["structural_candidate"],
-        "known_toyota_hypothesis": row["known_toyota_hypothesis"],
-      }
-      for row in streams
+    "verified_streams": [
+      {"bus": row["bus"], "addr": row["addr"], "lengths": row["lengths"]}
+      for row in streams if row["cryptographically_verified"]
     ],
   }
   profile_id = hashlib.sha256(
@@ -182,9 +183,21 @@ def build_target_profile(identity_state: dict, *, verification: dict | None = No
   longitudinal_crypto = all(value >= 2 for value in longitudinal_matches.values())
   key_status = public_recovered_key_status()
   integration = _integration_status(profile_id)
+  if integration["ready"]:
+    from tsk.lib.opendbc_integration_audit import audit_opendbc_implementation
+    code_audit = audit_opendbc_implementation(identity, integration)
+  else:
+    code_audit = {
+      "ready": False,
+      "checks": [{
+        "name": "reviewed_integration_manifest",
+        "passed": False,
+        "detail": "integration manifest is not complete/reviewed",
+      }],
+    }
   stationary = _stationary_status(profile_id)
   operational_install_allowed = bool(
-    key_status["recovered"] and integration["ready"] and stationary["passed"]
+    key_status["recovered"] and integration["ready"] and code_audit["ready"] and stationary["passed"]
   )
 
   unresolved = []
@@ -196,6 +209,11 @@ def build_target_profile(identity_state: dict, *, verification: dict | None = No
     unresolved.append("cryptographically recovered target key")
   unresolved.extend(f"openpilot integration value: {field}" for field in integration["missing_fields"])
   unresolved.extend(f"openpilot integration evidence: {field}" for field in integration["missing_evidence"])
+  if not code_audit["ready"]:
+    unresolved.extend(
+      f"opendbc implementation: {check['name']}"
+      for check in code_audit.get("checks", []) if not check.get("passed")
+    )
   if not stationary["passed"]:
     unresolved.append("profile-bound stationary acceptance/status verification")
 
@@ -207,12 +225,13 @@ def build_target_profile(identity_state: dict, *, verification: dict | None = No
     "route": route,
     "oracle": {
       "path": str(oracle),
-      "sha256": stable_identity["oracle_sha256"],
+      "sha256": oracle_sha256,
       "sync_id": f"0x{SYNC_ADDR:03x}",
       "sync_samples": len(discovery["sync_samples"]),
       "sync_buses": sorted({int(sample["bus"]) for sample in discovery["sync_samples"]}),
       "malformed": discovery["malformed"],
     },
+    "can_inventory": discovery["can_inventory"],
     "secoc_streams": streams,
     "discovery": {
       "unknown_structural_candidates": discovery["unknown_structural_candidates"],
@@ -227,13 +246,13 @@ def build_target_profile(identity_state: dict, *, verification: dict | None = No
       "note": "Compatibility with the current Toyota sender is evidence, not proof that this target should use that platform/DBC/safety profile.",
     },
     "integration": integration,
+    "opendbc_implementation": code_audit,
     "stationary_verification": stationary,
     "readiness": {
       "key_recovered": bool(key_status["recovered"]),
-      "target_profile_observed": bool(
-        identity["app_sw_id"] and any(row["scan_included"] for row in streams)
-      ),
+      "target_profile_observed": bool(identity["app_sw_id"] and discovery["can_inventory"]),
       "openpilot_integration_reviewed": bool(integration["ready"]),
+      "openpilot_code_ready": bool(code_audit["ready"]),
       "stationary_acceptance_verified": bool(stationary["passed"]),
       "operational_install_allowed": operational_install_allowed,
     },
@@ -283,10 +302,13 @@ def public_target_profile_status() -> dict:
     "generated_utc": profile.get("generated_utc", ""),
     "identity": dict(profile.get("identity", {})),
     "route": dict(profile.get("route", {})),
+    "can_inventory": list(profile.get("can_inventory", [])),
+    "secoc_streams": list(profile.get("secoc_streams", [])),
     "discovery": dict(profile.get("discovery", {})),
     "recovered_key": dict(profile.get("recovered_key", {})),
     "current_openpilot_compatibility": dict(profile.get("current_openpilot_compatibility", {})),
     "integration": dict(profile.get("integration", {})),
+    "opendbc_implementation": dict(profile.get("opendbc_implementation", {})),
     "stationary_verification": dict(profile.get("stationary_verification", {})),
     "readiness": dict(profile.get("readiness", {})),
     "unresolved": list(profile.get("unresolved", [])),

@@ -65,6 +65,9 @@ class TestSecocDiscovery(unittest.TestCase):
     self.assertFalse(streams[(2, 0x555)]["structural_candidate"])
     self.assertFalse(streams[(2, 0x555)]["scan_included"])
     self.assertEqual({sample["addr"] for sample in analysis["protected_samples"]}, {unknown_addr})
+    inventory = {(row["bus"], row["addr_int"], row["length"]): row for row in analysis["can_inventory"]}
+    self.assertEqual(inventory[(2, unknown_addr, 8)]["samples"], 32)
+    self.assertEqual(inventory[(2, 0x555, 8)]["samples"], 16)
 
     dump = b"\xA5" * 41 + control_key + b"\x5A" * 37
     result = find_key(dump, analysis["sync_samples"], analysis["protected_samples"])
@@ -88,6 +91,10 @@ class TestSecocDiscovery(unittest.TestCase):
       path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
       analysis = load_oracle_analysis(path)
     self.assertFalse(any(row["addr_int"] == 0x090 for row in analysis["streams"]))
+    fd = next(row for row in analysis["can_inventory"] if row["addr_int"] == 0x090)
+    self.assertEqual(fd["length"], 32)
+    self.assertEqual(fd["samples"], 12)
+    self.assertTrue(fd["known_additional_secoc_hypothesis"])
 
 
 if __name__ == "__main__":
