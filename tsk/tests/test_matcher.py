@@ -53,6 +53,16 @@ class TestMatcher(unittest.TestCase):
     self.assertEqual(result["control_matches_by_id"], {"0x131": 16, "0x2e4": 16})
     self.assertEqual(result["control_missing"], [])
 
+  def test_current_openpilot_compatibility_reports_lateral_and_longitudinal_separately(self):
+    key = bytes(range(16))
+    sync, protected = self._oracle(key, ids=(0x131, 0x183, 0x2E4))
+    result = verify_candidate_key(key, sync, protected)
+    self.assertEqual(result["status"], "found")
+    self.assertTrue(result["legacy_lateral_ready"])
+    self.assertTrue(result["legacy_longitudinal_ready"])
+    self.assertEqual(result["legacy_lateral_matches_by_id"], {"0x131": 11, "0x2e4": 10})
+    self.assertEqual(result["legacy_longitudinal_matches_by_id"], {"0x183": 11})
+
   def test_protected_only_control_key_is_valid_with_separate_sync_key(self):
     key = bytes(range(16))
     sync_key = bytes(range(16, 32))

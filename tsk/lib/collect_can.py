@@ -21,8 +21,10 @@ from uuid import uuid4
 from tsk.lib.diagnostic_route import ELM327_NORMAL_PARAM, configure_elm327
 from tsk.lib.env import CAN_ORACLE_PATH, is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
+from tsk.lib.secoc_discovery import load_oracle_discovery
 from tsk.lib.secoc_profile import (
-  CLASSIC_PROTECTED_ADDRS, OPENPILOT_CONTROL_PROTECTED_ADDRS, SYNC_ADDR,
+  CLASSIC_PROTECTED_ADDRS, CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS,
+  CURRENT_OPENPILOT_LONGITUDINAL_PROTECTED_ADDRS, SYNC_ADDR,
 )
 
 PROTECTED_ADDRS = CLASSIC_PROTECTED_ADDRS
@@ -33,7 +35,7 @@ PROTECTED_ADDRS = CLASSIC_PROTECTED_ADDRS
 SYNC_TARGET = 50
 PROTECTED_TARGET = 30
 CONTROL_SAMPLE_TARGET = 2
-COLLECT_SECONDS = 60.0  # hard cap; early stop additionally requires control-domain evidence
+COLLECT_SECONDS = 60.0  # full observation window; target discovery must not stop on legacy IDs
 
 
 def oracle_path() -> Path:
@@ -143,60 +145,81 @@ def collect(progress_cb=None, seconds=COLLECT_SECONDS) -> dict:
         f.flush()
         cb(seconds=now - begin, sync=sync_count, protected=protected_count)
 
-      # Do not let a fast non-control protected stream end the capture before the
-      # current openpilot control IDs have had a chance to appear. A vehicle with no
-      # such IDs still reaches the hard cap and returns its generalized evidence.
-      control_ready = all(protected_by_id.get(addr, 0) >= CONTROL_SAMPLE_TARGET
-                          for addr in OPENPILOT_CONTROL_PROTECTED_ADDRS)
-      if sync_count >= SYNC_TARGET and protected_count >= PROTECTED_TARGET and control_ready:
-        break
+      # Deliberately no early stop here. The current openpilot IDs are compatibility
+      # evidence, not the discovery boundary for an unknown target. Keep the full
+      # observation window so slower or previously unknown SecOC streams can emerge.
 
-    control_ready = all(protected_by_id.get(addr, 0) >= CONTROL_SAMPLE_TARGET
-                        for addr in OPENPILOT_CONTROL_PROTECTED_ADDRS)
-    control_counts = {f"0x{addr:03x}": protected_by_id.get(addr, 0)
-                      for addr in sorted(OPENPILOT_CONTROL_PROTECTED_ADDRS)}
+    legacy_lateral_observed = all(
+      protected_by_id.get(addr, 0) >= CONTROL_SAMPLE_TARGET
+      for addr in CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS
+    )
+    legacy_lateral_counts = {
+      f"0x{addr:03x}": protected_by_id.get(addr, 0)
+      for addr in sorted(CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS)
+    }
+    legacy_longitudinal_observed = all(
+      protected_by_id.get(addr, 0) >= CONTROL_SAMPLE_TARGET
+      for addr in CURRENT_OPENPILOT_LONGITUDINAL_PROTECTED_ADDRS
+    )
+    legacy_longitudinal_counts = {
+      f"0x{addr:03x}": protected_by_id.get(addr, 0)
+      for addr in sorted(CURRENT_OPENPILOT_LONGITUDINAL_PROTECTED_ADDRS)
+    }
     f.write(json.dumps({"event": "run_end", "run_id": run_id,
                         "operation": "can_oracle_capture", "sync": sync_count,
                         "protected": protected_count,
                         "protected_by_id": {f"0x{k:03x}": v for k, v in protected_by_id.items() if v},
                         "counts_by_bus": counts_by_bus,
-                        "control_ready": control_ready, "control_counts": control_counts,
+                        "legacy_lateral_observed": legacy_lateral_observed,
+                        "legacy_lateral_counts": legacy_lateral_counts,
+                        "legacy_longitudinal_observed": legacy_longitudinal_observed,
+                        "legacy_longitudinal_counts": legacy_longitudinal_counts,
                         "elm327_param": ELM327_NORMAL_PARAM,
                         "semantic_path": "normal-harness"}) + "\n")
     f.flush()
     os.fsync(f.fileno())
 
   cb(seconds=time.monotonic() - begin, sync=sync_count, protected=protected_count)
+  discovery = load_oracle_discovery(path, run_id=run_id)
+  discovered_streams = [row for row in discovery["streams"] if row["scan_included"]]
+  discovered_samples = sum(int(row["samples"]) for row in discovered_streams)
+  discovery_ready = sync_count >= SYNC_TARGET and discovered_samples >= PROTECTED_TARGET
 
-  if sync_count >= SYNC_TARGET and protected_count >= PROTECTED_TARGET:
-    return {
-      "status": "complete",
-      "sync": sync_count,
-      "protected": protected_count,
-      "protected_by_id": {f"0x{k:03x}": v for k, v in protected_by_id.items() if v},
-      "counts_by_bus": counts_by_bus,
-      "control_ready": control_ready,
-      "control_counts": control_counts,
-      "elm327_param": ELM327_NORMAL_PARAM,
-      "semantic_path": "normal-harness",
-      "oracle_path": str(path),
-      "message": (f"Collected {sync_count} sync and {protected_count} protected frames. " +
-                  ("Control-domain oracle is ready." if control_ready else
-                   f"Control-domain evidence is incomplete: {control_counts}; research capture retained.")),
-    }
-  return {
-    "status": "insufficient",
+  common = {
     "sync": sync_count,
     "protected": protected_count,
     "protected_by_id": {f"0x{k:03x}": v for k, v in protected_by_id.items() if v},
     "counts_by_bus": counts_by_bus,
-    "control_ready": control_ready,
-    "control_counts": control_counts,
+    "legacy_lateral_observed": legacy_lateral_observed,
+    "legacy_lateral_counts": legacy_lateral_counts,
+    "legacy_longitudinal_observed": legacy_longitudinal_observed,
+    "legacy_longitudinal_counts": legacy_longitudinal_counts,
+    # Compatibility aliases for the existing UI while it is migrated.
+    "control_ready": legacy_lateral_observed,
+    "control_counts": legacy_lateral_counts,
+    "profile_discovery": {
+      "streams": discovery["streams"],
+      "unknown_structural_candidates": discovery["unknown_structural_candidates"],
+      "unknown_scan_streams": discovery["unknown_scan_streams"],
+      "scan_included_samples": discovered_samples,
+    },
     "elm327_param": ELM327_NORMAL_PARAM,
     "semantic_path": "normal-harness",
     "oracle_path": str(path),
+  }
+
+  if discovery_ready:
+    return {
+      "status": "complete",
+      **common,
+      "message": (f"Collected {sync_count} sync frames and {discovered_samples} structurally eligible classic SecOC samples "
+                  f"across {len(discovered_streams)} stream(s). Target-profile evidence is ready for cryptographic classification."),
+    }
+  return {
+    "status": "insufficient",
+    **common,
     "message": " ".join((
-      f"Only {sync_count}/{SYNC_TARGET} sync and {protected_count}/{PROTECTED_TARGET} protected frames.",
+      f"Only {sync_count}/{SYNC_TARGET} sync and {discovered_samples}/{PROTECTED_TARGET} structurally eligible classic SecOC samples.",
       "Put the car in READY Mode (hybrid on) and collect again.",
     )),
   }

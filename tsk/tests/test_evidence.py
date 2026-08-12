@@ -22,6 +22,9 @@ class TestEvidenceBundle(unittest.TestCase):
       raw = root / "uds-sweep" / "ready_capture.ndjson"
       raw.parent.mkdir(parents=True)
       raw.write_text('{"event":"can","addr":291}\n', encoding="utf-8")
+      private_key = root / "private" / "recovered-key.json"
+      private_key.parent.mkdir(parents=True)
+      private_key.write_text('{"key":"00112233445566778899aabbccddeeff"}\n', encoding="utf-8")
 
       with patch.multiple(
           evidence,
@@ -41,6 +44,8 @@ class TestEvidenceBundle(unittest.TestCase):
       self.assertIn("tsk-evidence/session-manifest.json", members)
       self.assertIn("tsk-evidence/operations.ndjson", members)
       self.assertIn("tsk-evidence/uds-sweep/ready_capture.ndjson", members)
+      self.assertNotIn("tsk-evidence/private/recovered-key.json", members)
+      self.assertNotIn("private/recovered-key.json", {entry["path"] for entry in manifest["files"]})
       self.assertEqual(manifest["schema_version"], 1)
       self.assertEqual(manifest["operation_states"]["identity"]["status"], "mapped")
       self.assertEqual(manifest["payloads"][0]["sha256"], evidence.hashlib.sha256(b"payload").hexdigest())
