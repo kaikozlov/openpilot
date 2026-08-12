@@ -22,18 +22,25 @@ from tsk.lib.env import is_agnos
 from tsk.lib.evidence import create_evidence_bundle, record_operation
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.key_file_manager import KeyFileManager, format_key
+from tsk.lib.recovered_key import persist_recovered_key, public_recovered_key_status, recovered_key_hex
 from tsk.lib.reboot_manager import REBOOT_ACTIONS, RebootManager
 from tsk.lib.sniff_can import sniff as sniff_can, summarize_counts
 from tsk.lib.dump_diag import diagnose as dump_diagnose
 from tsk.lib.prog_probe import probe_programming
 from tsk.lib.read_mem import read_key_region
 from tsk.lib.ident_map import map_surface
+from tsk.lib.integration_profile import manifest_template as integration_manifest_template, save_and_refresh as save_integration_and_refresh
 from tsk.lib.reset_probe import probe_reset_window
 from tsk.lib.level3_probe import probe_level3
 from tsk.lib.sendkey_probe import send_sienna_application_key
 from tsk.lib.preamble_probe import probe_preamble
 from tsk.lib.sweep_uds import sweep
 from tsk.lib.capture_ready import capture_ready, run_ready_diff
+from tsk.lib.target_profile import (
+  invalidate_target_profile, persist_target_profile, public_target_profile_status,
+  refresh_target_profile_from_recovered,
+)
+from tsk.lib.stationary_verification import stationary_plan, verify_and_refresh as verify_stationary_and_refresh
 
 
 HOST = "0.0.0.0"
@@ -552,12 +559,19 @@ def _identity_value(identity: list[dict], name: str) -> str:
   return ""
 
 
-def dashboard_payload() -> dict:
-  """Project raw TSK state into the operator-facing recovery workflow.
+def persist_verified_recovery(key: str, verification: dict, *, source: str) -> tuple[dict, dict]:
+  """Persist a verified key privately and refresh its evidence-bound target profile."""
+  recovered = persist_recovered_key(key, verification, source=source)
+  with ident_lock:
+    identity_snapshot = dict(ident_state)
+    identity_snapshot["identity"] = [dict(row) for row in ident_state.get("identity", [])]
+  profile = persist_target_profile(identity_snapshot, verification=verification,
+                                   oracle_path=can_oracle_path())
+  return recovered, profile
 
-  This endpoint deliberately owns workflow semantics so the browser does not have to
-  reconstruct them from a collection of independently changing probe endpoints.
-  """
+
+def dashboard_payload() -> dict:
+  """Project raw TSK state into the evidence-gated recovery/integration workflow."""
   snapshots = operation_states_snapshot()
   identity = snapshots["identity"]
   can = snapshots["can"]
@@ -565,13 +579,20 @@ def dashboard_payload() -> dict:
   programming = snapshots["programming"]
   key = RebootManager.key_status_payload()
   installed = bool(key.get("installed"))
+  recovered = public_recovered_key_status()
+  profile = public_target_profile_status()
+  readiness = profile.get("readiness", {})
 
   app_sw = _identity_value(identity.get("identity", []), "app_sw_id")
   spare_part = _identity_value(identity.get("identity", []), "spare_part_no")
   ecu_serial = _identity_value(identity.get("identity", []), "ecu_serial")
   identity_ready = identity.get("status") == "mapped" and bool(app_sw)
   known_transfer = bool(app_sw) and any(app_sw.encode() in version for version in TSKExtractor.APPLICATION_VERSIONS)
-  control_ready = bool(can.get("control_ready"))
+  can_ready = bool(can.get("ready") or can.get("status") == "complete")
+  key_recovered = bool(recovered.get("recovered"))
+  integration_ready = bool(readiness.get("openpilot_integration_reviewed"))
+  stationary_ready = bool(readiness.get("stationary_acceptance_verified"))
+  operational_profile_ready = bool(readiness.get("operational_install_allowed"))
   programming_status = str(programming.get("status", "idle"))
   programming_ready = known_transfer or programming_status == "entered"
   programming_blocked = programming_status in ("failed", "rejected", "blocked", "unreachable")
@@ -588,31 +609,28 @@ def dashboard_payload() -> dict:
   }
   route_ready = identity_ready and route["tx_bus"] >= 0 and bool(route["tx"] and route["rx"])
 
-  if installed:
+  if installed and operational_profile_ready:
     stage = "complete"
     next_action = {
-      "id": "complete", "title": "Recovery complete",
-      "description": "A verified SecOC key is installed. Export the evidence bundle before leaving this build.",
-      "href": "/api/evidence-bundle", "label": "Download evidence", "vehicle_state": "Any",
-      "tone": "success",
+      "id": "complete", "title": "Integration verified",
+      "description": "The recovered key is bound to a reviewed target profile, stationary verification passed, and SecOCKey is installed.",
+      "href": "/api/evidence-bundle", "label": "Download evidence", "vehicle_state": "Any", "tone": "success",
     }
   elif not identity_ready:
     stage = "identify"
     next_action = {
       "id": "identify", "title": "Identify the EPS",
       "description": "Read F181 and establish the complete diagnostic route before any recovery attempt.",
-      "href": "/ident-map.html", "label": "Identify EPS", "vehicle_state": "Not Ready to Drive",
-      "tone": "primary",
+      "href": "/ident-map.html", "label": "Identify EPS", "vehicle_state": "Not Ready to Drive", "tone": "primary",
     }
-  elif not control_ready:
+  elif not can_ready:
     stage = "capture_can"
     next_action = {
-      "id": "capture_can", "title": "Capture SecOC traffic",
-      "description": "Collect READY-state authentication traffic, including the control messages openpilot must sign.",
-      "href": "/can-collector.html", "label": "Capture CAN evidence", "vehicle_state": "READY",
-      "tone": "primary",
+      "id": "capture_can", "title": "Discover the target SecOC surface",
+      "description": "Capture the full READY-state bus window. Known Toyota IDs are annotations; unknown classic SecOC streams are discovered structurally and later proven cryptographically.",
+      "href": "/can-collector.html", "label": "Capture CAN evidence", "vehicle_state": "READY", "tone": "primary",
     }
-  elif not programming_ready:
+  elif not key_recovered and not programming_ready:
     stage = "programming"
     if programming_blocked:
       next_action = {
@@ -625,46 +643,81 @@ def dashboard_payload() -> dict:
       next_action = {
         "id": "programming", "title": "Confirm the programming handoff",
         "description": "Unknown calibration: confirm bootloader reappearance on the preserved route before sending a dump payload.",
-        "href": "/prog-probe.html", "label": "Run handoff probe", "vehicle_state": "Not Ready to Drive",
-        "tone": "primary",
+        "href": "/prog-probe.html", "label": "Run handoff probe", "vehicle_state": "Not Ready to Drive", "tone": "primary",
       }
-  elif not dataflash_ready:
+  elif not key_recovered and not dataflash_ready:
     stage = "dataflash"
     next_action = {
       "id": "dataflash", "title": "Recover key material",
-      "description": "Dump EPS DataFlash on the already identified physical route. The candidate will not be trusted until CAN verification succeeds.",
-      "href": "/dataflash-collector.html", "label": "Dump DataFlash", "vehicle_state": "Not Ready to Drive",
-      "tone": "primary",
+      "description": "Dump EPS DataFlash on the identified route. A candidate becomes trusted only after it authenticates the captured target traffic.",
+      "href": "/dataflash-collector.html", "label": "Dump DataFlash", "vehicle_state": "Not Ready to Drive", "tone": "primary",
     }
-  else:
+  elif not key_recovered:
     stage = "verify"
     next_action = {
-      "id": "verify", "title": "Verify the key candidate",
-      "description": "CAN evidence and DataFlash are available. Scan candidates and install only a key that authenticates the openpilot control domain.",
-      "href": "", "label": "Find & verify key", "vehicle_state": "Any",
-      "tone": "primary", "action": "match",
+      "id": "verify", "title": "Recover and verify the target key",
+      "description": "Scan every eligible DataFlash window and cryptographically classify it against the discovered target SecOC streams. This does not install SecOCKey.",
+      "href": "", "label": "Find & verify key", "vehicle_state": "Any", "tone": "primary", "action": "match",
+    }
+  elif not profile.get("present") or not integration_ready:
+    stage = "integration"
+    next_action = {
+      "id": "integration", "title": "Complete the target integration profile",
+      "description": "The key is recovered. Pin the target DBC, safety flags, steering mode, EPS scale, command/status roles, and longitudinal topology before openpilot can use it.",
+      "href": "/target-profile.html", "label": "Review target profile", "vehicle_state": "Any", "tone": "primary",
+    }
+  elif not stationary_ready:
+    stage = "stationary"
+    next_action = {
+      "id": "stationary", "title": "Run stationary acceptance verification",
+      "description": "Verify the reviewed profile against the stationary/bench target and its status feedback before allowing operational key installation.",
+      "href": "/stationary-verify.html", "label": "Stationary verification", "vehicle_state": "Stationary / bench", "tone": "primary",
+    }
+  elif not installed:
+    stage = "install"
+    next_action = {
+      "id": "install", "title": "Install the verified target key",
+      "description": "All profile and stationary gates have passed. Install the already recovered key into the existing SecOCKey interface.",
+      "href": "", "label": "Install verified key", "vehicle_state": "Any", "tone": "primary", "action": "install-key",
+    }
+  else:
+    # A key installed by an older TSK build must not be mistaken for evidence that
+    # today's profile gates passed.
+    stage = "integration"
+    next_action = {
+      "id": "integration", "title": "Reconcile the existing SecOCKey",
+      "description": "A SecOCKey is present, but no complete evidence-bound target profile proves it is safe for this integration. Continue profile verification.",
+      "href": "/target-profile.html", "label": "Review target profile", "vehicle_state": "Any", "tone": "warning",
     }
 
+  def step_state(done: bool, step_id: str) -> str:
+    if done:
+      return "complete"
+    return "current" if stage == step_id else "pending"
+
+  profile_streams = can.get("profile_discovery", {}).get("streams", [])
+  included_streams = [row for row in profile_streams if row.get("scan_included")]
   steps = [
-    {"id": "identify", "title": "Identify EPS", "state": "complete" if installed or identity_ready else "current" if stage == "identify" else "pending",
+    {"id": "identify", "title": "Identify EPS", "state": step_state(identity_ready, "identify"),
      "detail": app_sw or "Read F181 and diagnostic route"},
-    {"id": "capture_can", "title": "Capture CAN evidence",
-     "state": "complete" if installed or control_ready else "current" if stage == "capture_can" else "pending",
-     "detail": (f"{can.get('protected_count', 0)} protected frames · control IDs ready" if control_ready else
-                "Completed earlier" if installed else f"{can.get('sync_count', 0)} sync · {can.get('protected_count', 0)} protected")},
-    {"id": "programming", "title": "Confirm programming route",
-     "state": "complete" if installed or programming_ready else "current" if stage == "programming" else "pending",
-     "detail": ("Known transfer path" if known_transfer else "Bootloader reappeared on preserved route" if programming_status == "entered" else
-                "Completed earlier" if installed else "Required for this calibration")},
-    {"id": "dataflash", "title": "Recover key material",
-     "state": "complete" if installed or dataflash_ready else "current" if stage == "dataflash" else "pending",
-     "detail": ("Complete DataFlash dump" if dataflash.get("ready") else
-                "Usable partial DataFlash dump" if dataflash.get("status") == "partial" else
-                "Completed earlier" if installed else "Waiting for programming route")},
-    {"id": "verify", "title": "Verify candidate", "state": "complete" if installed else "current" if stage == "verify" else "pending",
-     "detail": "Cryptographic control-domain verification"},
-    {"id": "install", "title": "Install key", "state": "complete" if installed else "pending",
-     "detail": "Installed" if installed else "Only after verification"},
+    {"id": "capture_can", "title": "Discover SecOC surface", "state": step_state(can_ready, "capture_can"),
+     "detail": (f"{can.get('sync_count', 0)} sync · {len(included_streams)} candidate stream(s)" if can_ready else
+                f"{can.get('sync_count', 0)} sync · capture incomplete")},
+    {"id": "programming", "title": "Confirm recovery route", "state": step_state(key_recovered or programming_ready, "programming"),
+     "detail": ("Key already recovered" if key_recovered else "Known transfer path" if known_transfer else
+                "Bootloader reappeared" if programming_status == "entered" else "Required if DataFlash recovery is needed")},
+    {"id": "dataflash", "title": "Recover key material", "state": step_state(key_recovered or dataflash_ready, "dataflash"),
+     "detail": ("Key material recovered" if key_recovered else "Complete DataFlash dump" if dataflash.get("ready") else
+                "Usable partial dump" if dataflash.get("status") == "partial" else "Waiting")},
+    {"id": "verify", "title": "Cryptographically recover key", "state": step_state(key_recovered, "verify"),
+     "detail": (f"Recovered key {recovered.get('key_sha256_prefix', '')}" if key_recovered else "No operational install at this step")},
+    {"id": "integration", "title": "Review target integration", "state": step_state(integration_ready, "integration"),
+     "detail": "Reviewed target-specific DBC/safety/control profile" if integration_ready else "Target-specific fields still required"},
+    {"id": "stationary", "title": "Stationary verification", "state": step_state(stationary_ready, "stationary"),
+     "detail": "Profile-bound acceptance passed" if stationary_ready else "Not yet proven on target"},
+    {"id": "install", "title": "Install operational key", "state": step_state(installed and operational_profile_ready, "install"),
+     "detail": "Installed after all gates" if installed and operational_profile_ready else
+               "Existing unverified install" if installed else "Blocked until all gates pass"},
   ]
 
   failures = []
@@ -674,6 +727,8 @@ def dashboard_payload() -> dict:
 
   return {
     "key": key,
+    "recovered_key": recovered,
+    "target_profile": profile,
     "vehicle": {
       "identified": identity_ready,
       "known_transfer": known_transfer,
@@ -689,7 +744,6 @@ def dashboard_payload() -> dict:
     "programming": programming,
     "reboot": get_reboot_actions_payload(),
   }
-
 
 def _df_progress(status=None, frames=None, bytes_done=None, total=None, message=None) -> None:
   with df_lock:
@@ -877,6 +931,16 @@ def _run_can_job() -> None:
         ready=(status == "complete"),
         **_route_metadata(result),
       )
+    if status == "complete" and public_recovered_key_status().get("recovered"):
+      try:
+        with ident_lock:
+          identity_snapshot = dict(ident_state)
+          identity_snapshot["identity"] = [dict(row) for row in ident_state.get("identity", [])]
+        refresh_target_profile_from_recovered(identity_snapshot, oracle_path=can_oracle_path())
+      except Exception as profile_error:
+        with can_lock:
+          can_state["message"] = (can_state.get("message", "") +
+                                  f" Profile refresh failed: {profile_error}").strip()
   except NotAGNOSError:
     _run_can_mock()
   except Exception as e:
@@ -1987,11 +2051,24 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     dry_run_counter += 1
 
     if scenario == 0:
-      KeyFileManager().install_key(DRY_RUN_FAKE_KEY)
+      verification = {
+        "status": "found", "domain": "sync+protected", "matches": 64,
+        "sync": "8/8", "protected": "56/56",
+        "protected_by_id": {"0x131": 20, "0x183": 16, "0x2e4": 20},
+        "protected_by_bus": {"1": 56},
+        "legacy_lateral_ready": True,
+        "legacy_lateral_matches_by_id": {"0x131": 20, "0x2e4": 20},
+        "legacy_longitudinal_ready": True,
+        "legacy_longitudinal_matches_by_id": {"0x183": 16},
+      }
+      recovered = persist_recovered_key(DRY_RUN_FAKE_KEY, verification, source="dry-run")
       self._send_json({
         "ok": True,
+        "status": "key_recovered",
         "key": DRY_RUN_FAKE_KEY,
-        "message": f"Success!\n\nThis is your key:\n{format_key(DRY_RUN_FAKE_KEY)}\n\nExport the evidence bundle now.",
+        "recovered_key": recovered,
+        "message": (f"Cryptographically verified key recovered (dry run):\n{format_key(DRY_RUN_FAKE_KEY)}\n\n"
+                    "It has NOT been installed as SecOCKey. Target-profile and stationary verification remain."),
       })
     elif scenario == 1:
       self._send_json({
@@ -2044,35 +2121,22 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       try:
         # Do not spend a programming/extraction attempt unless enough persisted CAN
         # evidence already exists to cryptographically validate the returned bytes.
-        from tsk.lib.matcher import (
-          MATCH_FLOOR, MIN_CONTROL_MATCHES_PER_ID, MIN_SYNC_MATCHES,
-          load_oracle_samples, verify_candidate_from_oracle,
-        )
-        from tsk.lib.secoc_profile import OPENPILOT_CONTROL_PROTECTED_ADDRS
+        from tsk.lib.matcher import MATCH_FLOOR, MIN_SYNC_MATCHES, load_oracle_analysis, verify_candidate_from_oracle
         try:
-          sync_samples, protected_samples, _ = load_oracle_samples(can_oracle_path())
+          oracle_analysis = load_oracle_analysis(can_oracle_path())
         except OSError:
-          sync_samples, protected_samples = [], []
-        sync_count, protected_count = len(sync_samples), len(protected_samples)
-        control_samples = {
-          addr: sum(1 for sample in protected_samples if sample["addr"] == addr)
-          for addr in OPENPILOT_CONTROL_PROTECTED_ADDRS
-        }
-        control_missing = [
-          f"0x{addr:03x}" for addr in sorted(OPENPILOT_CONTROL_PROTECTED_ADDRS)
-          if control_samples[addr] < MIN_CONTROL_MATCHES_PER_ID
-        ]
-        if (sync_count < MIN_SYNC_MATCHES or (sync_count + protected_count) < MATCH_FLOOR or
-            control_missing):
+          oracle_analysis = {"sync_samples": [], "protected_samples": [], "streams": []}
+        sync_count = len(oracle_analysis["sync_samples"])
+        protected_count = len(oracle_analysis["protected_samples"])
+        if sync_count < MIN_SYNC_MATCHES or (sync_count + protected_count) < MATCH_FLOOR:
           self._send_json({
             "ok": False,
             "status": "oracle_required",
-            "control_samples": {f"0x{k:03x}": v for k, v in sorted(control_samples.items())},
-            "message": (f"Collect CAN evidence before extraction. Current usable oracle: {sync_count} sync + "
-                        f"{protected_count} protected. Installation requires at least {MIN_SYNC_MATCHES} sync, "
-                        f"{MATCH_FLOOR} total samples, and {MIN_CONTROL_MATCHES_PER_ID} samples for each current "
-                        f"openpilot control ID. Missing: {', '.join(control_missing) or 'none'}. "
-                        "No programming request was sent."),
+            "profile_discovery": {"streams": oracle_analysis.get("streams", [])},
+            "message": (f"Collect target-profile CAN evidence before extraction. Current usable oracle: "
+                        f"{sync_count} sync + {protected_count} known/structurally discovered classic SecOC samples; "
+                        f"need at least {MIN_SYNC_MATCHES} sync and {MATCH_FLOOR} total samples. "
+                        "No programming request was sent. Current openpilot IDs are compatibility evidence, not an extraction prerequisite."),
           }, status=HTTPStatus.CONFLICT)
           return
 
@@ -2090,29 +2154,19 @@ class TSKWebHandler(BaseHTTPRequestHandler):
                         + verification.get("message", "")),
           }, status=HTTPStatus.UNPROCESSABLE_ENTITY)
           return
-        if not verification.get("control_ready", False):
-          self._send_json({
-            "ok": False,
-            "status": "candidate_verified_noncontrol_domain",
-            "candidate": secoc_key,
-            "verification": verification,
-            "extraction": dict(TSKExtractor._last_extraction_metadata),
-            "message": ("The candidate is cryptographically real, but it was not verified for every current "
-                        "openpilot control SecOC ID and was NOT installed. " + verification.get("message", "")),
-          }, status=HTTPStatus.UNPROCESSABLE_ENTITY)
-          return
-
-        KeyFileManager().install_key(secoc_key)
+        recovered, profile = persist_verified_recovery(secoc_key, verification, source="ram-extraction")
         self._send_json({
           "ok": True,
-          "status": "verified",
+          "status": "key_recovered",
           "key": secoc_key,
+          "recovered_key": recovered,
+          "target_profile": profile,
           "verification": verification,
           "extraction": dict(TSKExtractor._last_extraction_metadata),
-          "message": (f"Success!\n\nCryptographically verified key:\n{format_key(secoc_key)}\n\n"
+          "message": (f"Cryptographically verified key recovered:\n{format_key(secoc_key)}\n\n"
                       f"{verification['matches']} CAN-oracle matches "
                       f"(sync {verification['sync']}, protected {verification['protected']}).\n\n"
-                      "Export the evidence bundle now."),
+                      "The key was NOT installed as SecOCKey. Complete target integration and stationary verification first."),
         })
       except NotAGNOSError:
         self._send_extract_dry_run()
@@ -2140,47 +2194,34 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       try:
         from tsk.lib.matcher import run as run_matcher
         result = run_matcher()
-        if result["status"] == "found" and result.get("control_ready", False):
-          KeyFileManager().install_key(result["key"])
-          # Same body for a complete or a partial recovery — the title carries
-          # "Success!", so the body opens straight at the key.
+        if result["status"] == "found":
+          recovered, profile = persist_verified_recovery(result["key"], result, source="dataflash-match")
           detail = (
             f"Found at {result['address']} — {result['matches']} matches "
             f"(sync {result['sync']}, protected {result['protected']})."
           )
           message = (
-            f"This is your key:\n{format_key(result['key'])}\n\n"
+            f"Cryptographically verified key recovered:\n{format_key(result['key'])}\n\n"
             f"{detail}\n\n"
-            "Control-domain verification passed for 0x131 and 0x2E4.\n\n"
-            "Export the evidence bundle now."
+            "The candidate has been stored privately as recovered evidence, not installed as SecOCKey. "
+            "Current-openpilot ID matches are reported as compatibility evidence only."
           )
           self._send_json({
             "ok": True,
-            "status": "found",
+            "status": "key_recovered",
             "key": result["key"],
+            "recovered_key": recovered,
+            "target_profile": profile,
             "protected_by_id": result.get("protected_by_id", {}),
             "protected_by_bus": result.get("protected_by_bus", {}),
+            "protected_by_stream": result.get("protected_by_stream", {}),
             "domain": result.get("domain", ""),
-            "control_ready": True,
-            "control_matches_by_id": result.get("control_matches_by_id", {}),
+            "legacy_lateral_ready": result.get("legacy_lateral_ready", False),
+            "legacy_lateral_matches_by_id": result.get("legacy_lateral_matches_by_id", {}),
+            "legacy_longitudinal_ready": result.get("legacy_longitudinal_ready", False),
+            "legacy_longitudinal_matches_by_id": result.get("legacy_longitudinal_matches_by_id", {}),
             "alternate_verified": result.get("alternate_verified", []),
             "message": message,
-            **RebootManager.key_status_payload(),
-          })
-        elif result["status"] == "found":
-          self._send_json({
-            "ok": True,
-            "status": "verified_noncontrol_domain",
-            "key": result["key"],
-            "message": ("A cryptographically valid key candidate was found, but it was not verified for "
-                        "all current openpilot control SecOC IDs and was NOT installed. " + result.get("message", "")),
-            "protected_by_id": result.get("protected_by_id", {}),
-            "protected_by_bus": result.get("protected_by_bus", {}),
-            "domain": result.get("domain", ""),
-            "control_ready": False,
-            "control_matches_by_id": result.get("control_matches_by_id", {}),
-            "control_missing": result.get("control_missing", []),
-            "alternate_verified": result.get("alternate_verified", []),
             **RebootManager.key_status_payload(),
           })
         else:
@@ -2219,6 +2260,97 @@ class TSKWebHandler(BaseHTTPRequestHandler):
         }, status=HTTPStatus.INTERNAL_SERVER_ERROR)
       finally:
         matcher_lock.release()
+      return
+
+    if path == "/api/target-profile-manifest":
+      try:
+        request = self._read_json_body()
+        with ident_lock:
+          identity_snapshot = dict(ident_state)
+          identity_snapshot["identity"] = [dict(row) for row in ident_state.get("identity", [])]
+        manifest, profile = save_integration_and_refresh(
+          identity_snapshot,
+          str(request.get("profile_id", "")),
+          request.get("fields", {}),
+          request.get("evidence", {}),
+          reviewed=bool(request.get("reviewed", False)),
+        )
+        self._send_json({"ok": True, "manifest": manifest, "target_profile": profile})
+      except ValueError as e:
+        self._send_json({"ok": False, "status": "invalid_manifest", "message": str(e)},
+                        status=HTTPStatus.CONFLICT)
+      except Exception as e:
+        self._send_json({"ok": False, "status": "error", "message": str(e),
+                         "traceback": traceback.format_exc()}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+      return
+
+    if path == "/api/stationary-verify":
+      try:
+        request = self._read_json_body()
+        with ident_lock:
+          identity_snapshot = dict(ident_state)
+          identity_snapshot["identity"] = [dict(row) for row in ident_state.get("identity", [])]
+        result, profile = verify_stationary_and_refresh(
+          identity_snapshot,
+          request.get("evidence", {}),
+          capture_path=str(request.get("capture_path", "")),
+        )
+        status = HTTPStatus.OK if result.get("status") == "passed" else HTTPStatus.UNPROCESSABLE_ENTITY
+        self._send_json({"ok": result.get("status") == "passed", "result": result,
+                         "target_profile": profile}, status=status)
+      except ValueError as e:
+        self._send_json({"ok": False, "status": "invalid_stationary_evidence", "message": str(e)},
+                        status=HTTPStatus.CONFLICT)
+      except Exception as e:
+        self._send_json({"ok": False, "status": "error", "message": str(e),
+                         "traceback": traceback.format_exc()}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+      return
+
+    if path == "/api/install-recovered-key":
+      try:
+        recovered = public_recovered_key_status()
+        profile = public_target_profile_status()
+        readiness = profile.get("readiness", {})
+        profile_key = profile.get("recovered_key", {})
+        if not recovered.get("recovered"):
+          self._send_json({
+            "ok": False, "status": "no_recovered_key",
+            "message": "No cryptographically recovered key is stored. Recover and verify a target key first.",
+          }, status=HTTPStatus.CONFLICT)
+          return
+        if profile_key.get("key_sha256_prefix") != recovered.get("key_sha256_prefix"):
+          self._send_json({
+            "ok": False, "status": "profile_key_mismatch",
+            "message": "The target profile is not bound to the currently recovered key. Rebuild/verify the profile before installation.",
+            "target_profile": profile,
+          }, status=HTTPStatus.CONFLICT)
+          return
+        if not readiness.get("operational_install_allowed"):
+          unresolved = profile.get("unresolved", [])
+          self._send_json({
+            "ok": False, "status": "integration_not_verified",
+            "message": ("Recovered key is intentionally not installable yet. "
+                        "Target integration and profile-bound stationary verification must pass first."),
+            "unresolved": unresolved,
+            "target_profile": profile,
+          }, status=HTTPStatus.CONFLICT)
+          return
+        key = recovered_key_hex()
+        if key is None:
+          raise RuntimeError("recovered-key record became unreadable")
+        KeyFileManager().install_key(key)
+        self._send_json({
+          "ok": True,
+          "status": "installed",
+          "message": "Profile-verified recovered key installed as SecOCKey.",
+          "target_profile": profile,
+          **RebootManager.key_status_payload(),
+        })
+      except Exception as e:
+        self._send_json({
+          "ok": False, "status": "error", "message": str(e),
+          "traceback": traceback.format_exc(),
+        }, status=HTTPStatus.INTERNAL_SERVER_ERROR)
       return
 
     if path == "/api/uninstall":
@@ -2432,7 +2564,11 @@ class TSKWebHandler(BaseHTTPRequestHandler):
         return
       clear_can()
       clear_dataflash()
-      self._send_json({"ok": True})
+      invalidate_target_profile()
+      self._send_json({
+        "ok": True,
+        "message": "Captured CAN/DataFlash evidence and derived target-profile gates cleared. The privately recovered key and any installed SecOCKey were preserved.",
+      })
       return
 
     self._send_json({"error": "not found"}, status=HTTPStatus.NOT_FOUND)
@@ -2474,6 +2610,17 @@ class TSKWebHandler(BaseHTTPRequestHandler):
 
     if path == "/api/dashboard":
       self._send_json(dashboard_payload(), send_body=send_body)
+      return
+
+    if path == "/api/target-profile":
+      self._send_json({
+        "target_profile": public_target_profile_status(),
+        "integration_manifest": integration_manifest_template(),
+      }, send_body=send_body)
+      return
+
+    if path == "/api/stationary-plan":
+      self._send_json(stationary_plan(), send_body=send_body)
       return
 
     if path == "/api/can-status":

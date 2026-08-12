@@ -32,9 +32,11 @@ alert shows the reachable web URL.
 The TSK Manager UI is organized around the operator rather than the research chronology:
 
 - **Recovery** is the default dashboard. It projects backend state into one next action and
-  a visible sequence: identify EPS -> capture READY CAN -> confirm PROGRAMMING when the
-  calibration is not already in the established transfer set -> recover key material ->
-  cryptographically verify -> install.
+  a visible sequence: identify EPS -> discover the target SecOC surface -> confirm a
+  recovery route when needed -> recover/cryptographically verify key material -> review
+  the target-specific openpilot integration -> validate a stationary/bench session ->
+  install the already recovered key. Key recovery and operational installation are
+  deliberately different states.
 - **Research** keeps the full diagnostic toolbox grouped by purpose (observe/map,
   programming, memory/security, and transfer experiments) without giving those tools the
   same visual weight as the normal recovery path.
@@ -137,31 +139,46 @@ old RAM key-table technique works on some `8965B4x` siblings, while static analy
 `8965B4512000` shows that its corresponding `FEBE6E**` region is not a firmware-maintained
 key-slot mirror.
 
-Accordingly, `/api/extract` now has a hard trust boundary:
+Accordingly, `/api/extract` and `/api/match` now have a staged trust boundary:
 
-1. a persisted SecOC CAN oracle must contain enough **usable** samples before any
-   programming/extraction request is sent;
-2. the RAM path may recover a checksum-valid `KEY_4` candidate;
-3. the candidate is independently AES-CMAC verified against the persisted oracle;
-4. generic verification and **openpilot-control-domain verification are separate**;
-5. only a candidate with evidence on both current openpilot control streams (`0x131` and
-   `0x2E4`) is written as `SecOCKey`.
+1. a persisted SecOC CAN oracle must contain enough **usable** synchronization plus
+   known/structurally discovered classic samples before a programming/extraction attempt;
+2. the RAM or DataFlash path may recover a candidate key;
+3. the candidate is independently AES-CMAC verified against the persisted target oracle;
+4. a verified key is stored privately as **recovered evidence**, outside downloadable
+   evidence bundles; it is **not** written as `SecOCKey`;
+5. TSK builds an evidence-bound target profile containing identity, physical route,
+   observed buses/IDs/DLC/rates, per-stream cryptographic matches, and compatibility with
+   the current Toyota openpilot sender;
+6. every target-specific openpilot field (DBC, safety flags, steering mode, EPS scale,
+   lateral command/status role, longitudinal topology) must be filled with an evidence
+   source and reviewed for that exact profile ID;
+7. a normalized stationary/bench session must prove stationary state, a signed
+   zero-actuation command on a target-verified stream, EPS acceptance/status feedback,
+   and no new fault latch;
+8. only then can `/api/install-recovered-key` copy the private recovered key into the
+   existing `SecOCKey` interface.
 
-A failed verification returns the candidate and verification evidence for research but
-**does not install it**. Likewise, a candidate that authenticates synchronization plus a
-non-control domain such as `0x116/0x24D` is reported as cryptographically real but is not
-installed as the controller key.
+A failed cryptographic verification never persists or installs the candidate. A key that
+authenticates an unfamiliar target stream is no longer rejected merely because it does
+not authenticate `0x131/0x2E4`; those IDs are compatibility evidence, not target identity.
+The raw recovered key lives under `/cache/tsk/private/` and is deliberately excluded from
+TSK evidence bundles; the shareable profile carries only a key fingerprint and match
+counts.
 
 The offline DataFlash matcher requires at least 30 authenticated samples and a real
 cryptographic domain: at least two matching synchronization samples **or** at least two
 matching protected samples. It still requires observed synchronization traffic to
 reconstruct protected freshness, but the candidate key itself need not authenticate
 `0x00F`. This intentionally supports calibrations with separate sync and protected keys.
-Automatic `SecOCKey` installation additionally requires at least two matches each on
-`0x131` and `0x2E4`, the classic streams the current Toyota openpilot controller signs.
 If several real key domains are present in the same DataFlash dump, the matcher prefers a
-control-domain-verified candidate even when a sync-only key has more total matches; the
-other verified domains are retained as non-key-bearing alternate metadata in the result.
+candidate compatible with the current lateral sender when one exists, while still
+retaining different verified domains for a target whose protected surface differs.
+
+For reference, current Toyota `CarController` signs `0x2E4` (`STEERING_LKA`) and `0x131`
+(`STEERING_LTA_2`) for lateral control; with openpilot longitudinal enabled it also signs
+`0x183` (`ACC_CONTROL_2`). TSK reports lateral and longitudinal compatibility separately.
+None of those IDs is treated as the discovery boundary for an unknown Camry/TSS3 target.
 
 Partial DataFlash retention is also cross-calibration-safe now. A partial is no longer
 thrown away merely because it missed the historical `0xFF206E14` Sienna/Yaris window.
@@ -172,25 +189,28 @@ historical `0x6E14` offset remains an annotation/targeted diagnostic, not a trus
 ## SecOC capture and matcher profile
 
 Passive capture remains unfiltered: every non-echo CAN payload on every observed bus is
-persisted. Known IDs are annotations and matcher inputs, not capture filters.
+persisted for the full observation window. Known IDs are annotations/hypotheses, not
+capture filters or an early-stop gate.
 
-The classic 8-byte Toyota SecOC matcher now covers the full currently known profile:
+The current known classic family remains:
 
 ```text
-sync:      0x00F
-protected: 0x116 0x131 0x177 0x183 0x24D 0x283 0x2E4 0x344
+sync hypothesis: 0x00F
+known protected: 0x116 0x131 0x177 0x183 0x24D 0x283 0x2E4 0x344
 ```
 
-Verification is bus-aware and reports protected matches per CAN ID and per bus. The
-DataFlash first pass is the union of sync-domain and per-ID protected-domain probes, so a
-protected key is not discarded merely because another key authenticates `0x00F`. This is
-important for Corolla evidence: genuine bus-1 `0x116`/`0x24D` traffic must not be reduced
-to “0 protected” merely because an older Sienna-specific verifier watched only
-`0x131/0x2E4/0x344` on buses 0/2.
+But the matcher no longer stops there. After each `0x00F` state on the same run/bus, every
+8-byte stream is evaluated for the classic Toyota trailer structure: reset-low-bit
+agreement, message-counter-low2 variation, and authenticator variation. Strong unknown
+streams are admitted into the cryptographic scan; structural classification alone never
+makes them trusted. A regression fixture proves that an unknown protected ID with a key
+separate from the synchronization key remains discoverable through the complete
+DataFlash first pass.
 
-Additional Sienna firmware-derived protected IDs such as `0x090`, `0x0D7`, and `0x132`
-remain passive-capture annotations; they are not fed into the classic 8-byte verifier
-without an independently pinned sender format.
+Verification is bus-aware and reports matches per CAN ID, per bus, and per `(bus, ID)`
+stream. `0x090`/`0x0D7` CAN-FD traffic and `0x132` remain passive evidence unless their
+sender framing is independently pinned; CAN-FD frames are never reinterpreted as classic
+8-byte candidates merely because their first eight bytes resemble one.
 
 ## Recommended field workflow
 
@@ -198,18 +218,24 @@ without an independently pinned sender format.
    route, not merely a Panda bus number.
 2. **Passive CAN inventory** — observe arbitration IDs, buses, frame widths, and CAN-FD
    presence with normal-harness routing selected.
-3. **Passive READY SecOC capture** — collect the synchronization/protected-frame oracle
-   before spending a programming/extraction attempt.
+3. **Full READY target-profile capture** — retain the entire observation window and let
+   structural discovery surface unknown classic SecOC candidates.
 4. **Not Ready to Drive characterization** — run the resumable UDS sweep and read-only
    probes. Stateful subfunctions remain separated from observation-oriented work.
-5. **Programming handoff probe** — perform one route-preserving handoff and inspect the
-   endpoint-reappearance plus Panda/CAN-health evidence.
-6. **Transfer hypothesis** — only after the preceding evidence justifies it, run the
-   known Sienna-family bootloader/payload or DataFlash path.
-7. **Cryptographic verification** — never install a recovered key merely because a RAM
-   structure or DataFlash location looks plausible.
-8. **Evidence export** — download the bundle before clearing data or moving to the next
-   active experiment.
+5. **Programming handoff probe** — if key recovery requires it, perform one
+   route-preserving handoff and inspect endpoint reappearance plus Panda/CAN health.
+6. **Transfer hypothesis** — only after the preceding evidence justifies it, run an
+   applicable bootloader/payload or DataFlash path.
+7. **Cryptographic key recovery** — verify the candidate against the discovered target
+   streams and persist it privately; do not install it yet.
+8. **Target integration review** — fill every openpilot/DBC/safety/control field with an
+   explicit evidence source in `target-profile.html`.
+9. **Stationary/bench acceptance** — capture a zero-actuation signed-command session and
+   validate target-specific status feedback plus before/after fault state.
+10. **Operational install** — only after the profile-bound gates pass, install the
+    already recovered key through `/api/install-recovered-key`.
+11. **Evidence export** — download the bundle before clearing data or moving to another
+    target/session.
 
 ## DataFlash payload variants
 

@@ -15,7 +15,7 @@ from datetime import datetime, UTC
 from pathlib import Path
 
 from tsk.lib.env import CACHE_DIR, CAN_ORACLE_PATH
-from tsk.lib.recovered_key import public_recovered_key_status
+from tsk.lib.recovered_key import public_recovered_key_status, recovered_key_hex
 from tsk.lib.secoc_discovery import load_oracle_discovery
 from tsk.lib.secoc_profile import (
   CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS,
@@ -65,16 +65,22 @@ def _json_file(path: Path) -> dict | None:
   return value if isinstance(value, dict) else None
 
 
-def _integration_status() -> dict:
+def _integration_status(profile_id: str) -> dict:
   manifest = _json_file(INTEGRATION_MANIFEST_PATH) or {}
   fields = manifest.get("fields", {}) if isinstance(manifest.get("fields", {}), dict) else {}
+  evidence = manifest.get("evidence", {}) if isinstance(manifest.get("evidence", {}), dict) else {}
   missing = [name for name in REQUIRED_INTEGRATION_FIELDS if fields.get(name) in (None, "", [], {})]
+  missing_evidence = [name for name in REQUIRED_INTEGRATION_FIELDS if not str(evidence.get(name, "")).strip()]
+  bound = bool(manifest) and manifest.get("profile_id") == profile_id
   return {
     "present": bool(manifest),
-    "ready": bool(manifest) and not missing and bool(manifest.get("reviewed")),
-    "reviewed": bool(manifest.get("reviewed")),
-    "missing_fields": missing,
-    "fields": fields,
+    "profile_bound": bound,
+    "ready": bound and not missing and not missing_evidence and bool(manifest.get("reviewed")),
+    "reviewed": bool(manifest.get("reviewed")) if bound else False,
+    "missing_fields": missing if bound else list(REQUIRED_INTEGRATION_FIELDS),
+    "missing_evidence": missing_evidence if bound else list(REQUIRED_INTEGRATION_FIELDS),
+    "fields": fields if bound else {},
+    "evidence": evidence if bound else {},
   }
 
 
@@ -175,7 +181,7 @@ def build_target_profile(identity_state: dict, *, verification: dict | None = No
   lateral_crypto = all(value >= 2 for value in lateral_matches.values())
   longitudinal_crypto = all(value >= 2 for value in longitudinal_matches.values())
   key_status = public_recovered_key_status()
-  integration = _integration_status()
+  integration = _integration_status(profile_id)
   stationary = _stationary_status(profile_id)
   operational_install_allowed = bool(
     key_status["recovered"] and integration["ready"] and stationary["passed"]
@@ -188,7 +194,8 @@ def build_target_profile(identity_state: dict, *, verification: dict | None = No
     unresolved.append("classic SecOC protected stream surface")
   if not key_status["recovered"]:
     unresolved.append("cryptographically recovered target key")
-  unresolved.extend(f"openpilot integration: {field}" for field in integration["missing_fields"])
+  unresolved.extend(f"openpilot integration value: {field}" for field in integration["missing_fields"])
+  unresolved.extend(f"openpilot integration evidence: {field}" for field in integration["missing_evidence"])
   if not stationary["passed"]:
     unresolved.append("profile-bound stationary acceptance/status verification")
 
@@ -223,7 +230,9 @@ def build_target_profile(identity_state: dict, *, verification: dict | None = No
     "stationary_verification": stationary,
     "readiness": {
       "key_recovered": bool(key_status["recovered"]),
-      "target_profile_observed": bool(identity["app_sw_id"] and streams),
+      "target_profile_observed": bool(
+        identity["app_sw_id"] and any(row["scan_included"] for row in streams)
+      ),
       "openpilot_integration_reviewed": bool(integration["ready"]),
       "stationary_acceptance_verified": bool(stationary["passed"]),
       "operational_install_allowed": operational_install_allowed,
@@ -243,6 +252,27 @@ def load_target_profile() -> dict | None:
   return _json_file(TARGET_PROFILE_PATH)
 
 
+def refresh_target_profile_from_recovered(identity_state: dict, *, oracle_path: Path | None = None) -> dict:
+  """Re-verify the private recovered key against current evidence and rebuild profile."""
+  key = recovered_key_hex()
+  verification = None
+  if key is not None:
+    from tsk.lib.matcher import verify_candidate_from_oracle
+    verification = verify_candidate_from_oracle(bytes.fromhex(key), path=Path(oracle_path or CAN_ORACLE_PATH))
+    if verification.get("status") != "found":
+      verification = None
+  return persist_target_profile(identity_state, verification=verification, oracle_path=oracle_path)
+
+
+def invalidate_target_profile() -> None:
+  """Drop evidence derived from a cleared/replaced oracle without deleting the recovered key."""
+  for path in (TARGET_PROFILE_PATH, STATIONARY_RESULT_PATH, INTEGRATION_MANIFEST_PATH):
+    try:
+      path.unlink()
+    except FileNotFoundError:
+      pass
+
+
 def public_target_profile_status() -> dict:
   profile = load_target_profile()
   if not profile:
@@ -254,6 +284,7 @@ def public_target_profile_status() -> dict:
     "identity": dict(profile.get("identity", {})),
     "route": dict(profile.get("route", {})),
     "discovery": dict(profile.get("discovery", {})),
+    "recovered_key": dict(profile.get("recovered_key", {})),
     "current_openpilot_compatibility": dict(profile.get("current_openpilot_compatibility", {})),
     "integration": dict(profile.get("integration", {})),
     "stationary_verification": dict(profile.get("stationary_verification", {})),
