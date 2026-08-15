@@ -390,8 +390,10 @@ Both the reroute reading and the circularity reading were later overturned. See 
 
 Commit `d6526664f2`, twelve files:
 
-- `read_mem.py` + `/api/read-mem` — `ReadMemoryByAddress` (`0x23`) at the Sienna key region
-  and two controls, in both extended and default sessions.
+- `read_mem.py` + `/api/read-mem` — the then-current ordinary ALFID-`0x14`
+  `ReadMemoryByAddress` (`0x23`) shape at the Sienna key region and two controls, in both
+  extended and default sessions. **Later firmware recovery showed that this did not
+  reproduce 8965B4512000's actual ALFID-`0x15` memory-ID grammar; see the correction below.**
 - `ident_map.py` + `/api/ident-map` — full identity block `0xF180`–`0xF195` plus VIN, and a
   read-only service-surface map restricted to `0x10`/`0x22`/`0x23`/`0x27`/`0x3E`/`0x19`.
   **This restriction is the origin of a methodological error that persisted for two days
@@ -425,9 +427,16 @@ A seed came back at level `0x03` **in the extended session, with no programming 
 | `0xFF200000` (DataFlash base) | NRC `0x31` | NRC `0x7F` |
 | `0xFEBF0000` (RAM window) | NRC `0x31` | NRC `0x7F` |
 
-**`0x23` is supported and is not security-refused.** It returns *request-out-of-range*
-(`0x31`), never *security-denied* (`0x33`). The Corolla's key lives at a different address,
-or the readable window differs. This result never changed across any later session.
+**`0x23` is supported and the ordinary ALFID-`0x14` request shape is not
+security-refused.** It returns *request-out-of-range* (`0x31`), never *security-denied*
+(`0x33`). This result never changed across the recorded sessions.
+
+**2026-08-14 correction:** those requests omitted the memory-ID byte. Static recovery of
+Sienna `8965B4512000` later proved that its only accepted form is
+`23 15 <memory-id> <address32> <size8>`, with memory ID 1 = LocalRAM and 2 = DataFlash.
+Therefore the July Corolla observation does **not** prove that the corresponding Sienna
+memory-ID requests would be out of range on `8965F1208000`; that exact grammar had never
+been sent. Current TSK tests both forms and records them separately.
 
 ### 5.4 CAN-FD **[OBSERVED]**
 
@@ -1453,8 +1462,9 @@ The single key ever sent: `36c20b4723967a953d1cb888625fa0eb` (rejected, NRC `0x3
    split.
 9. Willem's upload path does not exist here: routine `0x10F0` and DIDs
    `0x201`/`0x202`/`0x203` all return NRC `0x31`.
-10. `0x23` ReadMemoryByAddress is supported and is *out of range* at the Sienna addresses,
-    never *security denied*.
+10. `0x23` ReadMemoryByAddress is supported and the tested **ordinary ALFID-`0x14`** form
+    is *out of range* at the Sienna addresses, never *security denied*. The later-recovered
+    Sienna ALFID-`0x15` memory-ID form was not exercised in these historical sessions.
 11. SecurityAccess is not locked out; a clean seed was obtained after the failed key.
 12. Level `0x01` exists and is session-gated (`0x7E`); Willem's secret has **never been
     tested at that level**.
@@ -1613,7 +1623,8 @@ structure rather than relying on the model to remember.
 | `/api/can-sniff` | POST | per-bus frame count + arb IDs, no payloads |
 | `/api/dataflash-diag` | POST | instrumented dump with per-step NRC |
 | `/api/prog-probe` | POST | programming entry matrix, security level sweep, did-it-take, all-bus-listen |
-| `/api/read-mem` | POST | `0x23` at three addresses, both sessions |
+| `/api/read-mem` | POST | current: exact ALFID-`0x15` memory-ID reads + one ordinary ALFID-`0x14` comparison; historical sessions used only `0x14` |
+| `/api/xcp-observer` | POST | 0x7F7/0x7F8 CONNECT reachability; exact-8965B4512000-only F4/volatile DAQ observation |
 | `/api/ident-map` | POST | identity block + read-only service map |
 | `/api/reset-probe` | POST | reset then hammer PROGRAMMING |
 | `/api/level3-probe` | POST | `0x03` seed isolation, four primer variants |

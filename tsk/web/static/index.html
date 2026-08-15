@@ -146,6 +146,11 @@
                   <p class="tool-card-description">Read F181, route identity, and the safe UDS service surface.</p>
                   <div class="tool-tags"><span class="tag readonly">Read only</span><span class="tag">Not Ready</span></div>
                 </a>
+                <a class="tool-card" href="/xcp-observer.html">
+                  <h4 class="tool-card-title">XCP read/DAQ observer</h4>
+                  <p class="tool-card-description">Probe 0x7F7/0x7F8 reachability and, on exact 8965B4512000, observe bounded LocalRAM state through F4 and DAQ.</p>
+                  <div class="tool-tags"><span class="tag readonly">Observe only</span><span class="tag">Not Ready</span></div>
+                </a>
                 <a class="tool-card" href="/can-sniff.html">
                   <h4 class="tool-card-title">Passive CAN inventory</h4>
                   <p class="tool-card-description">See which CAN buses and arbitration IDs are physically visible.</p>
@@ -195,8 +200,8 @@
               </div>
               <div class="tool-grid">
                 <a class="tool-card" href="/read-mem.html">
-                  <h4 class="tool-card-title">Read-memory probe</h4>
-                  <p class="tool-card-description">Check whether UDS 0x23 can read useful DataFlash directly without an exploit.</p>
+                  <h4 class="tool-card-title">Application memory disclosure</h4>
+                  <p class="tool-card-description">Exercise the recovered ALFID 0x15 memory-ID SID 0x23 path plus an ordinary-shape comparison.</p>
                   <div class="tool-tags"><span class="tag readonly">Read only</span><span class="tag">Not Ready</span></div>
                 </a>
                 <a class="tool-card" href="/level3-probe.html">

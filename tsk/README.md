@@ -143,7 +143,7 @@ key-slot mirror.
 Accordingly, `/api/extract` and `/api/match` now have a staged trust boundary:
 
 1. a persisted SecOC CAN oracle must contain enough **usable** synchronization plus
-   known/structurally discovered classic samples before a programming/extraction attempt;
+   known/discovered protected samples (classic and pinned FD profiles) before a programming/extraction attempt;
 2. the RAM or DataFlash path may recover a candidate key;
 3. the candidate is independently AES-CMAC verified against the persisted target oracle;
 4. a verified key is stored privately as **recovered evidence**, outside downloadable
@@ -189,6 +189,52 @@ Any capture with at least one contiguous 16-byte region is saved together with a
 byte-coverage mask, and the matcher scans only fully received candidate windows. The
 historical `0x6E14` offset remains an annotation/targeted diagnostic, not a trust gate.
 
+## Application SID 0x23 request grammar
+
+Recent firmware-static recovery corrected an important assumption in the original TSK
+read-memory probe. Sienna `8965B4512000` does expose application ReadMemoryByAddress in
+EXTENDED session without SecurityAccess, but its accepted request is not the ordinary
+ALFID `0x14` form emitted by `UdsClient.read_memory_by_address()`. The exact request is:
+
+```text
+23 15 <memory-id> <absolute-address:4-byte-be> <size:1-byte>
+```
+
+Memory ID `1` selects `FEBE0000..FEBFFFFF` LocalRAM and memory ID `2` selects
+`FF200000..FF207FFF` DataFlash, subject to firmware exclusion intervals. The application
+can therefore disclose 107,924 LocalRAM bytes and 29,952 DataFlash bytes on this exact
+calibration. The historical object-15 address `FF206E14` is intentionally protected, but
+`FEBF2D08..FEBF2D17` is readable; that LocalRAM range is the bootloader DID `0x0201`
+payload-key-derivation input buffer, making post-handoff residue a concrete dynamic
+question.
+
+`read-mem.html` now tries the exact memory-ID grammar first and keeps one ordinary
+ALFID-`0x14` comparison for unknown calibrations. A negative result therefore no longer
+means “Sienna blocks SID 0x23”; it means the tested target did not answer either bounded
+read shape.
+
+## Application XCP observation surface
+
+Sienna `8965B4512000` also configures an unauthenticated XCP-shaped application channel on
+CAN `0x7F7/0x7F8`. CONNECT is sufficient to establish protocol state; standard
+SHORT_UPLOAD `0xF4` can read permitted LocalRAM directly, and the configured DAQ subset
+can sample up to 28 one-byte LocalRAM sources per list into `0x7F8` DTOs. The TSK XCP
+observer uses this as an instrumentation path for unresolved dynamic questions such as the
+d/q actuation discriminator and lifecycle/control-state transitions.
+
+The field tool is deliberately narrower than the recovered firmware capability:
+
+- on an unknown F181 it sends **CONNECT only** and records reachability;
+- bounded F4 address reads and DAQ configuration require exact F181 `8965B4512000`;
+- only `FF`, `F4`, `E3`, `E2`, `E1`, `E0`, and `DE` are implemented;
+- XCP page copy, SET_MTA, generic UPLOAD, DOWNLOAD, MODIFY_BITS, and source-memory writes
+  are not exposed by TSK;
+- DAQ STOP is attempted during cleanup even after a capture/configuration error.
+
+The recovered 32 KiB XCP write window is a real firmware primitive but has no recovered
+executable, persistent, or motor consumer. It remains research evidence rather than a live
+field-tool feature.
+
 ## SecOC capture and matcher profile
 
 Passive capture remains unfiltered: every non-echo CAN payload on every observed bus is
@@ -201,7 +247,7 @@ The current known classic family remains:
 
 ```text
 sync hypothesis: 0x00F
-known protected: 0x116 0x131 0x177 0x183 0x24D 0x283 0x2E4 0x344
+known protected: 0x116 0x131 0x132 0x177 0x183 0x24D 0x283 0x2E4 0x344
 ```
 
 But the matcher no longer stops there. After each `0x00F` state on the same run/bus, every
@@ -213,9 +259,29 @@ separate from the synchronization key remains discoverable through the complete
 DataFlash first pass.
 
 Verification is bus-aware and reports matches per CAN ID, per bus, and per `(bus, ID)`
-stream. `0x090`/`0x0D7` CAN-FD traffic and `0x132` remain passive evidence unless their
-sender framing is independently pinned; CAN-FD frames are never reinterpreted as classic
-8-byte candidates merely because their first eight bytes resemble one.
+stream. Firmware recovery now pins `0x132` as a normal classic protected receive profile
+on `8965B4512000`, so it joins the classic cryptographic matcher. The same image pins
+`0x090` and `0x0D7` as 32-byte secured CAN-FD profiles with authenticated input
+`DataID_be16 || payload[28] || freshness[6]` and the same 4-bit transmitted freshness +
+28-bit CMAC trailer. TSK therefore verifies those two FD streams cryptographically when
+observed with same-bus synchronization context. Physical DLC 48/64 aliases are reduced to
+the first 32 bytes for the EPS authenticated view, matching the recovered clamp; unknown
+larger frames are never reinterpreted as classic candidates.
+
+These additions remain calibration-scoped evidence rather than target ownership claims.
+For the analyzed Sienna, `0x2E4` and `0x131` are the two recovered steering-command modes,
+`0x132` has a bounded snapshot-only downstream role, `0x090` carries protected rear-wheel
+speed / steering-angle-speed information, and `0x0D7` carries protected vehicle-speed and
+validity/status information. An unfamiliar target must still prove its own receive/control
+roles before openpilot integration is enabled.
+
+Receiver freshness is also now bounded more tightly. The analyzed application clears its
+SecOC receive windows at initialization and accepts any authenticated forward sync
+trip/reset jump without a maximum delta; failed MAC verification does not advance
+freshness and no per-source failure lockout is recovered. That creates reset-window,
+future-sync, and theoretical 28-bit online-guess avenues, but their practical timing,
+throughput, suppression, and recovery behavior are still dynamic. TSK does not inject
+replay/future-sync/tag-guess trials automatically; those remain isolated-bench experiments.
 
 ## Recommended field workflow
 
@@ -226,7 +292,10 @@ sender framing is independently pinned; CAN-FD frames are never reinterpreted as
 3. **Full READY target-profile capture** — retain the entire observation window and let
    structural discovery surface unknown classic SecOC candidates.
 4. **Not Ready to Drive characterization** — run the resumable UDS sweep and read-only
-   probes. Stateful subfunctions remain separated from observation-oriented work.
+   probes. Use the corrected memory-ID SID `0x23` probe for application disclosure and the
+   XCP observer for `0x7F7/0x7F8` reachability; exact-Sienna F4/DAQ can instrument selected
+   LocalRAM state without invoking the state-changing diagnostic operations. Stateful
+   subfunctions remain separated from observation-oriented work.
 5. **Programming handoff probe** — if key recovery requires it, perform one
    route-preserving handoff and inspect endpoint reappearance plus Panda/CAN health.
 6. **Transfer hypothesis** — only after the preceding evidence justifies it, run an

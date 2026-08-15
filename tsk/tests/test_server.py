@@ -128,12 +128,12 @@ class TestServer(unittest.TestCase):
       "can-collector.html", "can-sniff.html", "dataflash-collector.html", "dataflash-diag.html",
       "extractor.html", "ident-map.html", "level3-probe.html", "preamble-probe.html",
       "prog-probe.html", "read-mem.html", "ready-capture.html", "reset-probe.html",
-      "sendkey-probe.html", "uds-sweep.html",
+      "sendkey-probe.html", "uds-sweep.html", "xcp-observer.html",
     )
     explicit_run_pages = (
       "can-collector.html", "can-sniff.html", "dataflash-diag.html", "ident-map.html",
       "level3-probe.html", "preamble-probe.html", "prog-probe.html", "read-mem.html",
-      "reset-probe.html",
+      "reset-probe.html", "xcp-observer.html",
     )
 
     for page in probe_pages:
@@ -165,12 +165,14 @@ class TestServer(unittest.TestCase):
   def test_operation_vehicle_state_annotations(self):
     self.assertIn("READY", expected_vehicle_state("/api/ready-capture"))
     self.assertIn("Not Ready", expected_vehicle_state("/api/uds-sweep"))
+    self.assertIn("Not Ready", expected_vehicle_state("/api/xcp-observer"))
     self.assertEqual(expected_vehicle_state("/api/health"), "unspecified")
 
   def test_operation_snapshot_has_split_ready_states(self):
     snapshot = operation_states_snapshot()
     self.assertIn("ready_passive", snapshot)
     self.assertIn("ready_active_diff", snapshot)
+    self.assertIn("xcp_observer", snapshot)
     self.assertEqual(snapshot["ready_passive"]["mode"], "passive")
     self.assertEqual(snapshot["ready_active_diff"]["mode"], "active_diff")
 
