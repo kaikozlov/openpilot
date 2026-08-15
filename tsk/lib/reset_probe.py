@@ -97,11 +97,11 @@ def probe_reset_window(progress_cb=None) -> dict:
   # Immediately hammer PROGRAMMING through the reboot window. First acceptance wins;
   # timeouts (EPS still rebooting) are recorded sparsely to keep the list legible.
   entered = False
-  begin = time.time()
+  begin = time.monotonic()
   n = 0
-  while time.time() - begin < HAMMER_SECONDS:
+  while time.monotonic() - begin < HAMMER_SECONDS:
     n += 1
-    ms = int((time.time() - begin) * 1000)
+    ms = int((time.monotonic() - begin) * 1000)
     try:
       mk(eps_bus, SHORT_TIMEOUT).diagnostic_session_control(SESSION_TYPE.PROGRAMMING)
       attempts.append({"t_ms": ms, "detail": "PROGRAMMING accepted"})
@@ -131,9 +131,9 @@ def probe_reset_window(progress_cb=None) -> dict:
   result["status"] = "entered" if entered else "blocked"
   if entered:
     hit = next(a for a in attempts if "accepted" in a["detail"])
-    result["message"] = (f"PROGRAMMING accepted {hit['t_ms']}ms after reset — there is a post-reset "
+    result["message"] = (f"PROGRAMMING accepted {hit['t_ms']}ms after reset — there is a post-reset " +
                          "window. Export the evidence bundle before continuing.")
   else:
-    result["message"] = ("No PROGRAMMING acceptance in the reset window. Active session after reset: "
+    result["message"] = ("No PROGRAMMING acceptance in the reset window. Active session after reset: " +
                          f"{result['session_after']} (0x02 would mean it switched silently).")
   return result

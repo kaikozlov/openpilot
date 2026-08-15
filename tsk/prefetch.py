@@ -23,13 +23,13 @@ import subprocess
 import sys
 import threading
 import time
-from typing import List
 
 # Third-party imports
 import pyray as rl
 
 # Local imports
 from openpilot.system.ui.lib.application import gui_app
+from openpilot.system.ui.lib.text_measure import measure_text_cached
 from tsk.lib.env import (
   RECOMMENDED_OP_USER,
   RECOMMENDED_OP_BRANCH,
@@ -63,7 +63,7 @@ class GitCloneProgress:
   tracking and retry mechanism.
   """
 
-  def __init__(self, command: List[str], title: str, target_dir: str = None):
+  def __init__(self, command: list[str], title: str, target_dir: str = None):
     """
     Initialize a git clone progress tracker.
 
@@ -125,7 +125,7 @@ class GitCloneProgress:
           self.status = f"Error deleting directory: {str(e)}"
           self.failed = True
           self.retry_needed = True
-          self.retry_timer = time.time()
+          self.retry_timer = time.monotonic()
           return
 
       # Step 2: Start the git clone process
@@ -154,13 +154,13 @@ class GitCloneProgress:
         self.status = f"Failed with code {self.process.returncode}"
         self.failed = True
         self.retry_needed = True
-        self.retry_timer = time.time()
+        self.retry_timer = time.monotonic()
     except Exception as e:
       # Handle any unexpected exceptions
       self.status = f"Error: {str(e)}"
       self.failed = True
       self.retry_needed = True
-      self.retry_timer = time.time()
+      self.retry_timer = time.monotonic()
 
   def _parse_progress(self, line: str):
     """
@@ -224,7 +224,7 @@ class GitCloneProgress:
     """
     if self.failed and self.retry_needed and self.retry_count < MAX_RETRIES:
       # Check if retry delay has elapsed
-      if time.time() - self.retry_timer >= RETRY_DELAY:
+      if time.monotonic() - self.retry_timer >= RETRY_DELAY:
         self.retry_count += 1
         self.reset()
         self.start()
@@ -380,7 +380,7 @@ class PrefetchAppC3:
 
     # Step 2: Draw title
     title = "Prefetching"
-    title_width = rl.measure_text_ex(gui_app.font(), title, self.TITLE_FONT_SIZE, 0).x
+    title_width = measure_text_cached(gui_app.font(), title, self.TITLE_FONT_SIZE).x
     rl.draw_text_ex(
       gui_app.font(),
       title,
@@ -393,7 +393,7 @@ class PrefetchAppC3:
     # Step 3: Draw progress bars for each operation
     y_offset = self.PADDING * 3 + self.TITLE_FONT_SIZE * 2
 
-    for i, op in enumerate(self.clone_operations):
+    for op in self.clone_operations:
       # Step 3a: Draw operation title with retry count if applicable
       title_text = op.title
       if op.retry_count > 0:
@@ -421,7 +421,7 @@ class PrefetchAppC3:
 
       # Step 3d: Draw progress percentage
       progress_text = f"{op.progress}%"
-      text_width = rl.measure_text_ex(gui_app.font(), progress_text, self.FONT_SIZE, 0).x
+      text_width = measure_text_cached(gui_app.font(), progress_text, self.FONT_SIZE).x
       rl.draw_text_ex(
         gui_app.font(),
         progress_text,
@@ -440,10 +440,10 @@ class PrefetchAppC3:
 
       # Add retry countdown or max retries reached message if applicable
       if op.failed and op.retry_needed and op.retry_count < MAX_RETRIES:
-        countdown = max(0, int(RETRY_DELAY - (time.time() - op.retry_timer)))
+        countdown = max(0, int(RETRY_DELAY - (time.monotonic() - op.retry_timer)))
         status_text += f" - Retrying in {countdown}s..."
       elif op.failed and op.retry_count >= MAX_RETRIES:
-        status_text += f" - Max retries reached"
+        status_text += " - Max retries reached"
 
       rl.draw_text_ex(
         gui_app.font(),
@@ -603,7 +603,7 @@ class PrefetchAppC4:
 
     # Draw title
     title = "Prefetching"
-    title_width = rl.measure_text_ex(gui_app.font(), title, self.TITLE_FONT_SIZE, 0).x
+    title_width = measure_text_cached(gui_app.font(), title, self.TITLE_FONT_SIZE).x
     rl.draw_text_ex(
       gui_app.font(),
       title,
@@ -644,7 +644,7 @@ class PrefetchAppC4:
 
       # Draw progress percentage
       progress_text = f"{op.progress}%"
-      text_width = rl.measure_text_ex(gui_app.font(), progress_text, self.FONT_SIZE, 0).x
+      text_width = measure_text_cached(gui_app.font(), progress_text, self.FONT_SIZE).x
       rl.draw_text_ex(
         gui_app.font(),
         progress_text,
@@ -663,19 +663,19 @@ class PrefetchAppC4:
 
       # Add retry countdown or max retries reached message if applicable
       if op.failed and op.retry_needed and op.retry_count < MAX_RETRIES:
-        countdown = max(0, int(RETRY_DELAY - (time.time() - op.retry_timer)))
+        countdown = max(0, int(RETRY_DELAY - (time.monotonic() - op.retry_timer)))
         status_text += f" - Retrying in {countdown}s..."
       elif op.failed and op.retry_count >= MAX_RETRIES:
-        status_text += f" - Max retries reached"
+        status_text += " - Max retries reached"
 
       # Truncate status text if too long for screen
       max_status_width = gui_app.width - self.PADDING * 2
-      status_width = rl.measure_text_ex(gui_app.font(), status_text, self.FONT_SIZE, 0).x
+      status_width = measure_text_cached(gui_app.font(), status_text, self.FONT_SIZE).x
       if status_width > max_status_width:
         # Truncate with ellipsis
         while status_width > max_status_width and len(status_text) > 3:
           status_text = status_text[:-4] + "..."
-          status_width = rl.measure_text_ex(gui_app.font(), status_text, self.FONT_SIZE, 0).x
+          status_width = measure_text_cached(gui_app.font(), status_text, self.FONT_SIZE).x
 
       # For the last operation, keep same spacing as other operations
       # All status texts use the same PADDING distance from their progress bars

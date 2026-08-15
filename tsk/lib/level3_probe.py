@@ -196,18 +196,18 @@ def probe_level3(progress_cb=None) -> dict:
     result["status"] = "reproduced"
     distinct = len(set(seeds))
     note = "seeds differ each request" if distinct > 1 else "same seed returned each request"
-    result["message"] = (f"Level 0x03 returned a seed from a clean extended session on bus {eps_bus} "
-                         f"({note}) — it is its own input/output, not a side effect of prior traffic. "
+    result["message"] = (f"Level 0x03 returned a seed from a clean extended session on bus {eps_bus} " +
+                         f"({note}) — it is its own input/output, not a side effect of prior traffic. " +
                          "Export the evidence bundle before continuing.")
   elif after_01 or after_prog:
     result["status"] = "conditional"
     primer = "a prior 0x01 seed request" if after_01 else "a prior PROGRAMMING attempt"
     result["primer"] = "0x01" if after_01 else "programming"
-    result["message"] = (f"Level 0x03 answered only after {primer}, not from a clean session — the earlier "
+    result["message"] = (f"Level 0x03 answered only after {primer}, not from a clean session — the earlier " +
                          "seed depended on prior traffic. Export the evidence bundle before continuing.")
   else:
     result["status"] = "no_seed"
-    result["message"] = (f"Level 0x03 returned no seed on bus {eps_bus} in any variant this run. The EPS may "
-                         "have dropped out of the diagnostic state — re-enter Not Ready to Drive / power-cycle "
+    result["message"] = (f"Level 0x03 returned no seed on bus {eps_bus} in any variant this run. The EPS may " +
+                         "have dropped out of the diagnostic state — re-enter Not Ready to Drive / power-cycle " +
                          "the panda and re-run. Export the evidence bundle before continuing.")
   return result

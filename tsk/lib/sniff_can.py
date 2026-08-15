@@ -105,11 +105,11 @@ def sniff(progress_cb=None, seconds=SNIFF_SECONDS) -> dict:
   bus_counters: dict = {}
   bus_maxlen: dict = {}
   frame_total = 0
-  begin = time.time()
+  begin = time.monotonic()
   last_progress = begin
   cb(seconds=0.0, frames=0, buses=0)
 
-  while time.time() - begin < seconds:
+  while time.monotonic() - begin < seconds:
     frames = panda.can_recv()
     if not frames:
       time.sleep(0.005)
@@ -119,12 +119,12 @@ def sniff(progress_cb=None, seconds=SNIFF_SECONDS) -> dict:
       if len(data) > bus_maxlen.get(bus, 0):
         bus_maxlen[bus] = len(data)
       frame_total += 1
-    now = time.time()
+    now = time.monotonic()
     if now - last_progress >= 1.0:
       last_progress = now
       cb(seconds=now - begin, frames=frame_total, buses=len(bus_counters))
 
-  elapsed = time.time() - begin
+  elapsed = time.monotonic() - begin
   cb(seconds=elapsed, frames=frame_total, buses=len(bus_counters))
   result = summarize_counts(bus_counters, elapsed, bus_maxlen)
   result.update(elm327_param=ELM327_NORMAL_PARAM, semantic_path="normal-harness")

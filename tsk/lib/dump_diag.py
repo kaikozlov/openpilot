@@ -77,7 +77,7 @@ def diagnose(progress_cb=None) -> dict:
   from Crypto.Cipher import AES
   from opendbc.car.isotp import isotp_send
   from opendbc.car.uds import ACCESS_TYPE, SESSION_TYPE, SERVICE_TYPE, \
-    ROUTINE_CONTROL_TYPE, InvalidServiceIdError, MessageTimeoutError, NegativeResponseError
+    ROUTINE_CONTROL_TYPE, NegativeResponseError
   try:
     from opendbc.car.uds import _negative_response_codes as NRC_TABLE
   except Exception:
@@ -92,7 +92,7 @@ def diagnose(progress_cb=None) -> dict:
   }
 
   def record(name, ok, detail, t0) -> None:
-    steps.append({"name": name, "ok": ok, "detail": detail, "ms": int((time.time() - t0) * 1000)})
+    steps.append({"name": name, "ok": ok, "detail": detail, "ms": int((time.monotonic() - t0) * 1000)})
     cb(steps=len(steps), last=name)
 
   def note_fail(name, exc) -> None:
@@ -106,7 +106,7 @@ def diagnose(progress_cb=None) -> dict:
   def call(name, fn):
     """Run a critical UDS step. Records it; on failure records the NRC/traceback and
     returns (False, None) so the caller can stop the chain. Never re-raises."""
-    t0 = time.time()
+    t0 = time.monotonic()
     try:
       val = fn()
       detail = val.hex() if isinstance(val, (bytes, bytearray)) else "ok"
@@ -127,7 +127,7 @@ def diagnose(progress_cb=None) -> dict:
   time.sleep(2)
 
   # Phase A: connect + panda info.
-  t0 = time.time()
+  t0 = time.monotonic()
   try:
     panda = TSKExtractor._connect_panda()
     try:
@@ -145,7 +145,7 @@ def diagnose(progress_cb=None) -> dict:
 
   # Phase B: discover both dimensions of the route. Normal-harness (ELM param 1)
   # is tried before the OBD mux, so bus 1/FDCAN2 is not silently pinned to OBD.
-  t0 = time.time()
+  t0 = time.monotonic()
   try:
     route = discover_eps_route_with_routing(
       panda, CANDIDATE_BUSES, preferred_tx=ADDR, addresses=[ADDR],
@@ -158,7 +158,7 @@ def diagnose(progress_cb=None) -> dict:
   if route is None:
     record("discover EPS route", False, "no response under normal-harness or OBD routing", t0)
     result["status"] = "rejected"
-    result["message"] = ("EPS did not answer on bus 0, 1, or 2 under either explicit Panda routing state. "
+    result["message"] = ("EPS did not answer on bus 0, 1, or 2 under either explicit Panda routing state. " +
                          "The EPS may be unpowered or the harness topology is outside the known routes.")
     return result
   if route["tx"] != ADDR or route["rx"] != ADDR + 8 or route["tx_bus"] != route["rx_bus"]:
@@ -177,7 +177,7 @@ def diagnose(progress_cb=None) -> dict:
 
   # Identity sweep — independent reads, never stops the run.
   for did, label in IDENTITY_DIDS:
-    t0 = time.time()
+    t0 = time.monotonic()
     try:
       data = uds.read_data_by_identifier(did)
       identity.append({"did": f"0x{did:04x}", "name": label,
@@ -192,7 +192,7 @@ def diagnose(progress_cb=None) -> dict:
   # Phase C: application -> bootloader handoff. A timeout after NRC 0x78 can be the
   # expected reset path, so require reappearance on the exact preserved Panda route
   # rather than equating a missing final 50 02 with refusal.
-  t0 = time.time()
+  t0 = time.monotonic()
   try:
     route, handoff = enter_programming_bootloader(panda, route, prepare_sessions=False)
     result["programming_handoff"] = handoff
@@ -234,7 +234,7 @@ def diagnose(progress_cb=None) -> dict:
     derived = AES.new(TSKExtractor.BOOT_SA_SECRET, AES.MODE_ECB).decrypt(b"\x00" * 16)
     sent_key = AES.new(derived, AES.MODE_ECB).encrypt(bytes(seed))
   except Exception as e:
-    record("compute key", False, f"{type(e).__name__}: {e}", time.time())
+    record("compute key", False, f"{type(e).__name__}: {e}", time.monotonic())
     note_fail("compute key", e)
     result["message"] = "Key computation failed (unexpected seed shape)."
     return result
@@ -242,14 +242,14 @@ def diagnose(progress_cb=None) -> dict:
   ok, _ = call("security SEND_KEY", lambda: uds.security_access(ACCESS_TYPE.SEND_KEY, sent_key))
   if not ok:
     result["status"] = "rejected"
-    result["message"] = ("EPS rejected the known 8965B4x bootloader 01/02 SecurityAccess key. "
+    result["message"] = ("EPS rejected the known 8965B4x bootloader 01/02 SecurityAccess key. " +
                          "The bootloader secret/algorithm differs or the request state is wrong.")
     return result
 
   # Phase E: payload upload (only reached if security passed — a surprise for a non-family car).
   payload = Path(DATAFLASH_PAYLOAD_PATH).read_bytes()
   sha_ok = hashlib.sha256(payload).hexdigest() == PAYLOAD_SHA256
-  record("payload sha256", sha_ok, "match" if sha_ok else "MISMATCH", time.time())
+  record("payload sha256", sha_ok, "match" if sha_ok else "MISMATCH", time.monotonic())
 
   ok, _ = call("write DID 0x203", lambda: uds.write_data_by_identifier(0x203, b"\x00" * 5))
   if ok:
@@ -274,7 +274,7 @@ def diagnose(progress_cb=None) -> dict:
 
   # Phase F: trigger + collect (capped short). Report frames/bytes even if the chain
   # above had a soft failure — we want to see whether anything comes back.
-  t0 = time.time()
+  t0 = time.monotonic()
   try:
     erase = b"\x31\x01\xff\x00" + b"\x45\x00" + struct.pack("!I", TRIGGER_ADDR) + struct.pack("!I", TRIGGER_SIZE)
     isotp_send(panda, erase, route["tx"], bus=eps_bus)
@@ -285,9 +285,9 @@ def diagnose(progress_cb=None) -> dict:
   received = bytearray(DUMP_TOTAL)
   frames = 0
   covered = 0
-  begin = time.time()
+  begin = time.monotonic()
   last = begin
-  while time.time() - begin < DIAG_COLLECT_SECONDS:
+  while time.monotonic() - begin < DIAG_COLLECT_SECONDS:
     progressed = False
     try:
       recv = panda.can_recv()
@@ -307,8 +307,8 @@ def diagnose(progress_cb=None) -> dict:
       frames += 1
       progressed = True
     if progressed:
-      last = time.time()
-    elif time.time() - last > DIAG_IDLE_TIMEOUT:
+      last = time.monotonic()
+    elif time.monotonic() - last > DIAG_IDLE_TIMEOUT:
       break
     else:
       time.sleep(0.001)
@@ -327,6 +327,6 @@ def diagnose(progress_cb=None) -> dict:
     result["message"] = f"Security passed and the payload ran, but only {covered}/{DUMP_TOTAL} bytes came back."
   else:
     result["status"] = "no_frames"
-    result["message"] = ("Security passed and the payload was uploaded, but the trigger produced no "
+    result["message"] = ("Security passed and the payload was uploaded, but the trigger produced no " +
                          "dump frames. The exploit reached the EPS but did not execute as expected.")
   return result

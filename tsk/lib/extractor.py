@@ -151,7 +151,7 @@ class TSKExtractor:
       raise RetryError("Car not detected on the normal-harness or OBD diagnostic routes")
     if route["tx"] != cls.ADDR or route["rx"] != cls.ADDR + 8 or route["tx_bus"] != route["rx_bus"]:
       raise RetryError(
-        "Diagnostic responder does not match the Sienna payload route "
+        "Diagnostic responder does not match the Sienna payload route " +
         f"({route_fields(route)}); refusing to run the transfer payload"
       )
 
@@ -165,15 +165,15 @@ class TSKExtractor:
     try:
       app_version = uds_client.read_data_by_identifier(DATA_IDENTIFIER_TYPE.APPLICATION_SOFTWARE_IDENTIFICATION)
       print(f" - APPLICATION_SOFTWARE_IDENTIFICATION (application): {str(app_version)}")
-    except (AssertionError, InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-      raise RetryError("Car not detected")
+    except (AssertionError, InvalidServiceIdError, MessageTimeoutError, NegativeResponseError) as e:
+      raise RetryError("Car not detected") from e
 
     known_application = app_version in cls.APPLICATION_VERSIONS
     cls._last_extraction_metadata.update(
       application_version=bytes(app_version).hex(), known_application=known_application,
     )
     if not known_application:
-      print("Application version is outside the known Sienna/RAV4 set. "
+      print("Application version is outside the known Sienna/RAV4 set. " +
             f"Continuing the explicit Sienna-transfer hypothesis: {app_version!r}")
 
     # The first application 10 02 is asynchronous on the analyzed Sienna: it may emit
@@ -186,8 +186,8 @@ class TSKExtractor:
     except ProgrammingHandoffError as e:
       cls._last_extraction_metadata["programming_handoff"] = e.telemetry
       if e.nrc is not None:
-        raise RetryError(f"Programming session rejected with NRC 0x{e.nrc:02x}")
-      raise RetryError(f"Programming handoff failed: {e}")
+        raise RetryError(f"Programming session rejected with NRC 0x{e.nrc:02x}") from e
+      raise RetryError(f"Programming handoff failed: {e}") from e
 
     active_bus = route["tx_bus"]
     cls._last_extraction_metadata.update(
@@ -204,23 +204,23 @@ class TSKExtractor:
     # Get bootloader version
     try:
       bl_version = uds_client.read_data_by_identifier(DATA_IDENTIFIER_TYPE.APPLICATION_SOFTWARE_IDENTIFICATION)
-    except (AssertionError, InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-      raise RetryError(f"Can't read bootloader version ({format_version_for_error_display(app_version)})")
+    except (AssertionError, InvalidServiceIdError, MessageTimeoutError, NegativeResponseError) as e:
+      raise RetryError(f"Can't read bootloader version ({format_version_for_error_display(app_version)})") from e
     print(f" - APPLICATION_SOFTWARE_IDENTIFICATION (bootloader) {str(bl_version)}")
 
     try:
       if bl_version != cls.APPLICATION_VERSIONS[app_version]:
-        print("Bootloader version differs from the prior fixture. Continuing the explicit "
+        print("Bootloader version differs from the prior fixture. Continuing the explicit " +
               f"Sienna-transfer hypothesis: {bl_version!r}")
     except KeyError as e: # In case app_version is not found at all
-      print("No prior bootloader fixture exists for this application. Continuing the explicit "
+      print("No prior bootloader fixture exists for this application. Continuing the explicit " +
             f"Sienna-transfer hypothesis: {e}")
 
     # Go back to programming session
     try:
       uds_client.diagnostic_session_control(SESSION_TYPE.PROGRAMMING)
-    except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-      raise RetryError("Can't enter programming session for reading bootloader version")
+    except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError) as e:
+      raise RetryError("Can't enter programming session for reading bootloader version") from e
 
     # Security Access - Request Seed
     try:
@@ -239,8 +239,8 @@ class TSKExtractor:
       uds_client.security_access(ACCESS_TYPE.SEND_KEY, key)
       print(" - Key OK!")
 
-    except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-      raise RetryError("Security Access failed")
+    except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError) as e:
+      raise RetryError("Security Access failed") from e
 
     # Security Access - Send Key
     print("\nPreparing to upload payload...")
@@ -297,8 +297,8 @@ class TSKExtractor:
       uds_client.routine_control(ROUTINE_CONTROL_TYPE.START, 0x10f0, data)
       print(" - Routine control 0x10f0 OK!")
 
-    except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-      raise RetryError("Payload upload failed")
+    except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError) as e:
+      raise RetryError("Payload upload failed") from e
 
     print("\nTrigger payload...")
 
@@ -322,7 +322,7 @@ class TSKExtractor:
     start = 0xfebe6e34
     end = 0xfebe6ff4
 
-    start_time = time.time()
+    start_time = time.monotonic()
     timeout = 30
 
     extracted = b""
@@ -330,7 +330,7 @@ class TSKExtractor:
     with tqdm(total=end - start) as pbar:
       while start < end:
 
-        current_time = time.time()
+        current_time = time.monotonic()
         if current_time - start_time > timeout:
           raise RetryError("Key dumping timed out")
 
@@ -355,7 +355,7 @@ class TSKExtractor:
           start += 4
           pbar.update(4)
 
-          start_time = time.time()
+          start_time = time.monotonic()
 
     key_1_ok = cls._verify_checksum(cls._get_key_struct(extracted, 1))
     key_4_ok = cls._verify_checksum(cls._get_key_struct(extracted, 4))

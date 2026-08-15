@@ -105,7 +105,7 @@ def map_surface(progress_cb=None) -> dict:
   eps_bus = route["tx_bus"]
   result.update(**route_fields(route))
   if route["rx_bus"] != eps_bus:
-    result.update(status="mapped", message=("A matching diagnostic response was observed on a different "
+    result.update(status="mapped", message=("A matching diagnostic response was observed on a different " +
                                              "bus. The route was recorded; typed UDS reads were skipped."))
     return result
 
@@ -168,6 +168,6 @@ def map_surface(progress_cb=None) -> dict:
   result["status"] = "mapped"
   reads_ok = sum(1 for e in identity if e.get("hex"))
   svc_ok = sum(1 for s in services if s["supported"])
-  result["message"] = (f"Read {reads_ok} identity field(s); {svc_ok} of {len(services)} probed "
+  result["message"] = (f"Read {reads_ok} identity field(s); {svc_ok} of {len(services)} probed " +
                        "services answered. Export the evidence bundle before continuing.")
   return result

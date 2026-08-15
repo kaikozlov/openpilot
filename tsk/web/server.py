@@ -53,7 +53,7 @@ OFFROAD_ALERT_INTERVAL = 5.0
 # Shared tail for the unexpected-error surfaces (extract + match). The leading
 # "!!!!" makes index.html's modal render it red; the extractor terminal prints it
 # verbatim. Kept in one place so the two paths can't drift.
-PING_REPORT = ("!!!! Unexpected error. Preserve the raw logs and export the "
+PING_REPORT = ("!!!! Unexpected error. Preserve the raw logs and export the " +
                "evidence bundle before continuing.")
 
 READY_OPERATIONS = {"/api/can-collect", "/api/ready-capture", "/api/ready-diff"}
@@ -656,7 +656,10 @@ def dashboard_payload() -> dict:
     stage = "capture_can"
     next_action = {
       "id": "capture_can", "title": "Discover the target SecOC surface",
-      "description": "Capture the full READY-state bus window. Known Toyota IDs are annotations; unknown classic SecOC streams are discovered structurally and later proven cryptographically.",
+      "description": (
+        "Capture the full READY-state bus window. Known Toyota IDs are annotations; " +
+        "unknown classic SecOC streams are discovered structurally and later proven cryptographically."
+      ),
       "href": "/can-collector.html", "label": "Capture CAN evidence", "vehicle_state": "READY", "tone": "primary",
     }
   elif not key_recovered and not programming_ready:
@@ -685,21 +688,30 @@ def dashboard_payload() -> dict:
     stage = "verify"
     next_action = {
       "id": "verify", "title": "Recover and verify the target key",
-      "description": "Scan every eligible DataFlash window and cryptographically classify it against the discovered target SecOC streams. This does not install SecOCKey.",
+      "description": (
+        "Scan every eligible DataFlash window and cryptographically classify it against the discovered target SecOC streams. " +
+        "This does not install SecOCKey."
+      ),
       "href": "", "label": "Find & verify key", "vehicle_state": "Any", "tone": "primary", "action": "match",
     }
   elif not profile.get("present") or not integration_ready:
     stage = "integration"
     next_action = {
       "id": "integration", "title": "Complete the target integration profile",
-      "description": "The key is recovered. Pin the target DBC, safety flags, steering mode, EPS scale, command/status roles, and longitudinal topology before openpilot can use it.",
+      "description": (
+        "The key is recovered. Pin the target DBC, safety flags, steering mode, EPS scale, command/status roles, " +
+        "and longitudinal topology before openpilot can use it."
+      ),
       "href": "/target-profile.html", "label": "Review target profile", "vehicle_state": "Any", "tone": "primary",
     }
   elif not code_ready:
     stage = "implementation"
     next_action = {
       "id": "implementation", "title": "Implement and audit the target in opendbc",
-      "description": "The reviewed manifest is complete, but the checked-out opendbc must contain this exact platform and EPS F181 and agree on DBC, steering mode, EPS scale, longitudinal ownership, and panda safetyParam.",
+      "description": (
+        "The reviewed manifest is complete, but the checked-out opendbc must contain this exact platform and EPS F181 and agree on " +
+        "DBC, steering mode, EPS scale, longitudinal ownership, and panda safetyParam."
+      ),
       "href": "/target-profile.html", "label": "Review implementation audit", "vehicle_state": "Any", "tone": "primary",
     }
   elif not stationary_ready:
@@ -722,7 +734,10 @@ def dashboard_payload() -> dict:
     stage = "integration"
     next_action = {
       "id": "integration", "title": "Reconcile the existing SecOCKey",
-      "description": "A SecOCKey is present, but no complete evidence-bound target profile proves it is safe for this integration. Continue profile verification.",
+      "description": (
+        "A SecOCKey is present, but no complete evidence-bound target profile proves it is safe for this integration. " +
+        "Continue profile verification."
+      ),
       "href": "/target-profile.html", "label": "Review target profile", "vehicle_state": "Any", "tone": "warning",
     }
 
@@ -1067,7 +1082,7 @@ def rehydrate_can_state() -> None:
         "unknown_scan_streams": analysis["unknown_scan_streams"],
         "scan_included_samples": included_samples,
       },
-      message=(f"Persisted target-profile evidence: {len(analysis['sync_samples'])} sync samples, "
+      message=(f"Persisted target-profile evidence: {len(analysis['sync_samples'])} sync samples, " +
                f"{included_samples} cryptographically eligible protected samples across {len(included)} stream(s)."),
     )
 
@@ -1601,7 +1616,7 @@ def _run_reset_mock() -> None:
         {"t_ms": 2700, "detail": "timeout"},
       ],
       session_after="NRC 0x31 requestOutOfRange",
-      message="No PROGRAMMING acceptance in the reset window. Active session after reset: "
+      message="No PROGRAMMING acceptance in the reset window. Active session after reset: " +
               "NRC 0x31 requestOutOfRange (0x02 would mean it switched silently). (mock)",
     )
 
@@ -1694,7 +1709,7 @@ def _run_level3_mock() -> None:
            {"step": "seed 0x03", "detail": "seed 9be1035fac82d4761e0b5528cf94a6d3"},
          ]},
       ],
-      message="Level 0x03 returned a seed from a clean extended session on bus 1 (seeds differ each "
+      message="Level 0x03 returned a seed from a clean extended session on bus 1 (seeds differ each " +
               "request) — it is its own input/output, not a side effect of prior traffic. (mock)",
     )
 
@@ -1895,9 +1910,9 @@ def _run_preamble_mock() -> None:
         {"name": "ram window 0xfebf0000", "ok": False, "detail": "NRC 0x31 requestOutOfRange"},
       ],
       liveness="EPS still answering at end of run",
-      message="Programming still refused with the pre-programming preamble (0 new DTC(s)). "
-              "Level 0x01 stayed shut. Export the evidence bundle — the DTC diff and service "
-              "refusal codes are the useful part of this run even though programming did not "
+      message="Programming still refused with the pre-programming preamble (0 new DTC(s)). " +
+              "Level 0x01 stayed shut. Export the evidence bundle — the DTC diff and service " +
+              "refusal codes are the useful part of this run even though programming did not " +
               "open. (mock)",
     )
 
@@ -1980,8 +1995,8 @@ def _run_sweep_mock() -> None:
       responders=["0x7a1", "0x7b0", "0x7e0"],
       frontier="subfunctions: stopped at 0x27 sub 0x40",
       hypotheses=[{"request": "1002", "label": "programming session"}],
-      message="Budget reached — 812 results saved. subfunctions: stopped at 0x27 sub 0x40. "
-              "Run this page again (Not Ready to Drive) and it resumes where it stopped. "
+      message="Budget reached — 812 results saved. subfunctions: stopped at 0x27 sub 0x40. " +
+              "Run this page again (Not Ready to Drive) and it resumes where it stopped. " +
               "Export the evidence bundle before continuing. (mock)",
     )
 
@@ -2207,31 +2222,31 @@ class TSKWebHandler(BaseHTTPRequestHandler):
         "status": "key_recovered",
         "key": DRY_RUN_FAKE_KEY,
         "recovered_key": recovered,
-        "message": (f"Cryptographically verified key recovered (dry run):\n{format_key(DRY_RUN_FAKE_KEY)}\n\n"
+        "message": (f"Cryptographically verified key recovered (dry run):\n{format_key(DRY_RUN_FAKE_KEY)}\n\n" +
                     "It has NOT been installed as SecOCKey. Target-profile and stationary verification remain."),
       })
     elif scenario == 1:
       self._send_json({
         "ok": False,
-        "message": "pandad is not running.\n\nTry again. If the problem persists, turn off the car, "
-                   "put it back into 'Not Ready to Drive' mode, and then try again."
+        "message": "pandad is not running.\n\nTry again. If the problem persists, turn off the car, " +
+                   "put it back into 'Not Ready to Drive' mode, and then try again." +
                    f"\n\n{PING_REPORT}",
       }, status=HTTPStatus.CONFLICT)
     else:
       self._send_json({
         "ok": False,
         "message": (
-          "UDS request timed out\n\n"
-          "Traceback (most recent call last):\n"
-          '  File "/data/openpilot/tsk/lib/extractor.py", line 384, in run\n'
-          "    secoc_key = cls.hack()\n"
-          '  File "/data/openpilot/tsk/lib/extractor.py", line 241, in hack\n'
-          "    seed = cls._security_access(panda)\n"
-          '  File "/data/openpilot/tsk/lib/extractor.py", line 152, in _security_access\n'
-          "    resp = cls._uds_request(panda, service=0x27, subfunction=0x01)\n"
-          '  File "/data/openpilot/tsk/lib/extractor.py", line 113, in _uds_request\n'
-          "    raise RetryError(f\"UDS request timed out\")\n"
-          "tsk.lib.extractor.RetryError: UDS request timed out\n\n"
+          "UDS request timed out\n\n" +
+          "Traceback (most recent call last):\n" +
+          '  File "/data/openpilot/tsk/lib/extractor.py", line 384, in run\n' +
+          "    secoc_key = cls.hack()\n" +
+          '  File "/data/openpilot/tsk/lib/extractor.py", line 241, in hack\n' +
+          "    seed = cls._security_access(panda)\n" +
+          '  File "/data/openpilot/tsk/lib/extractor.py", line 152, in _security_access\n' +
+          "    resp = cls._uds_request(panda, service=0x27, subfunction=0x01)\n" +
+          '  File "/data/openpilot/tsk/lib/extractor.py", line 113, in _uds_request\n' +
+          "    raise RetryError(f\"UDS request timed out\")\n" +
+          "tsk.lib.extractor.RetryError: UDS request timed out\n\n" +
           "!!!! Unexpected error. Preserve raw logs and export the evidence bundle before continuing.\n"
         ),
       }, status=HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -2274,9 +2289,9 @@ class TSKWebHandler(BaseHTTPRequestHandler):
             "status": "oracle_required",
             "profile_discovery": {"streams": oracle_analysis.get("streams", []),
                                   "can_inventory": oracle_analysis.get("can_inventory", [])},
-            "message": (f"Collect target-profile CAN evidence before extraction. Current usable oracle: "
-                        f"{sync_count} sync + {protected_count} known/discovered protected samples; "
-                        f"need at least {MIN_SYNC_MATCHES} sync and {MATCH_FLOOR} total samples. "
+            "message": ("Collect target-profile CAN evidence before extraction. Current usable oracle: " +
+                        f"{sync_count} sync + {protected_count} known/discovered protected samples; " +
+                        f"need at least {MIN_SYNC_MATCHES} sync and {MATCH_FLOOR} total samples. " +
                         "No programming request was sent. Current openpilot IDs are compatibility evidence, not an extraction prerequisite."),
           }, status=HTTPStatus.CONFLICT)
           return
@@ -2290,7 +2305,7 @@ class TSKWebHandler(BaseHTTPRequestHandler):
             "candidate": secoc_key,
             "verification": verification,
             "extraction": dict(TSKExtractor._last_extraction_metadata),
-            "message": ("RAM extraction produced a checksum-valid KEY_4 candidate, but it did not pass "
+            "message": ("RAM extraction produced a checksum-valid KEY_4 candidate, but it did not pass " +
                         "the persisted SecOC CAN oracle. The candidate was NOT installed. "
                         + verification.get("message", "")),
           }, status=HTTPStatus.UNPROCESSABLE_ENTITY)
@@ -2304,9 +2319,9 @@ class TSKWebHandler(BaseHTTPRequestHandler):
           "target_profile": profile,
           "verification": verification,
           "extraction": dict(TSKExtractor._last_extraction_metadata),
-          "message": (f"Cryptographically verified key recovered:\n{format_key(secoc_key)}\n\n"
-                      f"{verification['matches']} CAN-oracle matches "
-                      f"(sync {verification['sync']}, protected {verification['protected']}).\n\n"
+          "message": (f"Cryptographically verified key recovered:\n{format_key(secoc_key)}\n\n" +
+                      f"{verification['matches']} CAN-oracle matches " +
+                      f"(sync {verification['sync']}, protected {verification['protected']}).\n\n" +
                       "The key was NOT installed as SecOCKey. Complete target integration and stationary verification first."),
         })
       except NotAGNOSError:
@@ -2338,13 +2353,13 @@ class TSKWebHandler(BaseHTTPRequestHandler):
         if result["status"] == "found":
           recovered, profile = persist_verified_recovery(result["key"], result, source="dataflash-match")
           detail = (
-            f"Found at {result['address']} — {result['matches']} matches "
+            f"Found at {result['address']} — {result['matches']} matches " +
             f"(sync {result['sync']}, protected {result['protected']})."
           )
           message = (
-            f"Cryptographically verified key recovered:\n{format_key(result['key'])}\n\n"
-            f"{detail}\n\n"
-            "The candidate has been stored privately as recovered evidence, not installed as SecOCKey. "
+            f"Cryptographically verified key recovered:\n{format_key(result['key'])}\n\n" +
+            f"{detail}\n\n" +
+            "The candidate has been stored privately as recovered evidence, not installed as SecOCKey. " +
             "Current-openpilot ID matches are reported as compatibility evidence only."
           )
           self._send_json({
@@ -2490,7 +2505,7 @@ class TSKWebHandler(BaseHTTPRequestHandler):
           unresolved = profile.get("unresolved", [])
           self._send_json({
             "ok": False, "status": "integration_not_verified",
-            "message": ("Recovered key is intentionally not installable yet. "
+            "message": ("Recovered key is intentionally not installable yet. " +
                         "Target integration and profile-bound stationary verification must pass first."),
             "unresolved": unresolved,
             "target_profile": profile,
@@ -2749,7 +2764,10 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       invalidate_target_profile()
       self._send_json({
         "ok": True,
-        "message": "Captured CAN/DataFlash evidence and derived target-profile gates cleared. The privately recovered key and any installed SecOCKey were preserved.",
+        "message": (
+          "Captured CAN/DataFlash evidence and derived target-profile gates cleared. " +
+          "The privately recovered key and any installed SecOCKey were preserved."
+        ),
       })
       return
 
