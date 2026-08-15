@@ -20,13 +20,19 @@ from tsk.lib.target_profile import (
 FIELD_GUIDANCE = {
   "platform_name": "Exact CAR enum member to implement in opendbc (for example TOYOTA_<MODEL>_<GEN>), supported by target evidence.",
   "dbc_pt": "Exact Toyota powertrain/SecOC DBC name from the implemented platform, such as toyota_secoc_pt_generated; no family guess.",
-  "safety_flags": "Exact intended Toyota panda safetyParam as decimal or 0x-prefixed integer. The source audit recomputes EPS scale + SecOC/LTA/stock-long/alt-brake bits.",
+  "safety_flags": (
+    "Exact intended Toyota panda safetyParam as decimal or 0x-prefixed integer. " +
+    "The source audit recomputes EPS scale + SecOC/LTA/stock-long/alt-brake bits."
+  ),
   "steer_control_type": "Canonical torque or angle, established from the target command/status behavior and matched to ANGLE_CONTROL in source.",
   "eps_scale": "Exact integer EPS scale used in Toyota safetyParam/CarState; the source audit resolves the platform override/default and compares it.",
   "lateral_command_role": "Exact protected steering command ID(s), format, bus and semantic role.",
   "lateral_status_feedback": "Exact EPS/status feedback used to prove command acceptance/fault state.",
   "longitudinal_control": "Canonical intended mode: openpilot_default, stock_default, or openpilot_alpha. This drives the STOCK_LONGITUDINAL safety bit audit.",
-  "longitudinal_topology": "Evidence for radar/camera ownership, protected command ID(s), blocking/disable route, and why the selected longitudinal_control mode is correct.",
+  "longitudinal_topology": (
+    "Evidence for radar/camera ownership, protected command ID(s), blocking/disable route, " +
+    "and why the selected longitudinal_control mode is correct."
+  ),
 }
 
 

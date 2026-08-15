@@ -54,7 +54,7 @@ class KeyFileManager:
       return None
 
     try:
-      with open(file_path, "r") as f:
+      with open(file_path) as f:
         key = f.read().strip()
         if KeyFileManager._is_key_valid(key):
           return key

@@ -30,8 +30,8 @@ def _platform_block(values_source: str, platform_name: str) -> tuple[str, str] |
   # Toyota CAR entries are class-body assignments with two-space indentation. Stop at
   # the next platform assignment rather than attempting to execute the opendbc package.
   pattern = re.compile(
-    rf"(?ms)^  {re.escape(platform_name)}\s*=\s*(?P<config>[A-Za-z_][A-Za-z0-9_]*)\((?P<body>.*?)"
-    rf"(?=^  [A-Z][A-Z0-9_]+\s*=\s*[A-Za-z_][A-Za-z0-9_]*\(|\Z)"
+    rf"(?ms)^  {re.escape(platform_name)}\s*=\s*(?P<config>[A-Za-z_][A-Za-z0-9_]*)\((?P<body>.*?)" +
+    r"(?=^  [A-Z][A-Z0-9_]+\s*=\s*[A-Za-z_][A-Za-z0-9_]*\(|\Z)"
   )
   match = pattern.search(values_source)
   if match is None:
@@ -41,8 +41,8 @@ def _platform_block(values_source: str, platform_name: str) -> tuple[str, str] |
 
 def _fingerprint_block(fingerprint_source: str, platform_name: str) -> str | None:
   pattern = re.compile(
-    rf"(?ms)^  CAR\.{re.escape(platform_name)}\s*:\s*\{{(?P<body>.*?)"
-    rf"(?=^  CAR\.[A-Z][A-Z0-9_]+\s*:\s*\{{|\Z)"
+    rf"(?ms)^  CAR\.{re.escape(platform_name)}\s*:\s*\{{(?P<body>.*?)" +
+    r"(?=^  CAR\.[A-Z][A-Z0-9_]+\s*:\s*\{|\Z)"
   )
   match = pattern.search(fingerprint_source)
   return None if match is None else match.group("body")
@@ -50,7 +50,7 @@ def _fingerprint_block(fingerprint_source: str, platform_name: str) -> str | Non
 
 def _default_secoc_dbc(values_source: str) -> str | None:
   match = re.search(
-    r"(?ms)^class ToyotaSecOCPlatformConfig\(PlatformConfig\):.*?"
+    r"(?ms)^class ToyotaSecOCPlatformConfig\(PlatformConfig\):.*?" +
     r"dbc_dict\s*:\s*dict\s*=.*?dbc_dict\(['\"]([^'\"]+)['\"]",
     values_source,
   )

@@ -133,7 +133,7 @@ def _finalize(dump_buf, received, frames_count, bytes_received) -> dict:
       "coverage_path": "",
       "longest_covered_run": longest_run,
       "known_key_window_covered": known_key_covered,
-      "message": (f"Partial dump ({bytes_received}/{DUMP_TOTAL} bytes) has no contiguous "
+      "message": (f"Partial dump ({bytes_received}/{DUMP_TOTAL} bytes) has no contiguous " +
                   f"{KEY_SIZE}-byte candidate window. Restart the car into Not Ready To Drive mode and dump again."),
     }
 
@@ -149,8 +149,8 @@ def _finalize(dump_buf, received, frames_count, bytes_received) -> dict:
     "coverage_path": str(coverage_path),
     "longest_covered_run": longest_run,
     "known_key_window_covered": known_key_covered,
-    "message": (f"Partial dump ({bytes_received}/{DUMP_TOTAL} bytes; longest covered run {longest_run}).\n"
-                "All fully covered 16-byte windows are eligible for cryptographic matching.\n"
+    "message": (f"Partial dump ({bytes_received}/{DUMP_TOTAL} bytes; longest covered run {longest_run}).\n" +
+                "All fully covered 16-byte windows are eligible for cryptographic matching.\n" +
                 "If no key verifies, restart the car into Not Ready To Drive mode and dump again."),
   }
 
@@ -217,7 +217,7 @@ def dump(progress_cb=None, *, auto_reset: bool = False) -> dict:
                                                   settle_extended=0.7)
   except ProgrammingHandoffError as e:
     detail = f" ({e.telemetry})" if e.telemetry else ""
-    raise RetryError(f"Can't enter programming bootloader: {e}{detail}")
+    raise RetryError(f"Can't enter programming bootloader: {e}{detail}") from e
 
   bus = route["tx_bus"]
   uds = uds_client(panda, route, timeout=0.3, response_pending_timeout=3.0)
@@ -238,8 +238,8 @@ def dump(progress_cb=None, *, auto_reset: bool = False) -> dict:
     key = AES.new(TSKExtractor.BOOT_SA_SECRET, AES.MODE_ECB).decrypt(seed_payload)
     key = AES.new(key, AES.MODE_ECB).encrypt(seed)
     uds.security_access(ACCESS_TYPE.SEND_KEY, key)
-  except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-    raise RetryError("Security Access failed")
+  except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError) as e:
+    raise RetryError("Security Access failed") from e
 
   # Upload and verify the payload.
   try:
@@ -257,8 +257,8 @@ def dump(progress_cb=None, *, auto_reset: bool = False) -> dict:
 
     verify = b"\x45\x00" + struct.pack("!I", PAYLOAD_LOAD_ADDR) + struct.pack("!I", PAYLOAD_LOAD_SIZE)
     uds.routine_control(ROUTINE_CONTROL_TYPE.START, 0x10f0, verify)
-  except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError):
-    raise RetryError("Payload upload failed")
+  except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError) as e:
+    raise RetryError("Payload upload failed") from e
 
   # Trigger the payload via the erase routine. Send manually so we don't block
   # waiting for a response that never comes. Same vector as extractor.hack().
@@ -271,11 +271,11 @@ def dump(progress_cb=None, *, auto_reset: bool = False) -> dict:
   received = bytearray(DUMP_TOTAL)
   frames_count = 0
   bytes_covered = 0
-  begin = time.time()
+  begin = time.monotonic()
   last_progress = begin
 
   while True:
-    if time.time() - begin > MAX_SECONDS:
+    if time.monotonic() - begin > MAX_SECONDS:
       break
 
     made_progress = False
@@ -304,8 +304,8 @@ def dump(progress_cb=None, *, auto_reset: bool = False) -> dict:
         cb(status="running", frames=frames_count, bytes_done=bytes_covered, total=DUMP_TOTAL)
 
     if made_progress:
-      last_progress = time.time()
-    elif time.time() - last_progress > IDLE_TIMEOUT:
+      last_progress = time.monotonic()
+    elif time.monotonic() - last_progress > IDLE_TIMEOUT:
       break
     else:
       time.sleep(0.001)

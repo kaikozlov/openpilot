@@ -46,7 +46,7 @@ FW_VERSIONS = {{
 }}
 """.lstrip(), encoding="utf-8")
     (toyota / "interface.py").write_text(
-      "EPS_SCALE[candidate]\nToyotaSafetyFlags.SECOC\nToyotaSafetyFlags.LTA\n"
+      "EPS_SCALE[candidate]\nToyotaSafetyFlags.SECOC\nToyotaSafetyFlags.LTA\n" +
       "ToyotaSafetyFlags.STOCK_LONGITUDINAL\nret.openpilotLongitudinalControl\n",
       encoding="utf-8")
     (toyota / "carcontroller.py").write_text(
