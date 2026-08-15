@@ -35,6 +35,16 @@ TSK reports compatibility with those paths, but they are not the target-discover
 Unknown classic protected IDs can be surfaced structurally from the full READY capture and
 then proven by AES-CMAC.
 
+The newer firmware analysis does **not** justify expanding that sender contract just
+because more protected receive records are now understood. On Sienna `8965B4512000`,
+`0x132` is a firmware-verified classic protected RX profile with a bounded snapshot-only
+downstream role, while CAN-FD `0x090` and `0x0D7` are protected sensor/status inputs
+(rear-wheel/steering-angle-speed and vehicle-speed/validity domains respectively). TSK now
+cryptographically verifies all three when observed, but openpilot must not synthesize them
+as new control outputs. Likewise, `0x131` is statically confirmed as the second steering
+command mode, but that alone does not satisfy the existing dynamic/safety requirement for
+LTA angle actuation.
+
 ## Manifest required before implementation
 
 `/target-profile.html` records these fields and an evidence source for every one:

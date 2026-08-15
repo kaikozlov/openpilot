@@ -21,10 +21,10 @@ Design (per the 2026-07-05 decisions, refined by the 2026-08 cross-variant work)
   - Generic cryptographic validity is separate from installation. The caller installs
     SecOCKey only when the candidate also verifies the current openpilot control IDs.
 
-The AES-CMAC framing semantics (subkeys, first28/tail28, sync input, freshness, and
-classic protected input) match the proven reference verifier/openpilot SecOC sender.
-Protected counter trials are batched into one ECB call per sample for scan efficiency;
-this is an implementation optimization, not a framing change.
+The AES-CMAC framing semantics (subkeys, first28/tail28, sync input, freshness,
+classic protected input, and the firmware-verified 32-byte Sienna FD profiles) match
+the recovered receiver. Protected counter trials are batched into one ECB call per
+sample for scan efficiency; this is an implementation optimization, not a framing change.
 
 This module does not install the key. It returns the key hex to the caller, which
 installs via KeyFileManager (same split as /api/extract).
@@ -42,7 +42,7 @@ from tsk.lib.env import CAN_ORACLE_PATH
 from tsk.lib.secoc_discovery import load_oracle_discovery
 from tsk.lib.secoc_profile import (
   CLASSIC_PROTECTED_ADDRS, CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS,
-  CURRENT_OPENPILOT_LONGITUDINAL_PROTECTED_ADDRS, SYNC_ADDR,
+  CURRENT_OPENPILOT_LONGITUDINAL_PROTECTED_ADDRS,
 )
 
 # Acceptance: a window must authenticate at least MATCH_FLOOR oracle samples
@@ -132,7 +132,7 @@ def _freshness(trip: int, reset: int, msg_cnt: int) -> bytes:
 
 
 def load_oracle_analysis(path: Path) -> dict:
-  """Return sync samples plus known/structurally discovered classic SecOC streams."""
+  """Return sync samples plus known/discovered protected SecOC streams."""
   return load_oracle_discovery(Path(path))
 
 
@@ -152,24 +152,48 @@ def _verify_sync(key: bytes, samples, subkeys) -> int:
 
 
 def _protected_sample_matches(cipher, sample, subkeys) -> bool:
-  """Check one classic protected sample against all 64 possible message counters.
+  """Check one protected sample against all 64 possible message counters.
 
-  The trailer exposes msg_cnt low2 through the flag nibble. Every remaining candidate
-  produces a one-block (12-byte) CMAC input, so all 64 padded final blocks can be
-  encrypted in one ECB call instead of crossing Python/C for every counter.
+  Classic profiles authenticate ``ID16 || payload4 || freshness48`` (12 bytes),
+  so all 64 candidate final blocks are encrypted in one ECB call. The verified
+  Sienna FD profiles authenticate ``ID16 || payload28 || freshness48`` (36 bytes):
+  their first two CMAC blocks are counter-invariant, so those are reduced once and
+  only the 64 candidate final blocks are batched. Both formats expose msg_cnt low2
+  through the transmitted freshness nibble.
   """
   reset_low2 = sample["reset"] & 3
   if (sample["flag"] & 3) != reset_low2:
     return False
   msg_low2 = (sample["flag"] >> 2) & 3
+  payload = bytes(sample.get("payload", sample.get("payload4", b"")))
   K2 = subkeys[1]
   blocks = bytearray()
-  for msg_cnt in range(msg_low2, 256, 4):
-    msg = (struct.pack(">H", sample["addr"]) + sample["payload4"] +
-           _freshness(sample["trip"], sample["reset"], msg_cnt))
-    padded = (msg + b"\x80").ljust(16, b"\x00")
-    blocks.extend(_xor(padded, K2))
-  encrypted = cipher.encrypt(bytes(blocks))
+
+  if len(payload) == 4:
+    for msg_cnt in range(msg_low2, 256, 4):
+      msg = (struct.pack(">H", sample["addr"]) + payload +
+             _freshness(sample["trip"], sample["reset"], msg_cnt))
+      padded = (msg + b"\x80").ljust(16, b"\x00")
+      blocks.extend(_xor(padded, K2))
+    encrypted = cipher.encrypt(bytes(blocks))
+
+  elif len(payload) == 28:
+    # 36-byte input => two complete blocks plus a four-byte final partial block.
+    # B0 = ID16 || payload[0:14]
+    # B1 = payload[14:28] || trip16
+    block0 = struct.pack(">H", sample["addr"]) + payload[:14]
+    block1 = payload[14:] + struct.pack(">H", sample["trip"] & 0xFFFF)
+    x1 = cipher.encrypt(block0)
+    x2 = cipher.encrypt(_xor(x1, block1))
+    for msg_cnt in range(msg_low2, 256, 4):
+      tail = _freshness(sample["trip"], sample["reset"], msg_cnt)[2:]
+      padded = (tail + b"\x80").ljust(16, b"\x00")
+      blocks.extend(_xor(x2, _xor(padded, K2)))
+    encrypted = cipher.encrypt(bytes(blocks))
+
+  else:
+    return False
+
   return any(_first28(encrypted[i:i + 16]) == sample["auth"]
              for i in range(0, len(encrypted), 16))
 

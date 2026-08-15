@@ -230,6 +230,34 @@
   font-weight: 600;
 }
 
+.probe-field-label {
+  display: block;
+  margin-top: 16px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.probe-select {
+  width: 100%;
+  min-height: 42px;
+  margin-top: 7px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.probe-select:disabled {
+  color: var(--text-tertiary);
+  background: var(--gray-soft);
+}
+
 .probe-actions {
   margin-top: 18px;
   display: grid;

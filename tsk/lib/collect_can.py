@@ -99,7 +99,7 @@ def collect(progress_cb=None, seconds=COLLECT_SECONDS) -> dict:
 
   sync_count = 0
   protected_count = 0
-  protected_by_id = {addr: 0 for addr in sorted(PROTECTED_ADDRS)}
+  protected_by_id = dict.fromkeys(sorted(PROTECTED_ADDRS), 0)
   counts_by_bus: dict[int, dict[str, int]] = {}
   begin = time.monotonic()
   last_progress = begin
@@ -210,14 +210,16 @@ def collect(progress_cb=None, seconds=COLLECT_SECONDS) -> dict:
     return {
       "status": "complete",
       **common,
-      "message": (f"Collected {sync_count} sync frames and {discovered_samples} structurally eligible classic SecOC samples "
-                  f"across {len(discovered_streams)} stream(s). Target-profile evidence is ready for cryptographic classification."),
+      "message": " ".join((
+        f"Collected {sync_count} sync frames and {discovered_samples} cryptographically eligible protected samples",
+        f"across {len(discovered_streams)} stream(s). Target-profile evidence is ready for cryptographic classification.",
+      )),
     }
   return {
     "status": "insufficient",
     **common,
     "message": " ".join((
-      f"Only {sync_count}/{SYNC_TARGET} sync and {discovered_samples}/{PROTECTED_TARGET} structurally eligible classic SecOC samples.",
+      f"Only {sync_count}/{SYNC_TARGET} sync and {discovered_samples}/{PROTECTED_TARGET} cryptographically eligible protected samples.",
       "Put the car in READY Mode (hybrid on) and collect again.",
     )),
   }

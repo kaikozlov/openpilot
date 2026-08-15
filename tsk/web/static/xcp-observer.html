@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>XCP Read/DAQ Observer · TSK Manager</title>
+    <link rel="stylesheet" href="/css/app.css">
+    <link rel="stylesheet" href="/css/probe.css">
+  </head>
+  <body class="probe-body">
+    <header class="probe-topbar">
+      <div class="probe-topbar-inner">
+        <a class="probe-back" href="/#research"><span class="probe-back-arrow">←</span><span>Research</span></a>
+        <div class="probe-context" aria-label="Current vehicle context">
+          <span class="probe-context-item" id="probeVehicle">Loading vehicle…</span>
+          <span class="probe-context-sep"></span>
+          <span class="probe-context-item route" id="probeRoute">Loading route…</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="probe-page">
+      <section class="probe-heading">
+        <p class="probe-breadcrumb">Research · Observe & map</p>
+        <h1 class="probe-title">XCP read/DAQ observer</h1>
+        <p class="probe-description">Measure the recovered application channel on CAN 0x7F7/0x7F8. Unknown EPS calibrations stop after CONNECT; bounded LocalRAM F4 reads and volatile DAQ configuration require exact F181 8965B4512000.</p>
+        <div class="probe-badges"><span class="probe-badge blue">NOT READY</span><span class="probe-badge green">OBSERVATION ONLY</span><span class="probe-badge amber">EXACT SIENNA FOR DAQ</span></div>
+      </section>
+
+      <div class="probe-layout">
+        <aside class="probe-side">
+          <section class="probe-card">
+            <div class="probe-card-body">
+              <p class="probe-card-kicker">Observation profile</p>
+              <h2 class="probe-card-title">Firmware-native LocalRAM telemetry</h2>
+              <p class="probe-card-copy">The DAQ path samples one-byte LocalRAM sources into 0x7F8 DTOs. It is useful for dynamic questions without invoking the WDBI, RoutineControl, or BA operations whose state it observes.</p>
+              <label class="probe-field-label" for="profile">Profile</label>
+              <select id="profile" class="probe-select">
+                <option value="actuation-discriminator">Actuation discriminator</option>
+                <option value="diagnostic-control-state">WDBI control state</option>
+                <option value="routine-lifecycle-state">Routine lifecycle state</option>
+                <option value="async-ba-state">Async + BA authorization state</option>
+                <option value="ba-operational-state">BA operational state</option>
+              </select>
+              <div class="probe-subtle-divider"></div>
+              <ul class="probe-meta-list">
+                <li class="probe-meta-row"><span class="probe-meta-label">Request / DTO</span><span class="probe-meta-value">0x7F7 / 0x7F8</span></li>
+                <li class="probe-meta-row"><span class="probe-meta-label">Reads</span><span class="probe-meta-value">F4 + DAQ</span></li>
+                <li class="probe-meta-row"><span class="probe-meta-label">Source memory writes</span><span class="probe-meta-value">None</span></li>
+              </ul>
+              <div class="probe-actions"><button class="run-btn primary" id="runBtn" type="button">Run XCP observer</button></div>
+            </div>
+          </section>
+
+          <section class="probe-card">
+            <div class="probe-card-body">
+              <p class="probe-card-kicker">Hard boundary</p>
+              <h2 class="probe-card-title">No XCP write surface exposed</h2>
+              <p class="probe-card-copy">This tool does not implement E4 page copy, F6 SET_MTA, F5 UPLOAD, F0 DOWNLOAD, EC MODIFY_BITS, or any generic memory-write interface. DAQ pointer configuration is volatile and STOP is sent during cleanup.</p>
+              <a class="probe-evidence-link" href="/api/evidence-bundle">Download evidence bundle →</a>
+            </div>
+          </section>
+        </aside>
+
+        <section class="probe-card probe-terminal-card">
+          <div class="probe-terminal-head">
+            <span class="probe-terminal-title">Live output</span>
+            <span class="probe-terminal-hint">CONNECT, F4 snapshot, and bounded DAQ DTOs</span>
+          </div>
+          <div class="terminal" id="terminal" role="log" aria-live="polite"></div>
+        </section>
+      </div>
+    </main>
+
+    <script src="/js/probe.js"></script>
+    <script>
+      const terminal = document.getElementById("terminal");
+      const runBtn = document.getElementById("runBtn");
+      const profile = document.getElementById("profile");
+
+      function termWrite(text, className) {
+        const span = document.createElement("span");
+        if (className) span.className = className;
+        span.textContent = text + "\n";
+        terminal.appendChild(span);
+        terminal.scrollTop = terminal.scrollHeight;
+      }
+
+      function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+      async function getStatus() {
+        const r = await fetch("/api/xcp-observer-status", { cache: "no-store" });
+        return r.json();
+      }
+
+      function renderResult(s) {
+        termWrite("");
+        termWrite("XCP application-channel result", s.status === "observed" ? "ok" : "warn");
+        termWrite("F181: " + (s.f181 || "?"));
+        termWrite("Route: " + (s.semantic_path || "?") + " · bus " + (s.eps_bus ?? "?"));
+        termWrite("XCP: " + (s.xcp_request_id || "0x7f7") + " → " + (s.xcp_response_id || "0x7f8"));
+        termWrite("CONNECT: " + (s.connect_response || "no positive response"), s.connect_response ? "ok" : "warn");
+        termWrite("Profile: " + (s.profile || "?"));
+        if (s.profile_description) termWrite("  " + s.profile_description, "dim");
+
+        if ((s.snapshot || []).length) {
+          termWrite("");
+          termWrite("Bounded F4 snapshot:");
+          for (const row of s.snapshot) termWrite(`  ${row.address} = 0x${Number(row.value).toString(16).padStart(2, "0")}`);
+        }
+
+        const frames = s.frames || [];
+        if (frames.length) {
+          termWrite("");
+          termWrite(`DAQ DTOs captured: ${frames.length}`, "ok");
+          for (const frame of frames.slice(-8)) {
+            const values = (frame.values || []).map(v => `${v.address}=0x${Number(v.value).toString(16).padStart(2, "0")}`).join("  ");
+            termWrite(`  +${frame.t_ms ?? "?"} ms · PID ${frame.pid} · ${values}`);
+          }
+          if (frames.length > 8) termWrite(`  … ${frames.length - 8} earlier frame(s) retained in evidence state`, "dim");
+        }
+
+        termWrite("");
+        termWrite("XCP source-memory write commands implemented: " + (s.write_commands_implemented ? "YES" : "no"), s.write_commands_implemented ? "err" : "ok");
+        if (s.cleanup_error) termWrite("STOP cleanup warning: " + s.cleanup_error, "err");
+        if (s.message) termWrite(s.message, s.status === "observed" ? "ok" : "warn");
+        termWrite("Export the evidence bundle before continuing.", "dim");
+      }
+
+      async function runObserver() {
+        let s = null;
+        try { s = await getStatus(); } catch (err) { /* continue */ }
+        if (s && s.status === "running") {
+          termWrite("An XCP observation is already in progress — attaching...");
+        } else {
+          termWrite("Sending XCP CONNECT. Address reads and DAQ remain F181-gated to exact 8965B4512000.", "warn");
+          const r = await fetch("/api/xcp-observer", {
+            method: "POST",
+            cache: "no-store",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({profile: profile.value}),
+          });
+          const started = await r.json();
+          if (!started.ok && started.status !== "running") {
+            termWrite(started.message || "Could not start the XCP observer.", "err");
+            return;
+          }
+        }
+
+        let marker = "";
+        while (true) {
+          await sleep(300);
+          try { s = await getStatus(); } catch (err) { continue; }
+          if (s.status === "running") {
+            const next = `${s.step || ""}:${s.last || ""}`;
+            if (next !== marker) {
+              marker = next;
+              if (s.last) termWrite("  " + s.last);
+            }
+            continue;
+          }
+          if (s.status === "failed") termWrite(s.message || "XCP observer failed.", "err");
+          else renderResult(s);
+          break;
+        }
+      }
+
+      runBtn.addEventListener("click", async () => {
+        TSKProbe.clearTerminal();
+        TSKProbe.runButton(runBtn, true, "Observing…");
+        profile.disabled = true;
+        try { await runObserver(); } finally {
+          profile.disabled = false;
+          TSKProbe.runButton(runBtn, false);
+        }
+      });
+    </script>
+  </body>
+</html>

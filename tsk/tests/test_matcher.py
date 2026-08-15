@@ -119,6 +119,34 @@ class TestMatcher(unittest.TestCase):
     self.assertEqual(result["status"], "not_found")
     self.assertEqual(result["windows_eligible"], 0)
 
+  def test_candidate_verification_accepts_firmware_verified_fd_profile(self):
+    key = bytes(range(16))
+    sync, _ = self._oracle(key, ids=(0x131,))
+    trip, reset = sync[-1]["trip"], sync[-1]["reset"]
+    subkeys = _cmac_subkeys(key)
+    protected = []
+    for i in range(32):
+      addr = 0x090 if i % 2 == 0 else 0x0D7
+      msg_cnt = i & 0xFF
+      payload = bytes(((i * 29 + j * 7) & 0xFF) for j in range(28))
+      flag = ((msg_cnt & 3) << 2) | (reset & 3)
+      msg = addr.to_bytes(2, "big") + payload + _freshness(trip, reset, msg_cnt)
+      auth = _first28(_aes_cmac(key, msg, subkeys))
+      protected.append({
+        "addr": addr, "bus": 1, "payload": payload, "flag": flag,
+        "auth": auth, "trip": trip, "reset": reset, "format": "fd32",
+      })
+
+    result = verify_candidate_key(key, sync, protected)
+    self.assertEqual(result["status"], "found")
+    self.assertEqual(result["protected_by_id"], {"0x090": 16, "0x0d7": 16})
+    self.assertEqual(result["domain"], "sync+protected")
+
+    dump = b"\x99" * 11 + key + b"\x55" * 20
+    scan = find_key(dump, sync, protected)
+    self.assertEqual(scan["status"], "found")
+    self.assertEqual(scan["offset"], 11)
+
   def test_candidate_verification_rejects_wrong_key(self):
     key = bytes(range(16))
     sync, protected = self._oracle(key)

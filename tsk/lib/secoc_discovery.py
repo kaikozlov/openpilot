@@ -16,7 +16,9 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tsk.lib.secoc_profile import ADDITIONAL_PROTECTED_HYPOTHESES, CLASSIC_PROTECTED_ADDRS, SYNC_ADDR
+from tsk.lib.secoc_profile import (
+  ADDITIONAL_PROTECTED_HYPOTHESES, CLASSIC_PROTECTED_ADDRS, FD_PROTECTED_ADDRS, SYNC_ADDR,
+)
 
 MAX_SYNC_SAMPLES = 1024
 MAX_PROTECTED_PER_ADDR = 250
@@ -27,7 +29,6 @@ MIN_MSG_COUNTER_VALUES = 2
 MAX_UNKNOWN_SCAN_STREAMS = 24
 
 
-@dataclass
 @dataclass
 class _InventoryStream:
   bus: int
@@ -58,6 +59,7 @@ class _InventoryStream:
       "rate_hz": rate_hz,
       "sync_hypothesis": self.addr == SYNC_ADDR,
       "known_classic_secoc_hypothesis": self.addr in CLASSIC_PROTECTED_ADDRS,
+      "known_fd_secoc_hypothesis": self.addr in FD_PROTECTED_ADDRS,
       "known_additional_secoc_hypothesis": self.addr in ADDITIONAL_PROTECTED_HYPOTHESES,
     }
 
@@ -97,6 +99,7 @@ class _Stream:
     reset_ratio = self.reset_matches / sample_count if sample_count else 0.0
     auth_ratio = len(self.auth_values) / sample_count if sample_count else 0.0
     known = self.addr in CLASSIC_PROTECTED_ADDRS
+    known_fd = self.addr in FD_PROTECTED_ADDRS
     structural = (
       sample_count >= MIN_STRUCTURAL_SAMPLES
       and reset_ratio >= MIN_RESET_FLAG_AGREEMENT
@@ -119,14 +122,24 @@ class _Stream:
       "msg_counter_low2_values": sorted(self.msg_counter_values),
       "authenticator_distinct": len(self.auth_values),
       "authenticator_distinct_ratio": round(auth_ratio, 6),
-      "known_toyota_hypothesis": known,
+      "known_toyota_hypothesis": known or known_fd,
+      "known_classic_secoc_hypothesis": known,
+      "known_fd_secoc_hypothesis": known_fd,
+      "protected_format": "fd32" if known_fd else "classic",
       "structural_candidate": structural,
       "rate_hz": rate_hz,
     }
 
 
+def _tail28_at(data: bytes, offset: int) -> int:
+  if offset < 0 or offset + 4 > len(data):
+    raise ValueError("SecOC trailer is outside captured frame")
+  return (((data[offset] & 0x0F) << 24) | (data[offset + 1] << 16) |
+          (data[offset + 2] << 8) | data[offset + 3]) & 0x0FFFFFFF
+
+
 def _tail28(data: bytes) -> int:
-  return (((data[4] & 0x0F) << 24) | (data[5] << 16) | (data[6] << 8) | data[7]) & 0x0FFFFFFF
+  return _tail28_at(data, 4)
 
 
 def _relative_ms(record: dict) -> float | None:
@@ -141,12 +154,13 @@ def _relative_ms(record: dict) -> float | None:
 
 
 def load_oracle_discovery(path: Path, *, run_id: str | None = None) -> dict:
-  """Parse one append-only oracle into sync samples and candidate classic streams.
+  """Parse one append-only oracle into sync samples and protected-stream candidates.
 
-  Known classic Toyota IDs are always retained when they have same-run/same-bus
-  synchronization context. Unknown IDs are admitted only by the structural trailer
-  predicate above. Candidate ranking limits only exhaustive-scan probes; every stream
-  remains in ``streams`` for target-profile evidence.
+  Known classic Toyota IDs and firmware-verified Sienna FD IDs are retained when
+  they have same-run/same-bus synchronization context. Unknown IDs are admitted
+  only by the classic structural trailer predicate above. Candidate ranking limits
+  only exhaustive-scan probes; every stream remains in ``streams`` for target-profile
+  evidence.
   """
   sync_samples: list[dict] = []
   sync_by_bus: dict[int, tuple[int, int, int]] = {}
@@ -197,20 +211,48 @@ def load_oracle_discovery(path: Path, *, run_id: str | None = None) -> dict:
           sync_samples.append({"bus": bus, "trip": trip, "reset": reset, "auth": auth})
         continue
 
-      # The classic protected format is exactly 8 bytes. Keep larger frames in the
-      # capture/profile census elsewhere; do not reinterpret a CAN-FD suffix as a
-      # classic SecOC trailer.
-      if len(data) != 8 or bus not in sync_by_bus:
+      if bus not in sync_by_bus:
         continue
       trip, reset, _ = sync_by_bus[bus]
+
+      # 8965B4512000 proves 0x090/0x0D7 are 32-byte SecOC records with 28 authentic
+      # payload bytes, the same four-bit transmitted freshness field, and the same
+      # 28-bit CMAC trailer. Physical DLC 48/64 is accepted then clamped to 32, so
+      # only the first 32 bytes participate in the EPS authenticated view.
+      if addr in FD_PROTECTED_ADDRS and len(data) in (32, 48, 64):
+        effective = data[:32]
+        sample = {
+          "addr": addr,
+          "bus": bus,
+          "payload": effective[:28],
+          "flag": effective[28] >> 4,
+          "auth": _tail28_at(effective, 28),
+          "trip": trip,
+          "reset": reset,
+          "secured_length": 32,
+          "physical_length": len(data),
+          "format": "fd32",
+        }
+        stream = streams.setdefault((bus, addr), _Stream(bus=bus, addr=addr))
+        stream.observe(sample, length=len(data), rel_ms=rel_ms)
+        continue
+
+      # Unknown/known classic candidates remain exactly eight bytes. Larger frames
+      # that are not one of the pinned FD receive profiles stay inventory-only.
+      if len(data) != 8:
+        continue
       sample = {
         "addr": addr,
         "bus": bus,
         "payload4": data[:4],
+        "payload": data[:4],
         "flag": data[4] >> 4,
         "auth": _tail28(data),
         "trip": trip,
         "reset": reset,
+        "secured_length": 8,
+        "physical_length": 8,
+        "format": "classic",
       }
       stream = streams.setdefault((bus, addr), _Stream(bus=bus, addr=addr))
       stream.observe(sample, length=len(data), rel_ms=rel_ms)

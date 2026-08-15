@@ -28,6 +28,7 @@ from tsk.lib.sniff_can import sniff as sniff_can, summarize_counts
 from tsk.lib.dump_diag import diagnose as dump_diagnose
 from tsk.lib.prog_probe import probe_programming
 from tsk.lib.read_mem import read_key_region
+from tsk.lib.xcp_observer import PROFILES as XCP_PROFILES, probe_xcp
 from tsk.lib.ident_map import map_surface
 from tsk.lib.integration_profile import manifest_template as integration_manifest_template, save_and_refresh as save_integration_and_refresh
 from tsk.lib.reset_probe import probe_reset_window
@@ -58,7 +59,7 @@ PING_REPORT = ("!!!! Unexpected error. Preserve the raw logs and export the "
 READY_OPERATIONS = {"/api/can-collect", "/api/ready-capture", "/api/ready-diff"}
 NRTD_OPERATIONS = {
   "/api/extract", "/api/dataflash-dump", "/api/dataflash-diag", "/api/prog-probe",
-  "/api/read-mem", "/api/ident-map", "/api/reset-probe", "/api/level3-probe",
+  "/api/read-mem", "/api/xcp-observer", "/api/ident-map", "/api/reset-probe", "/api/level3-probe",
   "/api/sendkey-probe", "/api/preamble-probe", "/api/uds-sweep",
 }
 
@@ -363,7 +364,7 @@ probe_state = {
   "message": "",
 }
 
-# ReadMemoryByAddress (0x23) probe — direct read of the key region, no programming.
+# ReadMemoryByAddress (0x23) probe — exact memory-ID grammar plus a legacy-shape comparison.
 readmem_lock = threading.Lock()
 readmem_state = {
   "status": "idle",   # idle | running | read | denied | unreachable | failed
@@ -371,7 +372,35 @@ readmem_state = {
   "last": "",
   "panda": "",
   "eps_bus": -1,
+  "f181": "",
+  "f181_hex": "",
   "reads": [],
+  "message": "",
+}
+
+# Read/observe-only application XCP probe. Unknown targets stop after CONNECT;
+# LocalRAM F4/DAQ is exact-8965B4512000 only.
+xcp_lock = threading.Lock()
+xcp_state = {
+  "status": "idle",   # idle | running | reachable | observed | unreachable | failed
+  "count": 0,
+  "last": "",
+  "step": "",
+  "panda": "",
+  "eps_bus": -1,
+  "eps_rx_bus": -1,
+  "eps_tx": "",
+  "eps_rx": "",
+  "f181": "",
+  "f181_hex": "",
+  "profile": "actuation-discriminator",
+  "profile_description": "",
+  "xcp_request_id": "0x7f7",
+  "xcp_response_id": "0x7f8",
+  "connect_response": "",
+  "snapshot": [],
+  "frames": [],
+  "write_commands_implemented": False,
   "message": "",
 }
 
@@ -540,6 +569,7 @@ def operation_states_snapshot() -> dict:
       ("can", can_lock, can_state), ("dataflash", df_lock, df_state),
       ("sniff", sniff_lock, sniff_state), ("dataflash_diag", diag_lock, diag_state),
       ("programming", probe_lock, probe_state), ("read_memory", readmem_lock, readmem_state),
+      ("xcp_observer", xcp_lock, xcp_state),
       ("identity", ident_lock, ident_state), ("reset", reset_lock, reset_state),
       ("level3", level3_lock, level3_state), ("send_key", sendkey_lock, sendkey_state),
       ("preamble", preamble_lock, preamble_state), ("uds_sweep", sweep_lock, sweep_state),
@@ -1038,7 +1068,7 @@ def rehydrate_can_state() -> None:
         "scan_included_samples": included_samples,
       },
       message=(f"Persisted target-profile evidence: {len(analysis['sync_samples'])} sync samples, "
-               f"{included_samples} structurally eligible classic SecOC samples across {len(included)} stream(s)."),
+               f"{included_samples} cryptographically eligible protected samples across {len(included)} stream(s)."),
     )
 
 
@@ -1310,25 +1340,41 @@ def _readmem_progress(reads=None, last=None) -> None:
 
 
 def _run_readmem_mock() -> None:
-  # Laptop dry run: the expected Corolla shape — 0x23 refused at every address.
-  for i, name in enumerate(("key region (extended)", "dataflash base (extended)",
-                            "ram (control) (extended)", "key region (default)"), 1):
-    time.sleep(0.3)
+  # Laptop dry run models the exact analyzed Sienna request grammar. The historical
+  # object-15 location is intentionally excluded while ordinary DataFlash and the
+  # bootloader DID-0201 residue buffer are readable.
+  names = ("dataflash base", "object-15 / historical key region", "boot payload-key residue",
+           "d/q observation bytes", "legacy no-memory-id key region")
+  for i, name in enumerate(names, 1):
+    time.sleep(0.12)
     _readmem_progress(reads=i, last=name)
   with readmem_lock:
     readmem_state.update(
-      status="denied", count=4, last="key region (default)", panda="1.7.0-mock", eps_bus=1,
+      status="read", count=5, last=names[-1], panda="1.7.0-mock", eps_bus=1,
+      eps_rx_bus=1, eps_tx="0x7a1", eps_rx="0x7a9", elm327_param=1,
+      semantic_path="normal-harness", f181="8965B4512000",
+      f181_hex=b"8965B4512000".hex(),
       reads=[
-        {"name": "key region", "session": "extended", "address": "0xff206e14", "size": 16,
-         "ok": False, "detail": "NRC 0x33 securityAccessDenied"},
-        {"name": "dataflash base", "session": "extended", "address": "0xff200000", "size": 16,
-         "ok": False, "detail": "NRC 0x33 securityAccessDenied"},
-        {"name": "ram (control)", "session": "extended", "address": "0xfebf0000", "size": 16,
-         "ok": False, "detail": "NRC 0x31 requestOutOfRange"},
-        {"name": "key region", "session": "default", "address": "0xff206e14", "size": 16,
-         "ok": False, "detail": "NRC 0x7f serviceNotSupportedInActiveSession"},
+        {"name": "dataflash base", "session": "extended", "shape": "memory-id", "memory_id": 2,
+         "address": "0xff200000", "size": 16, "sienna_8965b4512000_policy": "firmware-readable",
+         "request_data": "1502ff20000010", "ok": True, "detail": "112233445566778899aabbccddeeff00"},
+        {"name": "object-15 / historical key region", "session": "extended", "shape": "memory-id", "memory_id": 2,
+         "address": "0xff206e14", "size": 16, "sienna_8965b4512000_policy": "firmware-excluded",
+         "request_data": "1502ff206e1410", "ok": False, "detail": "NRC 0x31 request out of range"},
+        {"name": "boot payload-key residue", "session": "extended", "shape": "memory-id", "memory_id": 1,
+         "address": "0xfebf2d08", "size": 16, "sienna_8965b4512000_policy": "firmware-readable",
+         "request_data": "1501febf2d0810", "ok": True, "detail": "00112233445566778899aabbccddeeff"},
+        {"name": "d/q observation bytes", "session": "extended", "shape": "memory-id", "memory_id": 1,
+         "address": "0xfebe6d28", "size": 4, "sienna_8965b4512000_policy": "firmware-readable",
+         "request_data": "1501febe6d2804", "ok": True, "detail": "00000000"},
+        {"name": "legacy no-memory-id key region", "session": "extended", "shape": "ordinary", "memory_id": None,
+         "address": "0xff206e14", "size": 16, "sienna_8965b4512000_policy": "different-alfid",
+         "request_data": "14ff206e1410", "ok": False, "detail": "NRC 0x13 incorrect message length or invalid format"},
       ],
-      message="0x23 was refused at every address — direct memory reads are not allowed here. (mock)",
+      message=" ".join((
+        "The firmware-derived memory-ID SID 0x23 path is live, including FEBF2D08.",
+        "Those 16 bytes are the bootloader DID-0201 payload-key input buffer. (mock)",
+      )),
     )
 
 
@@ -1338,9 +1384,11 @@ def _run_readmem_job() -> None:
     with readmem_lock:
       readmem_state.update(
         status=result.get("status", "failed"), panda=result.get("panda", ""),
-        eps_bus=result.get("eps_bus", -1), reads=result.get("reads", []),
-        count=len(result.get("reads", [])), message=result.get("message", ""),
-        **_route_metadata(result),
+        eps_bus=result.get("eps_bus", -1), eps_rx_bus=result.get("eps_rx_bus", -1),
+        eps_tx=result.get("eps_tx", ""), eps_rx=result.get("eps_rx", ""),
+        f181=result.get("f181", ""), f181_hex=result.get("f181_hex", ""),
+        reads=result.get("reads", []), count=len(result.get("reads", [])),
+        message=result.get("message", ""), **_route_metadata(result),
       )
   except NotAGNOSError:
     _run_readmem_mock()
@@ -1356,12 +1404,100 @@ def start_readmem_job() -> bool:
   if not panda_lock.acquire(blocking=False):
     return False
   with readmem_lock:
-    readmem_state.update(status="running", count=0, last="", panda="", eps_bus=-1, reads=[], message="")
+    readmem_state.update(status="running", count=0, last="", panda="", eps_bus=-1,
+                         eps_rx_bus=-1, eps_tx="", eps_rx="", f181="", f181_hex="",
+                         reads=[], message="")
   try:
     threading.Thread(target=_run_readmem_job, name="tsk_read_mem", daemon=True).start()
   except Exception:
     with readmem_lock:
       readmem_state.update(status="failed", message="Could not start the read-memory job.")
+    panda_lock.release()
+    return False
+  return True
+
+
+def _xcp_progress(step=None, last=None) -> None:
+  with xcp_lock:
+    if step is not None:
+      xcp_state["step"] = str(step)
+    if last is not None:
+      xcp_state["last"] = str(last)
+
+
+def _run_xcp_mock(profile: str) -> None:
+  selected = XCP_PROFILES[profile]
+  for step, last in (("connect", "CAN 0x7F7 CONNECT"), ("snapshot", "bounded F4 LocalRAM reads"),
+                     ("daq", f"configure {profile}"), ("capture", "capture 0x7F8 DAQ DTOs")):
+    time.sleep(0.12)
+    _xcp_progress(step=step, last=last)
+  snapshot = [{"address": f"0x{address:08x}", "value": index}
+              for index, address in enumerate(selected.addresses)]
+  sample_values = [{"address": row["address"], "value": row["value"]} for row in snapshot[:7]]
+  with xcp_lock:
+    xcp_state.update(
+      status="observed", count=2, panda="1.7.0-mock", eps_bus=1, eps_rx_bus=1,
+      eps_tx="0x7a1", eps_rx="0x7a9", elm327_param=1, semantic_path="normal-harness",
+      f181="8965B4512000", f181_hex=b"8965B4512000".hex(), profile=profile,
+      profile_description=selected.description, xcp_request_id="0x7f7", xcp_response_id="0x7f8",
+      connect_response="ff00000000000000", snapshot=snapshot,
+      frames=[{"pid": 0, "t_ms": 0.0, "raw": "0001020304050607", "values": sample_values},
+              {"pid": 0, "t_ms": 2.0, "raw": "0002030405060708", "values": sample_values}],
+      write_commands_implemented=False,
+      message=" ".join((
+        f"XCP CONNECT, bounded F4 reads, and volatile DAQ observation succeeded for {profile};",
+        "captured 2 DTO frame(s). No XCP source-memory write command was implemented. (mock)",
+      )),
+    )
+
+
+def _run_xcp_job(profile: str) -> None:
+  try:
+    result = probe_xcp(profile=profile, progress_cb=_xcp_progress)
+    with xcp_lock:
+      xcp_state.update(
+        status=result.get("status", "failed"), panda=result.get("panda", ""),
+        eps_bus=result.get("eps_bus", -1), eps_rx_bus=result.get("eps_rx_bus", -1),
+        eps_tx=result.get("eps_tx", ""), eps_rx=result.get("eps_rx", ""),
+        f181=result.get("f181", ""), f181_hex=result.get("f181_hex", ""),
+        profile=result.get("profile", profile), profile_description=result.get("profile_description", ""),
+        xcp_request_id=result.get("xcp_request_id", "0x7f7"),
+        xcp_response_id=result.get("xcp_response_id", "0x7f8"),
+        connect_response=result.get("connect_response", ""), snapshot=result.get("snapshot", []),
+        frames=result.get("frames", []), count=len(result.get("frames", [])),
+        write_commands_implemented=bool(result.get("write_commands_implemented", False)),
+        message=result.get("message", ""),
+        **_route_metadata(result),
+      )
+      if result.get("cleanup_error"):
+        xcp_state["cleanup_error"] = result["cleanup_error"]
+  except NotAGNOSError:
+    _run_xcp_mock(profile)
+  except Exception as e:
+    with xcp_lock:
+      xcp_state.update(status="failed", message=str(e))
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_xcp_job(profile: str = "actuation-discriminator") -> bool:
+  if profile not in XCP_PROFILES:
+    return False
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with xcp_lock:
+    xcp_state.update(
+      status="running", count=0, last="", step="", panda="", eps_bus=-1, eps_rx_bus=-1,
+      eps_tx="", eps_rx="", f181="", f181_hex="", profile=profile,
+      profile_description=XCP_PROFILES[profile].description, connect_response="", snapshot=[], frames=[],
+      cleanup_error="", write_commands_implemented=False, message="",
+    )
+  try:
+    threading.Thread(target=_run_xcp_job, args=(profile,), name="tsk_xcp_observer", daemon=True).start()
+  except Exception:
+    with xcp_lock:
+      xcp_state.update(status="failed", message="Could not start the XCP observer job.")
     panda_lock.release()
     return False
   return True
@@ -2139,7 +2275,7 @@ class TSKWebHandler(BaseHTTPRequestHandler):
             "profile_discovery": {"streams": oracle_analysis.get("streams", []),
                                   "can_inventory": oracle_analysis.get("can_inventory", [])},
             "message": (f"Collect target-profile CAN evidence before extraction. Current usable oracle: "
-                        f"{sync_count} sync + {protected_count} known/structurally discovered classic SecOC samples; "
+                        f"{sync_count} sync + {protected_count} known/discovered protected samples; "
                         f"need at least {MIN_SYNC_MATCHES} sync and {MATCH_FLOOR} total samples. "
                         "No programming request was sent. Current openpilot IDs are compatibility evidence, not an extraction prerequisite."),
           }, status=HTTPStatus.CONFLICT)
@@ -2485,6 +2621,27 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       self._send_json({"ok": True, "status": "running"})
       return
 
+    if path == "/api/xcp-observer":
+      request = self._read_json_body()
+      profile = str(request.get("profile", "actuation-discriminator"))
+      if profile not in XCP_PROFILES:
+        self._send_json({
+          "ok": False,
+          "status": "invalid_profile",
+          "message": f"Unknown XCP observation profile: {profile}",
+          "profiles": sorted(XCP_PROFILES),
+        }, status=HTTPStatus.BAD_REQUEST)
+        return
+      if not start_xcp_job(profile):
+        self._send_json({
+          "ok": False,
+          "status": "running",
+          "message": "A panda operation is already in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running", "profile": profile})
+      return
+
     if path == "/api/ident-map":
       if not start_ident_job():
         self._send_json({
@@ -2681,6 +2838,12 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     if path == "/api/read-mem-status":
       with readmem_lock:
         payload = dict(readmem_state)
+      self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/xcp-observer-status":
+      with xcp_lock:
+        payload = dict(xcp_state)
       self._send_json(payload, send_body=send_body)
       return
 
