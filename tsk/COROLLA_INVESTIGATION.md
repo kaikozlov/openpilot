@@ -139,12 +139,27 @@ old operational assumptions without rewriting the chronology that produced them.
    The reset-ending body is still not vehicle-confirmed, so the derivative remains behind
    an explicit experimental checkbox.
 
-The unresolved Corolla question is therefore narrower than the July document originally
-made it: **what exactly happens to `8965F1208000` across the PROGRAMMING transition on the
-correct physical Panda route?** The Sienna firmware findings explain how the old
-instrumentation could misclassify that transition; they do not prove the Corolla shares
-Sienna's session policy, reset sequence, SecurityAccess secrets, payload gate, or key
-storage.
+9. **2026-08-16 correction: programming reappearance is not enough to authorize the
+   payload geometry.** The historical Sienna flow treated `FEBF0000 + 0x1000` as a
+   transferable RAM window once the bootloader could be reached. The authenticated path
+   actually couples RequestDownload address/size, TransferData length, routine `0x10F0`
+   verification address/size, and the callback embedded in the post-link payload package.
+   Current TSKM resolves that contract by exact F181 and refuses the DataFlash/RAM payload
+   paths before PROGRAMMING on an unknown calibration. Exact trusted targets are
+   `8965B4209000`, `8965B4233100`, `8965B4509100`, and independently analyzed
+   `8965B4512000`, all at `FEBF0000/0x1000` with callback `FEBF0000`. A newer-Toyota
+   external report of code linked/deployed at `FEBE0000` is retained only as a linker-VMA
+   observation; it does **not** establish authenticated RequestDownload or callback
+   geometry. The programming probe remains the correct way to characterize an unknown
+   handoff without promoting it into executable-payload support.
+
+The unresolved Corolla question is therefore split cleanly: **what exactly happens to
+`8965F1208000` across the PROGRAMMING transition on the correct physical Panda route, and
+if a bootloader does reappear, what authenticated RAM-exec geometry does that exact
+calibration actually accept?** The Sienna firmware findings explain how the old
+instrumentation could misclassify the transition; they do not prove the Corolla shares
+Sienna's session policy, reset sequence, SecurityAccess secrets, `FEBF0000` payload gate,
+callback geometry, or key storage.
 
 ---
 

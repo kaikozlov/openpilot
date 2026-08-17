@@ -111,6 +111,43 @@ handoff, record `panda.health()` and `panda.can_health(bus)`, and require the di
 endpoint to reappear on that route. A response timeout alone is not classified as
 failure.
 
+## Authenticated RAM-exec geometry is a separate gate
+
+A successful PROGRAMMING handoff does **not** establish where that bootloader accepts an
+authenticated payload. The executable path couples the RequestDownload destination and
+length, the bytes transferred, routine `0x10F0`'s verification address/length, and the
+callback pointer embedded in the authenticated 4 KiB package. TSK now represents that
+contract explicitly in `tsk/lib/ram_exec_geometry.py` and resolves it by **exact F181**.
+
+The currently trusted geometries are deliberately narrow:
+
+| exact F181 | load/verify range | callback | evidence scope |
+|---|---:|---:|---|
+| `8965B4209000` | `FEBF0000 + 0x1000` | `FEBF0000` | historical field-supported Willem/TSKM transfer |
+| `8965B4233100` | `FEBF0000 + 0x1000` | `FEBF0000` | historical field-supported Willem/TSKM transfer |
+| `8965B4509100` | `FEBF0000 + 0x1000` | `FEBF0000` | historical field-supported Willem/TSKM transfer |
+| `8965B4512000` | `FEBF0000 + 0x1000` | `FEBF0000` | firmware-verified authenticated download/`0x10F0`/callback geometry |
+
+There is **no prefix rule** for `8965B4...`, and programming reappearance alone cannot
+add a target to this table. A newer-Toyota external report that linked/deployed shellcode
+at `FEBE0000` is retained only as a linker-VMA observation: authenticated RequestDownload
+base/size and callback geometry remain unknown, so `FEBE0000` is not an executable TSK
+profile.
+
+The committed standard, RAM-key, and auto-reset payload fixtures are themselves bound to
+`FEBF0000/0x1000` with callback `FEBF0000`; an otherwise well-evidenced non-default target
+still cannot reuse those binaries if its package geometry differs. The DataFlash dumper
+reads F181 and resolves/validates this contract **before PROGRAMMING, SecurityAccess, DID
+writes, RequestDownload, or payload transfer**. `/api/dataflash-dump` also refuses to
+start unless the already identified F181 has a trusted geometry. The instrumented
+DataFlash diagnostic stops after identity on an unknown target; use the separate
+programming probe when handoff behavior itself is the question.
+
+The legacy RAM key-table extractor is stricter still. `8965B4512000` has valid RAM-exec
+geometry but does not have the older `FEBE6E34` CPU-visible key table, so
+`extractor.hack()` accepts only the three historical field-supported F181s above and
+refuses every other calibration before PROGRAMMING.
+
 ## SecurityAccess domains are separate
 
 Do not use “the Sienna secret” without naming the domain. Static analysis recovered two
@@ -298,8 +335,9 @@ replay/future-sync/tag-guess trials automatically; those remain isolated-bench e
    subfunctions remain separated from observation-oriented work.
 5. **Programming handoff probe** — if key recovery requires it, perform one
    route-preserving handoff and inspect endpoint reappearance plus Panda/CAN health.
-6. **Transfer hypothesis** — only after the preceding evidence justifies it, run an
-   applicable bootloader/payload or DataFlash path.
+6. **Authenticated RAM-exec geometry** — bind the exact F181 to independently evidenced
+   RequestDownload/`0x10F0`/callback geometry. A successful handoff is not enough; only
+   after this gate passes may an applicable bootloader/payload or DataFlash path run.
 7. **Cryptographic key recovery** — verify the candidate against the discovered target
    streams and persist it privately; do not install it yet.
 8. **Target integration review** — fill every openpilot/DBC/safety/control field with an
@@ -316,7 +354,9 @@ replay/future-sync/tag-guess trials automatically; those remain isolated-bench e
 
 ## DataFlash payload variants
 
-The standard 32 KiB DataFlash payload remains the default:
+The standard 32 KiB DataFlash payload remains the default. It is **not** a generic
+cross-calibration shellcode blob: the authenticated package is tied to the verified
+`FEBF0000/0x1000` geometry and embedded callback described above.
 
 ```text
 SHA-256 d48988366b5e6d2ddd7438caca5e6f6f02daba9b650263c323a2ffd770a06e34

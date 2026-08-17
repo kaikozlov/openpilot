@@ -55,6 +55,7 @@ from tsk.lib.diagnostic_route import SIENNA_FUNCTIONAL_ADDR, discover_eps_route_
 from tsk.lib.env import is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.dump_dataflash import ADDR, DUMP_START, KNOWN_KEY_OFFSET
+from tsk.lib.ram_exec_geometry import ANALYZED_8965B4512000_RAM_EXEC
 from tsk.lib.dump_diag import CANDIDATE_BUSES
 
 SHORT_TIMEOUT = 1.0
@@ -76,8 +77,11 @@ COMM_CONTROL_DISABLE_TX = b"\x28\x01\x01"   # ENABLE_RX_DISABLE_TX, NORMAL messa
 # Known 8965B4x authenticated payload surface, probed by refusal code only — no writes or transfers.
 EXPLOIT_DIDS = [(0x201, "did_201_key"), (0x202, "did_202_iv"), (0x203, "did_203_state")]
 VERIFY_ROUTINE = 0x10F0
-PAYLOAD_RAM_ADDR = 0xFEBF0000
-PAYLOAD_RAM_SIZE = 0x1000
+# Observation-only comparison point. These values are verified authenticated geometry on
+# 8965B4512000, but a refusal/acceptance while probing another F181 does not promote that
+# target into the trusted RAM-exec geometry registry.
+PAYLOAD_RAM_ADDR = ANALYZED_8965B4512000_RAM_EXEC.load_addr
+PAYLOAD_RAM_SIZE = ANALYZED_8965B4512000_RAM_EXEC.size
 
 KEY_REGION = DUMP_START + KNOWN_KEY_OFFSET   # 0xFF206E14
 READ_TARGETS = [

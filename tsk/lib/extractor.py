@@ -8,6 +8,14 @@ from tsk.lib.diagnostic_route import (
 )
 from tsk.lib.env import is_agnos, PAYLOAD_PATH
 from tsk.lib.programming import ProgrammingHandoffError, enter_programming_bootloader, uds_client as make_uds_client
+from tsk.lib.ram_exec_geometry import (
+  COMMITTED_PAYLOAD_CONTRACT,
+  RamExecGeometryError,
+  build_request_download_data,
+  build_verify_routine_data,
+  resolve_ram_exec_geometry,
+  transfer_chunks,
+)
 
 
 class NotAGNOSError(Exception):
@@ -169,12 +177,29 @@ class TSKExtractor:
       raise RetryError("Car not detected") from e
 
     known_application = app_version in cls.APPLICATION_VERSIONS
+    try:
+      ram_geometry = resolve_ram_exec_geometry(bytes(app_version))
+      COMMITTED_PAYLOAD_CONTRACT.validate_geometry(ram_geometry)
+    except RamExecGeometryError as e:
+      cls._last_extraction_metadata.update(
+        application_version=bytes(app_version).hex(), known_application=known_application,
+        ram_exec_geometry={"status": "unverified", "error": str(e)},
+      )
+      raise RetryError(
+        "Refusing RAM extraction before PROGRAMMING: " +
+        f"{e}. A diagnostic handoff or linker VMA is not authenticated RAM-exec evidence."
+      ) from e
+
     cls._last_extraction_metadata.update(
       application_version=bytes(app_version).hex(), known_application=known_application,
+      ram_exec_geometry={"status": "verified", **ram_geometry.public_dict()},
     )
     if not known_application:
-      print("Application version is outside the known Sienna/RAV4 set. " +
-            f"Continuing the explicit Sienna-transfer hypothesis: {app_version!r}")
+      raise RetryError(
+        "Authenticated RAM-exec geometry is known for this EPS, but the legacy RAM key-table " +
+        "layout used by extractor.hack() is not verified for this exact F181. Use the " +
+        "calibration-appropriate recovery path instead of projecting the older FEBE6E34 table."
+      )
 
     # The first application 10 02 is asynchronous on the analyzed Sienna: it may emit
     # NRC 0x78 and reset before a final 50 02. Preserve the exact physical route and
@@ -208,13 +233,11 @@ class TSKExtractor:
       raise RetryError(f"Can't read bootloader version ({format_version_for_error_display(app_version)})") from e
     print(f" - APPLICATION_SOFTWARE_IDENTIFICATION (bootloader) {str(bl_version)}")
 
-    try:
-      if bl_version != cls.APPLICATION_VERSIONS[app_version]:
-        print("Bootloader version differs from the prior fixture. Continuing the explicit " +
-              f"Sienna-transfer hypothesis: {bl_version!r}")
-    except KeyError as e: # In case app_version is not found at all
-      print("No prior bootloader fixture exists for this application. Continuing the explicit " +
-            f"Sienna-transfer hypothesis: {e}")
+    if bl_version != cls.APPLICATION_VERSIONS[app_version]:
+      raise RetryError(
+        "Bootloader identity differs from the field-supported fixture for this application; " +
+        "refusing to reuse its authenticated payload contract."
+      )
 
     # Go back to programming session
     try:
@@ -257,42 +280,26 @@ class TSKExtractor:
       print(" - Write data by identifier 0x202", cls.DID_202_IV.hex())
       uds_client.write_data_by_identifier(0x202, cls.DID_202_IV)
 
-      # Request download to RAM
-      data = b"\x01"  # [1] Format
-      data += b"\x46"  # [2] 4 size bytes, 6 address bytes
-      data += b"\x01"  # [3] memoryIdentifier
-      data += b"\x00"  # [4]
-      data += struct.pack('!I', 0xfebf0000)  # [5] Address
-      data += struct.pack('!I', 0x1000)  # [9] Size
+      # RequestDownload, transferred length, 0x10F0 verification, and the payload's
+      # embedded callback are one evidence-bound geometry contract.
+      data = build_request_download_data(ram_geometry)
 
       print("\nUpload payload...")
 
       print(" - Request download")
       uds_client._uds_request(SERVICE_TYPE.REQUEST_DOWNLOAD, data=data)
 
-      # Upload payload
       payload = open(PAYLOAD_PATH, "rb").read()
-      assert len(payload) == 0x1000
-      chunk_size = 0x400
-      for i in range(len(payload) // chunk_size):
-        print(f" - Transfer data {i}")
-        uds_client.transfer_data(i + 1, payload[i * chunk_size:(i + 1) * chunk_size])
+      COMMITTED_PAYLOAD_CONTRACT.validate_geometry(ram_geometry)
+      chunks = transfer_chunks(payload, ram_geometry)
+      for i, chunk in enumerate(chunks, start=1):
+        print(f" - Transfer data {i - 1}")
+        uds_client.transfer_data(i, chunk)
 
       uds_client.request_transfer_exit()
 
       print("\nVerify payload...")
-
-      # Routine control 0x10f0
-      # [0] 0x31 (routine control)
-      # [1] 0x01 (start)
-      # [2] 0x10f0 (routine identifier)
-      # [4] 0x45 (format, 4 size bytes, 5 address bytes)
-      # [5] 0x0
-      # [6] mem addr
-      # [10] mem addr
-      data = b"\x45\x00"
-      data += struct.pack('!I', 0xfebf0000)
-      data += struct.pack('!I', 0x1000)
+      data = build_verify_routine_data(ram_geometry)
 
       uds_client.routine_control(ROUTINE_CONTROL_TYPE.START, 0x10f0, data)
       print(" - Routine control 0x10f0 OK!")

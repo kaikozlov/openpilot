@@ -82,7 +82,10 @@ class TestServer(unittest.TestCase):
     self.assertEqual(projected(captured)["recovery"]["stage"], "programming")
 
     handoff = {**captured, "programming": {"status": "entered"}}
-    self.assertEqual(projected(handoff)["recovery"]["stage"], "dataflash")
+    handoff_projection = projected(handoff)
+    self.assertEqual(handoff_projection["recovery"]["stage"], "ram_geometry")
+    self.assertEqual(handoff_projection["recovery"]["next_action"]["action"], "research")
+    self.assertFalse(handoff_projection["vehicle"]["ram_exec_geometry"]["ready"])
 
     known = {**captured, "identity": {
       **mapped["identity"],
@@ -97,7 +100,7 @@ class TestServer(unittest.TestCase):
     self.assertEqual(blocked_projection["recovery"]["stage"], "programming")
     self.assertEqual(blocked_projection["recovery"]["next_action"]["action"], "research")
 
-    dumped = {**handoff, "dataflash": {
+    dumped = {**known, "dataflash": {
       "status": "complete", "ready": True, "bytes": 32768, "total": 32768,
     }}
     self.assertEqual(projected(dumped)["recovery"]["stage"], "verify")
@@ -161,6 +164,32 @@ class TestServer(unittest.TestCase):
     self.assertIn("/api/stationary-verify", stationary)
     self.assertIn("zero-actuation", stationary)
     self.assertIn("does not transmit steering commands", stationary)
+
+  def test_dataflash_endpoint_requires_verified_ram_exec_geometry(self):
+    server = TSKWebServer(("127.0.0.1", 0), TSKWebHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+      gate = {
+        "ready": False, "f181": "8965F1208000", "geometry": None,
+        "message": "No authenticated RAM-exec geometry is verified for this exact F181.",
+      }
+      with patch("tsk.web.server.ram_exec_geometry_status", return_value=gate), \
+           patch("tsk.web.server.start_dataflash_job") as start, \
+           patch("tsk.web.server.record_operation"):
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        connection.request("POST", "/api/dataflash-dump", body=b"{}", headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+      self.assertEqual(response.status, 409)
+      self.assertEqual(body["status"], "ram_exec_geometry_required")
+      self.assertIn("No programming", body["message"])
+      start.assert_not_called()
+    finally:
+      server.shutdown()
+      server.server_close()
+      thread.join(timeout=3)
 
   def test_operation_vehicle_state_annotations(self):
     self.assertIn("READY", expected_vehicle_state("/api/ready-capture"))
