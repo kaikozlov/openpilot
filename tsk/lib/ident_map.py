@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""EPS identity block + service-surface map — read-only characterization of an unknown EPS.
+"""EPS identity block + observation-oriented service map for an unknown EPS.
 
-Two purposes in one read-only pass: the full identification block (part number, software
+Two purposes in one low-consequence pass: the full identification block (part number, software
 and hardware versions, supplier, VIN) names the exact variant for sourcing a bench module,
 and the service map shows which UDS services this firmware answers (supported vs
 serviceNotSupported) — e.g. whether ReadMemoryByAddress or security access is even present.
 
-Deliberately read-only. The service probe only touches services that are safe to send even
-if the EPS accepts them: session control, read-data-by-id, read-memory, security seed
-request, tester-present, read-DTC. The destructive services — ECU reset, write-DID, routine
-control, download/upload, clear-DTC — are NOT probed here (the reset has its own dedicated
-probe). Off-device raises NotAGNOSError; the server mocks it.
+Deliberately observation-oriented. Session control and a SecurityAccess seed request can
+change transient diagnostic state, but there is no counted SEND_KEY, persistent write,
+reset, RoutineControl start, download/upload, or clear-DTC operation. Off-device raises
+NotAGNOSError; the server mocks it.
 """
 import subprocess
 import time

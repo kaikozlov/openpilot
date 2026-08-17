@@ -144,14 +144,25 @@ old operational assumptions without rewriting the chronology that produced them.
    transferable RAM window once the bootloader could be reached. The authenticated path
    actually couples RequestDownload address/size, TransferData length, routine `0x10F0`
    verification address/size, and the callback embedded in the post-link payload package.
-   Current TSKM resolves that contract by exact F181 and refuses the DataFlash/RAM payload
-   paths before PROGRAMMING on an unknown calibration. Exact trusted targets are
+   Current TSKM resolves that contract by exact F181 and refuses **payload execution** on
+   an unknown calibration. The production dump/extractor paths stop before PROGRAMMING;
+   the instrumented diagnostic may still observe PROGRAMMING, bootloader identity, and a
+   non-counted seed before reaching the separate SEND_KEY/payload boundaries. Exact trusted targets are
    `8965B4209000`, `8965B4233100`, `8965B4509100`, and independently analyzed
    `8965B4512000`, all at `FEBF0000/0x1000` with callback `FEBF0000`. A newer-Toyota
    external report of code linked/deployed at `FEBE0000` is retained only as a linker-VMA
    observation; it does **not** establish authenticated RequestDownload or callback
    geometry. The programming probe remains the correct way to characterize an unknown
    handoff without promoting it into executable-payload support.
+
+10. **2026-08-16 risk-boundary correction: unknown calibration now limits interpretation,
+    not low-cost observation.** Bounded SID `0x23` reads already followed this rule. The XCP
+    observer now does too: after a positive CONNECT, bounded F4 reads and temporary DAQ
+    configuration may run on an unknown F181, while the `8965B4512000` profile labels remain
+    only candidate-address annotations. The DataFlash diagnostic similarly continues through
+    PROGRAMMING, bootloader DIDs, and REQUEST_SEED. A cross-calibration bootloader SEND_KEY
+    remains an explicit one-attempt opt-in, and unknown authenticated RAM geometry still blocks
+    WDBI, RequestDownload/TransferData, verification start, and payload execution.
 
 The unresolved Corolla question is therefore split cleanly: **what exactly happens to
 `8965F1208000` across the PROGRAMMING transition on the correct physical Panda route, and
@@ -1639,7 +1650,7 @@ structure rather than relying on the model to remember.
 | `/api/dataflash-diag` | POST | instrumented dump with per-step NRC |
 | `/api/prog-probe` | POST | programming entry matrix, security level sweep, did-it-take, all-bus-listen |
 | `/api/read-mem` | POST | current: exact ALFID-`0x15` memory-ID reads + one ordinary ALFID-`0x14` comparison; historical sessions used only `0x14` |
-| `/api/xcp-observer` | POST | 0x7F7/0x7F8 CONNECT reachability; exact-8965B4512000-only F4/volatile DAQ observation |
+| `/api/xcp-observer` | POST | 0x7F7/0x7F8 CONNECT + bounded F4/volatile DAQ observation; Sienna address semantics are exact-F181-only |
 | `/api/ident-map` | POST | identity block + read-only service map |
 | `/api/reset-probe` | POST | reset then hammer PROGRAMMING |
 | `/api/level3-probe` | POST | `0x03` seed isolation, four primer variants |

@@ -65,7 +65,7 @@
             <div class="vehicle-strip" id="vehicleStrip">
               <div class="vehicle-primary">
                 <div class="vehicle-name" id="vehicleName">EPS not identified</div>
-                <div class="vehicle-detail" id="vehicleDetail">Run the read-only identity pass before recovery.</div>
+                <div class="vehicle-detail" id="vehicleDetail">Run the low-consequence identity observation pass before recovery.</div>
               </div>
               <div class="route-pills" id="routePills"></div>
             </div>
@@ -143,13 +143,13 @@
               <div class="tool-grid">
                 <a class="tool-card" href="/ident-map.html">
                   <h4 class="tool-card-title">EPS & service map</h4>
-                  <p class="tool-card-description">Read F181, route identity, and the safe UDS service surface.</p>
-                  <div class="tool-tags"><span class="tag readonly">Read only</span><span class="tag">Not Ready</span></div>
+                  <p class="tool-card-description">Read F181, route identity, and the low-consequence UDS service surface, including non-counted seed requests.</p>
+                  <div class="tool-tags"><span class="tag readonly">Observe</span><span class="tag">Not Ready</span></div>
                 </a>
                 <a class="tool-card" href="/xcp-observer.html">
                   <h4 class="tool-card-title">XCP read/DAQ observer</h4>
-                  <p class="tool-card-description">Probe 0x7F7/0x7F8 reachability and, on exact 8965B4512000, observe bounded LocalRAM state through F4 and DAQ.</p>
-                  <div class="tool-tags"><span class="tag readonly">Observe only</span><span class="tag">Not Ready</span></div>
+                  <p class="tool-card-description">Probe 0x7F7/0x7F8 reachability, bounded LocalRAM F4 reads, and temporary DAQ; Sienna-derived address semantics are claimed only on exact 8965B4512000.</p>
+                  <div class="tool-tags"><span class="tag readonly">Bounded reads</span><span class="tag experimental">Volatile DAQ</span><span class="tag">Not Ready</span></div>
                 </a>
                 <a class="tool-card" href="/can-sniff.html">
                   <h4 class="tool-card-title">Passive CAN inventory</h4>

@@ -23,7 +23,7 @@
       <section class="probe-heading">
         <p class="probe-breadcrumb">Research · Transfer experiments</p>
         <h1 class="probe-title">Instrumented DataFlash path</h1>
-        <p class="probe-description">Inspect the DataFlash transfer path step by step. Unknown F181s stop after identity/geometry classification; only an exact target with verified authenticated RAM-exec geometry can proceed into PROGRAMMING and payload execution.</p>
+        <p class="probe-description">Inspect the DataFlash transfer path step by step. Unknown F181s may proceed through PROGRAMMING, bootloader identity, and a non-counted seed request; counted SEND_KEY and executable payload operations remain separate boundaries.</p>
         <div class="probe-badges"><span class="probe-badge blue">NOT READY</span><span class="probe-badge amber">DISRUPTIVE</span><span class="probe-badge amber">EXPERIMENTAL</span></div>
       </section>
 
@@ -33,10 +33,10 @@
             <div class="probe-card-body">
               <p class="probe-card-kicker">Operation</p>
               <h2 class="probe-card-title">Instrumented transfer</h2>
-              <p class="probe-card-copy">This is the diagnostic version of the dump path. It can upload and trigger the real payload only after the exact F181 resolves to a verified RequestDownload/0x10F0/callback contract. Use the separate programming probe to characterize an unknown bootloader handoff.</p>
-              <ul class="probe-meta-list"><li class="probe-meta-row"><span class="probe-meta-label">Vehicle state</span><span class="probe-meta-value">Not Ready to Drive</span></li><li class="probe-meta-row"><span class="probe-meta-label">Purpose</span><span class="probe-meta-value">Failure localization</span></li><li class="probe-meta-row"><span class="probe-meta-label">Can trigger payload</span><span class="probe-meta-value">Yes</span></li></ul>
+              <p class="probe-card-copy">Observation continues across unknown calibrations while the operation is low-cost: identity, session transitions, bootloader reappearance, bootloader DIDs, and REQUEST_SEED. A wrong bootloader SEND_KEY is counted, so cross-calibration key reuse is opt-in. WDBI/download/payload execution still requires verified RAM-exec geometry.</p>
+              <ul class="probe-meta-list"><li class="probe-meta-row"><span class="probe-meta-label">Vehicle state</span><span class="probe-meta-value">Not Ready to Drive</span></li><li class="probe-meta-row"><span class="probe-meta-label">Automatic unknown-target work</span><span class="probe-meta-value">Through REQUEST_SEED</span></li><li class="probe-meta-row"><span class="probe-meta-label">Payload execution</span><span class="probe-meta-value">Verified geometry only</span></li></ul>
               <div class="probe-subtle-divider"></div>
-              <div class="probe-actions"><button class="run-btn warning" id="runBtn" type="button">Run instrumented path</button></div>
+              <div class="probe-actions"><label class="probe-option" for="armBootKey"><input type="checkbox" id="armBootKey"><span><strong>Try the known 8965B4x bootloader key on an unknown calibration</strong><br>This spends one counted SEND_KEY attempt. Even if accepted, unknown RAM-exec geometry still blocks WDBI and payload execution.</span></label><button class="run-btn warning" id="runBtn" type="button">Run instrumented path</button></div>
             </div>
           </section>
 
@@ -65,6 +65,7 @@
     <script>
 const terminal = document.getElementById("terminal");
       const runBtn = document.getElementById("runBtn");
+      const armBootKey = document.getElementById("armBootKey");
 
       function termWrite(text, className) {
         const span = document.createElement("span");
@@ -110,6 +111,19 @@ const terminal = document.getElementById("terminal");
           }
         }
 
+        if ((s.bootloader_identity || []).length) {
+          termWrite("");
+          termWrite("Bootloader identity:");
+          for (const it of s.bootloader_identity) {
+            const label = pad(it.did + " " + it.name, 24);
+            termWrite("  " + label + ": " + (it.ascii || it.hex || "?"), it.hex ? "" : "warn");
+          }
+        }
+        if (s.security_seed) termWrite("Bootloader seed: " + s.security_seed);
+        if (s.cross_calibration_send_key) {
+          termWrite("Cross-calibration SEND_KEY: " + (s.send_key_armed ? "ARMED" : "not armed"), s.send_key_armed ? "warn" : "dim");
+        }
+
         termWrite("");
         termWrite("Steps:");
         for (const st of (s.steps || [])) {
@@ -144,9 +158,13 @@ const terminal = document.getElementById("terminal");
           termWrite("A diagnostic run is already in progress — attaching...");
         } else {
           termWrite("Starting DataFlash diagnostics.");
-          termWrite("The car will freak out — don't worry.", "warn");
+          termWrite("PROGRAMMING may reset the EPS. Unknown targets stop before counted SEND_KEY unless explicitly armed, and before payload writes unless RAM-exec geometry is verified.", "warn");
           try {
-            const r = await fetch("/api/dataflash-diag", { method: "POST", cache: "no-store" });
+            const r = await fetch("/api/dataflash-diag", {
+              method: "POST", cache: "no-store",
+              headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({allow_cross_calibration_send_key: armBootKey.checked}),
+            });
             const started = await r.json();
             if (!started.ok && started.status !== "running") {
               termWrite(started.message || "Could not start diagnostics.", "err");
@@ -178,9 +196,11 @@ const terminal = document.getElementById("terminal");
       runBtn.addEventListener("click", async () => {
         TSKProbe.clearTerminal();
         TSKProbe.runButton(runBtn, true, "Running path…");
+        armBootKey.disabled = true;
         try {
           await runDiag();
         } finally {
+          armBootKey.disabled = false;
           TSKProbe.runButton(runBtn, false);
         }
       });

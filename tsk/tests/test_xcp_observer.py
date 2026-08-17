@@ -21,10 +21,11 @@ from tsk.lib.xcp_observer import (
 
 
 class FakePanda:
-  def __init__(self):
+  def __init__(self, *, reject_f4_addresses=()):
     self.pending = []
     self.sent = []
     self.running = False
+    self.reject_f4_addresses = set(reject_f4_addresses)
 
   def get_version(self):
     return b"fake-panda"
@@ -36,8 +37,11 @@ class FakePanda:
     if opcode == 0xF4:
       length = data[1]
       source = int.from_bytes(data[4:8], "little")
-      payload = bytes(((source + i) & 0xFF) for i in range(length))
-      response = (b"\xFF" + payload).ljust(8, b"\x00")
+      if source in self.reject_f4_addresses:
+        response = b"\xFE\x22" + b"\x00" * 6
+      else:
+        payload = bytes(((source + i) & 0xFF) for i in range(length))
+        response = (b"\xFF" + payload).ljust(8, b"\x00")
     elif opcode == 0xDE and data[1] == 1:
       self.running = True
       response = b"\xFF\x00" + b"\x00" * 6
@@ -100,7 +104,7 @@ class TestXcpObserver(unittest.TestCase):
   @patch("tsk.lib.xcp_observer.discover_eps_route_with_routing")
   @patch("tsk.lib.xcp_observer.TSKExtractor._connect_panda")
   @patch("tsk.lib.xcp_observer.is_agnos", return_value=True)
-  def test_unknown_f181_stops_after_connect(self, _agnos, connect, discover, _configure, _run, _sleep):
+  def test_unknown_f181_runs_bounded_f4_and_volatile_daq_without_claiming_sienna_semantics(self, _agnos, connect, discover, _configure, _run, _sleep):
     panda = FakePanda()
     connect.return_value = panda
     discover.return_value = {
@@ -108,11 +112,46 @@ class TestXcpObserver(unittest.TestCase):
       "elm327_param": 1, "semantic_path": "normal-harness",
       "identity": b"8965F1208000".hex(),
     }
-    result = probe_xcp()
-    self.assertEqual(result["status"], "reachable")
-    self.assertEqual([row[1][0] for row in panda.sent], [0xFF])
-    self.assertEqual(result["snapshot"], [])
-    self.assertEqual(result["frames"], [])
+    result = probe_xcp(capture_seconds=0.001, max_frames=3)
+    self.assertEqual(result["status"], "observed")
+    self.assertFalse(result["profile_semantics_verified"])
+    self.assertIn("raw observation candidates", result["message"])
+    self.assertEqual(len(result["snapshot"]), 7)
+    self.assertTrue(all(row["ok"] for row in result["snapshot"]))
+    self.assertGreaterEqual(len(result["frames"]), 1)
+    opcodes = [row[1][0] for row in panda.sent]
+    self.assertEqual(opcodes[0], 0xFF)
+    self.assertEqual(opcodes.count(0xF4), 7)
+    self.assertIn(0xE3, opcodes)
+    self.assertIn(0xE2, opcodes)
+    self.assertIn(0xE1, opcodes)
+    self.assertIn(0xE0, opcodes)
+    self.assertEqual(opcodes.count(0xDE), 2)
+    self.assertTrue({0xF0, 0xEC, 0xE4, 0xF5, 0xF6}.isdisjoint(opcodes))
+    self.assertFalse(result["source_memory_writes_implemented"])
+
+  @patch("tsk.lib.xcp_observer.time.sleep", return_value=None)
+  @patch("tsk.lib.xcp_observer.subprocess.run")
+  @patch("tsk.lib.xcp_observer.configure_elm327")
+  @patch("tsk.lib.xcp_observer.discover_eps_route_with_routing")
+  @patch("tsk.lib.xcp_observer.TSKExtractor._connect_panda")
+  @patch("tsk.lib.xcp_observer.is_agnos", return_value=True)
+  def test_unknown_target_keeps_observing_other_addresses_when_one_f4_read_is_rejected(self, _agnos, connect, discover, _configure, _run, _sleep):
+    rejected = PROFILES["actuation-discriminator"].addresses[0]
+    panda = FakePanda(reject_f4_addresses={rejected})
+    connect.return_value = panda
+    discover.return_value = {
+      "tx": 0x7A1, "rx": 0x7A9, "tx_bus": 1, "rx_bus": 1,
+      "elm327_param": 1, "semantic_path": "normal-harness",
+      "identity": b"8965F1208000".hex(),
+    }
+    result = probe_xcp(capture_seconds=0.001, max_frames=2)
+    self.assertEqual(result["status"], "observed")
+    self.assertEqual(sum(row["ok"] for row in result["snapshot"]), 6)
+    failed = [row for row in result["snapshot"] if not row["ok"]]
+    self.assertEqual(failed[0]["address"], f"0x{rejected:08x}")
+    self.assertIn("XCP error 0x22", failed[0]["error"])
+    self.assertGreaterEqual(len(result["frames"]), 1)
 
   @patch("tsk.lib.xcp_observer.time.sleep", return_value=None)
   @patch("tsk.lib.xcp_observer.subprocess.run")
@@ -130,6 +169,7 @@ class TestXcpObserver(unittest.TestCase):
     }
     result = probe_xcp(capture_seconds=0.001, max_frames=3)
     self.assertEqual(result["status"], "observed")
+    self.assertTrue(result["profile_semantics_verified"])
     self.assertEqual(len(result["snapshot"]), 7)
     self.assertGreaterEqual(len(result["frames"]), 1)
     opcodes = [row[1][0] for row in panda.sent]

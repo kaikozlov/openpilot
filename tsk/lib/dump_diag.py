@@ -3,11 +3,13 @@
 everything — panda info, EPS identity DIDs, every UDS response and negative-response
 code (NRC), and a full traceback on the failing step.
 
-For triaging the payload path on an EPS whose exact F181 already has verified authenticated
-RAM-exec geometry. Same UDS sequence, payload, and timing as dump_dataflash.dump(); the
-only difference is per-step capture instead of collapse-to-RetryError. Unknown F181s stop
-after identity collection: this diagnostic no longer turns a successful PROGRAMMING handoff
-or a candidate RAM address into authorization to upload an authenticated payload.
+For triaging the payload path on known and unknown EPS calibrations. The diagnostic is
+intentionally permissive while it is only observing protocol behavior: it identifies the
+application, attempts the reversible PROGRAMMING handoff, records bootloader identity, and
+requests a SecurityAccess seed even when the payload geometry is unknown. A cross-calibration
+SEND_KEY is a counted attempt and therefore requires explicit arming; WDBI/RequestDownload/
+payload execution remain blocked unless the exact F181 has verified authenticated RAM-exec
+geometry.
 
 The identity sweep also answers the standing "capture the EPS app-string every run"
 item — the 8965B... part string that names the EPS variant.
@@ -33,6 +35,7 @@ from tsk.lib.ram_exec_geometry import (
   RamExecGeometryError,
   build_request_download_data,
   build_verify_routine_data,
+  normalize_f181,
   resolve_ram_exec_geometry,
   transfer_chunks,
 )
@@ -61,6 +64,12 @@ IDENTITY_DIDS = [
   (0xF180, "boot_sw_id"),
 ]
 
+BOOTLOADER_IDENTITY_DIDS = [
+  (0xF181, "app_sw_id"),
+  (0xF180, "boot_sw_id"),
+  (0xF187, "spare_part_no"),
+]
+
 
 def _noop(**kwargs) -> None:
   pass
@@ -70,11 +79,11 @@ def _ascii(b: bytes) -> str:
   return "".join(chr(c) if 32 <= c < 127 else "." for c in b)
 
 
-def diagnose(progress_cb=None) -> dict:
+def diagnose(progress_cb=None, *, allow_cross_calibration_send_key: bool = False) -> dict:
   """Run the dump flow with per-step instrumentation. Returns:
     {status, panda, identity[], steps[], failed_at, exception, traceback,
      frames, bytes, message}
-  status is "dumped" | "no_frames" | "rejected" | "failed". Raises NotAGNOSError off-device.
+  status is "observed" | "dumped" | "no_frames" | "rejected" | "failed". Raises NotAGNOSError off-device.
   """
   if not is_agnos():
     raise NotAGNOSError
@@ -93,9 +102,9 @@ def diagnose(progress_cb=None) -> dict:
   steps: list = []
   identity: list = []
   result = {
-    "status": "failed", "panda": "", "eps_bus": -1, "identity": identity, "steps": steps,
+    "status": "failed", "panda": "", "eps_bus": -1, "identity": identity, "bootloader_identity": [], "steps": steps,
     "failed_at": "", "exception": "", "traceback": "", "frames": 0, "bytes": 0,
-    "message": "",
+    "send_key_armed": bool(allow_cross_calibration_send_key), "message": "",
   }
 
   def record(name, ok, detail, t0) -> None:
@@ -194,33 +203,25 @@ def diagnose(progress_cb=None) -> dict:
                        "ascii": type(e).__name__})
   cb(steps=len(steps), last="identity")
 
-  # A state-changing payload diagnostic must have the complete authenticated geometry
-  # before it sends PROGRAMMING. Keep programming/prog_probe as the separate tool for an
-  # unknown target whose bootloader handoff still needs characterization.
+  # Classify executable geometry now, but do not confuse an unknown payload contract with
+  # a reason to stop observing the protocol. PROGRAMMING, identity reads, and REQUEST_SEED
+  # are useful evidence even on an unknown calibration.
   app_row = next((row for row in identity if row.get("name") == "app_sw_id" and row.get("hex")), None)
-  if app_row is None:
-    record("RAM-exec geometry", False, "F181 unavailable", time.monotonic())
-    result.update(status="rejected", message="No F181 identity; refusing the state-changing payload diagnostic.")
-    return result
-  app_f181 = bytes.fromhex(app_row["hex"])
+  app_f181 = bytes.fromhex(app_row["hex"]) if app_row is not None else b""
+  app_f181_name = normalize_f181(app_f181)
+  ram_geometry = None
   try:
     ram_geometry = resolve_ram_exec_geometry(app_f181)
     COMMITTED_PAYLOAD_CONTRACT.validate_geometry(ram_geometry)
+    result["ram_exec_geometry"] = {"status": "verified", **ram_geometry.public_dict()}
+    record("classify RAM-exec geometry", True, f"verified for {app_f181_name}", time.monotonic())
   except RamExecGeometryError as e:
-    record("RAM-exec geometry", False, str(e), time.monotonic())
-    result.update(
-      status="rejected",
-      ram_exec_geometry={"status": "unverified", "error": str(e)},
-      message=("F181 does not have verified authenticated RequestDownload/callback geometry. " +
-               "Use the programming probe for handoff characterization; no PROGRAMMING request was sent here."),
-    )
-    return result
-  result["ram_exec_geometry"] = {"status": "verified", **ram_geometry.public_dict()}
-  record("RAM-exec geometry", True, str(result["ram_exec_geometry"]), time.monotonic())
+    result["ram_exec_geometry"] = {"status": "unverified", "f181": app_f181_name, "error": str(e)}
+    record("classify RAM-exec geometry", True, f"unverified; observation continues: {e}", time.monotonic())
 
   ok, _ = call("session EXTENDED", lambda: uds.diagnostic_session_control(SESSION_TYPE.EXTENDED_DIAGNOSTIC))
   if not ok:
-    result.update(status="rejected", message="Verified target rejected EXTENDED session before payload handoff.")
+    result.update(status="rejected", message="Target rejected EXTENDED session before the programming-handoff observation.")
     return result
   time.sleep(0.7)
 
@@ -256,32 +257,103 @@ def diagnose(progress_cb=None) -> dict:
     result.update(status="rejected", message="Bootloader reappeared but PROGRAMMING session was rejected.")
     return result
 
-  # Phase D: security access — the key question. Record the seed and whether SEND_KEY
-  # is accepted or rejected (NRC 0x35 invalid key / 0x33 access denied on a wrong secret).
-  ok, seed = call("security REQUEST_SEED",
-                  lambda: uds.security_access(ACCESS_TYPE.REQUEST_SEED, data_record=b"\x00" * 16))
-  if not ok:
-    result["status"] = "rejected"
-    result["message"] = "EPS rejected the seed request."
+  # Bootloader identity is observation-only and often the most useful discriminator on an
+  # unfamiliar target. Read each DID independently so one unsupported identifier does not
+  # prevent the seed observation.
+  bootloader_identity = result["bootloader_identity"]
+  for did, label in BOOTLOADER_IDENTITY_DIDS:
+    t0 = time.monotonic()
+    try:
+      data = bytes(uds.read_data_by_identifier(did))
+      bootloader_identity.append({"did": f"0x{did:04x}", "name": label, "hex": data.hex(), "ascii": _ascii(data)})
+      record(f"bootloader DID 0x{did:04x}", True, data.hex(), t0)
+    except NegativeResponseError as e:
+      bootloader_identity.append({"did": f"0x{did:04x}", "name": label, "hex": "", "ascii": nrc(e.error_code)})
+      record(f"bootloader DID 0x{did:04x}", True, nrc(e.error_code), t0)
+    except Exception as e:
+      bootloader_identity.append({"did": f"0x{did:04x}", "name": label, "hex": "", "ascii": type(e).__name__})
+      record(f"bootloader DID 0x{did:04x}", True, type(e).__name__, t0)
+
+  # Phase D: REQUEST_SEED is an observation, not a counted key attempt. Always request it
+  # once after a successful handoff. SEND_KEY below is the actual cross-calibration boundary.
+  t0 = time.monotonic()
+  try:
+    seed = bytes(uds.security_access(ACCESS_TYPE.REQUEST_SEED, data_record=b"\x00" * 16))
+    result["security_seed"] = seed.hex()
+    record("security REQUEST_SEED", True, seed.hex(), t0)
+  except NegativeResponseError as e:
+    result["security_seed"] = ""
+    record("security REQUEST_SEED", True, nrc(e.error_code), t0)
+    result.update(
+      status="observed",
+      message=("Programming handoff and bootloader characterization completed, but the bootloader refused " +
+               f"the non-counted 0x01 seed request ({nrc(e.error_code)}). No SEND_KEY or payload write was attempted."),
+    )
+    return result
+  except Exception as e:
+    record("security REQUEST_SEED", False, f"{type(e).__name__}: {e}" if str(e) else type(e).__name__, t0)
+    note_fail("security REQUEST_SEED", e)
+    result["message"] = "Bootloader seed observation failed unexpectedly."
+    return result
+
+  cross_calibration = ram_geometry is None
+  result["cross_calibration_send_key"] = cross_calibration
+  if cross_calibration and not allow_cross_calibration_send_key:
+    result.update(
+      status="observed",
+      message=("Programming handoff, bootloader identity, and SecurityAccess seed were observed on an unknown " +
+               "payload calibration. The known 8965B4x bootloader SEND_KEY was not sent because a wrong key is a " +
+               "counted attempt. Arm that one attempt explicitly if testing secret reuse is useful. No WDBI, " +
+               "RequestDownload, TransferData, RoutineControl start, or payload trigger was sent."),
+    )
     return result
 
   try:
     derived = AES.new(TSKExtractor.BOOT_SA_SECRET, AES.MODE_ECB).decrypt(b"\x00" * 16)
-    sent_key = AES.new(derived, AES.MODE_ECB).encrypt(bytes(seed))
+    sent_key = AES.new(derived, AES.MODE_ECB).encrypt(seed)
   except Exception as e:
     record("compute key", False, f"{type(e).__name__}: {e}", time.monotonic())
     note_fail("compute key", e)
     result["message"] = "Key computation failed (unexpected seed shape)."
     return result
 
+  if cross_calibration:
+    t0 = time.monotonic()
+    try:
+      uds.security_access(ACCESS_TYPE.SEND_KEY, sent_key)
+      result["send_key_result"] = "accepted"
+      record("security SEND_KEY", True, "accepted", t0)
+    except NegativeResponseError as e:
+      result["send_key_result"] = f"rejected: {nrc(e.error_code)}"
+      record("security SEND_KEY", True, nrc(e.error_code), t0)
+      result.update(
+        status="observed",
+        message=("The explicitly armed known 8965B4x bootloader key was rejected on this unknown calibration " +
+                 f"({nrc(e.error_code)}). The counted comparison is complete; no WDBI or payload operation was sent."),
+      )
+      return result
+    except Exception as e:
+      record("security SEND_KEY", False, f"{type(e).__name__}: {e}" if str(e) else type(e).__name__, t0)
+      note_fail("security SEND_KEY", e)
+      result["message"] = "The armed bootloader SEND_KEY comparison failed unexpectedly."
+      return result
+
+    result.update(
+      status="observed",
+      message=("The explicitly armed known 8965B4x bootloader key was accepted on this unknown calibration. " +
+               "That is valuable security-domain evidence, but authenticated RAM-exec geometry is still unknown; " +
+               "no WDBI, RequestDownload, TransferData, 0x10F0 start, or payload trigger was sent."),
+    )
+    return result
+
   ok, _ = call("security SEND_KEY", lambda: uds.security_access(ACCESS_TYPE.SEND_KEY, sent_key))
   if not ok:
     result["status"] = "rejected"
-    result["message"] = ("EPS rejected the known 8965B4x bootloader 01/02 SecurityAccess key. " +
-                         "The bootloader secret/algorithm differs or the request state is wrong.")
+    result["message"] = ("EPS rejected the verified-family bootloader 01/02 SecurityAccess key. " +
+                         "The target no longer matches the expected payload path.")
     return result
 
-  # Phase E: payload upload (only reached if security passed — a surprise for a non-family car).
+  # Phase E: payload upload on a target whose authenticated geometry is verified.
   payload = Path(DATAFLASH_PAYLOAD_PATH).read_bytes()
   sha_ok = hashlib.sha256(payload).hexdigest() == PAYLOAD_SHA256
   record("payload sha256", sha_ok, "match" if sha_ok else "MISMATCH", time.monotonic())
