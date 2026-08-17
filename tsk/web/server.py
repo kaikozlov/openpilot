@@ -325,17 +325,22 @@ sniff_state = {
   "message": "",
 }
 
-# Instrumented DataFlash payload diagnostic. It records identity first and proceeds into
-# the state-changing dump flow only when that exact F181 has verified RAM-exec geometry.
+# Instrumented DataFlash payload diagnostic. Unknown targets may be observed through the
+# programming handoff, bootloader identity, and seed request. Counted SEND_KEY and actual
+# payload writes retain their separate arming/evidence boundaries.
 diag_lock = threading.Lock()
 diag_state = {
-  "status": "idle",   # idle | running | dumped | no_frames | rejected | failed
+  "status": "idle",   # idle | running | observed | dumped | no_frames | rejected | failed
   "step_count": 0,
   "last": "",
   "panda": "",
   "eps_bus": -1,
   "identity": [],
+  "bootloader_identity": [],
   "ram_exec_geometry": {},
+  "security_seed": "",
+  "send_key_armed": False,
+  "cross_calibration_send_key": False,
   "steps": [],
   "failed_at": "",
   "exception": "",
@@ -382,8 +387,8 @@ readmem_state = {
   "message": "",
 }
 
-# Read/observe-only application XCP probe. Unknown targets stop after CONNECT;
-# LocalRAM F4/DAQ is exact-8965B4512000 only.
+# Bounded application XCP observer. F4 reads and volatile DAQ configuration may run on
+# unknown targets after CONNECT; 8965B4512000-derived address semantics are exact-F181 only.
 xcp_lock = threading.Lock()
 xcp_state = {
   "status": "idle",   # idle | running | reachable | observed | unreachable | failed
@@ -404,11 +409,15 @@ xcp_state = {
   "connect_response": "",
   "snapshot": [],
   "frames": [],
+  "profile_semantics_verified": False,
+  "profile_semantics": "",
+  "volatile_daq_configuration": True,
+  "source_memory_writes_implemented": False,
   "write_commands_implemented": False,
   "message": "",
 }
 
-# EPS identity + read-only service-surface map.
+# EPS identity + observation-oriented service-surface map.
 ident_lock = threading.Lock()
 ident_state = {
   "status": "idle",   # idle | running | mapped | unreachable | failed
@@ -1220,48 +1229,67 @@ def _diag_progress(steps=None, last=None) -> None:
       diag_state["last"] = last
 
 
-def _run_diag_mock() -> None:
-  # Laptop dry run: an out-of-family F181 stops at the geometry gate. The dedicated
-  # programming probe remains available separately; this diagnostic sends no PROGRAMMING
-  # request or SecurityAccess key when authenticated payload geometry is unknown.
-  for i, name in enumerate(("connect panda", "identity", "RAM-exec geometry"), 1):
+def _run_diag_mock(allow_cross_calibration_send_key: bool = False) -> None:
+  # Laptop dry run models the useful unknown-calibration boundary: PROGRAMMING and the
+  # bootloader seed are observed automatically. A counted bootloader SEND_KEY happens
+  # only when explicitly armed, and unknown RAM geometry still blocks payload writes.
+  names = ["connect panda", "identity", "PROGRAMMING handoff", "bootloader identity", "REQUEST_SEED"]
+  if allow_cross_calibration_send_key:
+    names.append("SEND_KEY")
+  for i, name in enumerate(names, 1):
     time.sleep(0.3)
     _diag_progress(steps=i, last=name)
   with diag_lock:
+    message = (
+      "Unknown F181: programming handoff, bootloader identity, and seed observed; counted SEND_KEY not armed. " +
+      "No WDBI or payload operation was sent. (mock)"
+      if not allow_cross_calibration_send_key else
+      "Unknown F181: explicitly armed bootloader SEND_KEY accepted; RAM-exec geometry remains unknown, so no WDBI or payload operation was sent. (mock)"
+    )
+    steps = [
+      {"name": "connect panda", "ok": True, "detail": "fw 1.7.0-mock", "ms": 42},
+      {"name": "classify RAM-exec geometry", "ok": True, "detail": "unverified; observation continues", "ms": 1},
+      {"name": "session PROGRAMMING handoff", "ok": True, "detail": "bootloader reappeared", "ms": 220},
+      {"name": "security REQUEST_SEED", "ok": True, "detail": "11" * 16, "ms": 15},
+    ]
+    if allow_cross_calibration_send_key:
+      steps.append({"name": "security SEND_KEY", "ok": True, "detail": "ok", "ms": 14})
     diag_state.update(
-      status="rejected",
-      step_count=3,
-      last="RAM-exec geometry",
+      status="observed",
+      step_count=len(steps),
+      last="security SEND_KEY" if allow_cross_calibration_send_key else "security REQUEST_SEED",
       panda="1.7.0-mock",
-      eps_bus=0,
+      eps_bus=1,
       identity=[
-        {"did": "0xf181", "name": "app_sw_id", "hex": "018965b0000000", "ascii": ".8965B......"},
-        {"did": "0xf187", "name": "spare_part_no", "hex": "3839363542", "ascii": "8965B"},
-        {"did": "0xf18c", "name": "ecu_serial", "hex": "", "ascii": "NRC 0x31 request out of range"},
+        {"did": "0xf181", "name": "app_sw_id", "hex": "01896546313230383030300000000000", "ascii": ".8965F1208000...."},
       ],
-      ram_exec_geometry={"status": "unverified", "error": "no authenticated RAM-exec geometry for mock F181"},
-      steps=[
-        {"name": "connect panda", "ok": True, "detail": "fw 1.7.0-mock", "ms": 42},
-        {"name": "RAM-exec geometry", "ok": False, "detail": "unverified exact F181", "ms": 1},
+      bootloader_identity=[
+        {"did": "0xf181", "name": "app_sw_id", "hex": "01424f4f542d554e4b4e4f574e", "ascii": ".BOOT-UNKNOWN"},
       ],
-      failed_at="",
-      exception="",
-      traceback="",
-      frames=0, bytes=0,
-      message="Unknown F181 has no verified authenticated RAM-exec geometry; no PROGRAMMING request was sent. (mock)",
+      ram_exec_geometry={"status": "unverified", "f181": "8965F1208000", "error": "no verified authenticated geometry"},
+      security_seed="11" * 16,
+      send_key_armed=allow_cross_calibration_send_key,
+      cross_calibration_send_key=True,
+      steps=steps, failed_at="", exception="", traceback="", frames=0, bytes=0, message=message,
     )
 
 
-def _run_diag_job() -> None:
+def _run_diag_job(allow_cross_calibration_send_key: bool = False) -> None:
   try:
-    result = dump_diagnose(progress_cb=_diag_progress)
+    result = dump_diagnose(
+      progress_cb=_diag_progress, allow_cross_calibration_send_key=allow_cross_calibration_send_key,
+    )
     with diag_lock:
       diag_state.update(
         status=result.get("status", "failed"),
         panda=result.get("panda", ""),
         eps_bus=result.get("eps_bus", -1),
         identity=result.get("identity", []),
+        bootloader_identity=result.get("bootloader_identity", []),
         ram_exec_geometry=result.get("ram_exec_geometry", {}),
+        security_seed=result.get("security_seed", ""),
+        send_key_armed=result.get("send_key_armed", False),
+        cross_calibration_send_key=result.get("cross_calibration_send_key", False),
         steps=result.get("steps", []),
         step_count=len(result.get("steps", [])),
         failed_at=result.get("failed_at", ""),
@@ -1273,7 +1301,7 @@ def _run_diag_job() -> None:
         **_route_metadata(result),
       )
   except NotAGNOSError:
-    _run_diag_mock()
+    _run_diag_mock(allow_cross_calibration_send_key)
   except Exception as e:
     with diag_lock:
       diag_state.update(status="failed", message=str(e), traceback=traceback.format_exc())
@@ -1282,16 +1310,19 @@ def _run_diag_job() -> None:
     panda_lock.release()
 
 
-def start_diag_job() -> bool:
+def start_diag_job(*, allow_cross_calibration_send_key: bool = False) -> bool:
   # panda_lock gates it against extract/dump/collect/sniff, released in the finally.
   if not panda_lock.acquire(blocking=False):
     return False
   with diag_lock:
     diag_state.update(status="running", step_count=0, last="", panda="", eps_bus=-1,
-                      identity=[], ram_exec_geometry={}, steps=[], failed_at="", exception="", traceback="",
-                      frames=0, bytes=0, message="")
+                      identity=[], bootloader_identity=[], ram_exec_geometry={}, security_seed="",
+                      send_key_armed=allow_cross_calibration_send_key, cross_calibration_send_key=False,
+                      steps=[], failed_at="", exception="", traceback="", frames=0, bytes=0, message="")
   try:
-    threading.Thread(target=_run_diag_job, name="tsk_dataflash_diag", daemon=True).start()
+    threading.Thread(
+      target=_run_diag_job, args=(allow_cross_calibration_send_key,), name="tsk_dataflash_diag", daemon=True,
+    ).start()
   except Exception:
     with diag_lock:
       diag_state.update(status="failed", message="Could not start the diagnostic job.")
@@ -1494,7 +1525,7 @@ def _run_xcp_mock(profile: str) -> None:
                      ("daq", f"configure {profile}"), ("capture", "capture 0x7F8 DAQ DTOs")):
     time.sleep(0.12)
     _xcp_progress(step=step, last=last)
-  snapshot = [{"address": f"0x{address:08x}", "value": index}
+  snapshot = [{"address": f"0x{address:08x}", "ok": True, "value": index}
               for index, address in enumerate(selected.addresses)]
   sample_values = [{"address": row["address"], "value": row["value"]} for row in snapshot[:7]]
   with xcp_lock:
@@ -1506,7 +1537,8 @@ def _run_xcp_mock(profile: str) -> None:
       connect_response="ff00000000000000", snapshot=snapshot,
       frames=[{"pid": 0, "t_ms": 0.0, "raw": "0001020304050607", "values": sample_values},
               {"pid": 0, "t_ms": 2.0, "raw": "0002030405060708", "values": sample_values}],
-      write_commands_implemented=False,
+      profile_semantics_verified=True, profile_semantics="firmware-verified for exact 8965B4512000",
+      volatile_daq_configuration=True, source_memory_writes_implemented=False, write_commands_implemented=False,
       message=" ".join((
         f"XCP CONNECT, bounded F4 reads, and volatile DAQ observation succeeded for {profile};",
         "captured 2 DTO frame(s). No XCP source-memory write command was implemented. (mock)",
@@ -1528,12 +1560,18 @@ def _run_xcp_job(profile: str) -> None:
         xcp_response_id=result.get("xcp_response_id", "0x7f8"),
         connect_response=result.get("connect_response", ""), snapshot=result.get("snapshot", []),
         frames=result.get("frames", []), count=len(result.get("frames", [])),
+        profile_semantics_verified=bool(result.get("profile_semantics_verified", False)),
+        profile_semantics=result.get("profile_semantics", ""),
+        volatile_daq_configuration=bool(result.get("volatile_daq_configuration", True)),
+        source_memory_writes_implemented=bool(result.get("source_memory_writes_implemented", False)),
         write_commands_implemented=bool(result.get("write_commands_implemented", False)),
         message=result.get("message", ""),
         **_route_metadata(result),
       )
       if result.get("cleanup_error"):
         xcp_state["cleanup_error"] = result["cleanup_error"]
+      if result.get("daq_error"):
+        xcp_state["daq_error"] = result["daq_error"]
   except NotAGNOSError:
     _run_xcp_mock(profile)
   except Exception as e:
@@ -1554,7 +1592,8 @@ def start_xcp_job(profile: str = "actuation-discriminator") -> bool:
       status="running", count=0, last="", step="", panda="", eps_bus=-1, eps_rx_bus=-1,
       eps_tx="", eps_rx="", f181="", f181_hex="", profile=profile,
       profile_description=XCP_PROFILES[profile].description, connect_response="", snapshot=[], frames=[],
-      cleanup_error="", write_commands_implemented=False, message="",
+      profile_semantics_verified=False, profile_semantics="", volatile_daq_configuration=True,
+      source_memory_writes_implemented=False, cleanup_error="", daq_error="", write_commands_implemented=False, message="",
     )
   try:
     threading.Thread(target=_run_xcp_job, args=(profile,), name="tsk_xcp_observer", daemon=True).start()
@@ -2673,14 +2712,16 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       return
 
     if path == "/api/dataflash-diag":
-      if not start_diag_job():
+      request = self._read_json_body()
+      allow_cross_calibration_send_key = bool(request.get("allow_cross_calibration_send_key", False))
+      if not start_diag_job(allow_cross_calibration_send_key=allow_cross_calibration_send_key):
         self._send_json({
           "ok": False,
           "status": "running",
           "message": "A panda operation is already in progress.",
         }, status=HTTPStatus.CONFLICT)
         return
-      self._send_json({"ok": True, "status": "running"})
+      self._send_json({"ok": True, "status": "running", "send_key_armed": allow_cross_calibration_send_key})
       return
 
     if path == "/api/read-mem":

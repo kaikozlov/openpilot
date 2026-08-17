@@ -191,6 +191,50 @@ class TestServer(unittest.TestCase):
       server.server_close()
       thread.join(timeout=3)
 
+  def test_dataflash_diag_only_arms_counted_cross_calibration_key_when_requested(self):
+    server = TSKWebServer(("127.0.0.1", 0), TSKWebHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+      with patch("tsk.web.server.start_diag_job", return_value=True) as start, \
+           patch("tsk.web.server.record_operation"):
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        connection.request(
+          "POST", "/api/dataflash-diag",
+          body=json.dumps({"allow_cross_calibration_send_key": True}).encode(),
+          headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+      self.assertEqual(response.status, 200)
+      self.assertTrue(body["send_key_armed"])
+      start.assert_called_once_with(allow_cross_calibration_send_key=True)
+    finally:
+      server.shutdown()
+      server.server_close()
+      thread.join(timeout=3)
+
+  def test_dataflash_diag_defaults_to_observation_without_counted_send_key(self):
+    server = TSKWebServer(("127.0.0.1", 0), TSKWebHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+      with patch("tsk.web.server.start_diag_job", return_value=True) as start, \
+           patch("tsk.web.server.record_operation"):
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        connection.request("POST", "/api/dataflash-diag", body=b"{}", headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+      self.assertEqual(response.status, 200)
+      self.assertFalse(body["send_key_armed"])
+      start.assert_called_once_with(allow_cross_calibration_send_key=False)
+    finally:
+      server.shutdown()
+      server.server_close()
+      thread.join(timeout=3)
+
   def test_operation_vehicle_state_annotations(self):
     self.assertIn("READY", expected_vehicle_state("/api/ready-capture"))
     self.assertIn("Not Ready", expected_vehicle_state("/api/uds-sweep"))

@@ -23,8 +23,8 @@
       <section class="probe-heading">
         <p class="probe-breadcrumb">Research · Observe & map</p>
         <h1 class="probe-title">EPS fingerprint & service map</h1>
-        <p class="probe-description">Read the ECU identity block, establish the complete Panda routing tuple, and characterize a small safe UDS service surface.</p>
-        <div class="probe-badges"><span class="probe-badge blue">NOT READY</span><span class="probe-badge green">READ ONLY</span></div>
+        <p class="probe-description">Read the ECU identity block, establish the complete Panda routing tuple, and characterize a low-consequence UDS service surface. Session changes and REQUEST_SEED are transient observations; no counted key or persistent write is sent.</p>
+        <div class="probe-badges"><span class="probe-badge blue">NOT READY</span><span class="probe-badge green">OBSERVATION</span><span class="probe-badge amber">TRANSIENT SESSION</span></div>
       </section>
 
       <div class="probe-layout">
@@ -33,8 +33,8 @@
             <div class="probe-card-body">
               <p class="probe-card-kicker">Operation</p>
               <h2 class="probe-card-title">Identify the EPS</h2>
-              <p class="probe-card-copy">Reads F181 and related identity DIDs, then probes only non-destructive diagnostic services. No reset, write, routine, download, or key is sent.</p>
-              <ul class="probe-meta-list"><li class="probe-meta-row"><span class="probe-meta-label">Vehicle state</span><span class="probe-meta-value">Not Ready to Drive</span></li><li class="probe-meta-row"><span class="probe-meta-label">Writes</span><span class="probe-meta-value">None</span></li><li class="probe-meta-row"><span class="probe-meta-label">Primary result</span><span class="probe-meta-value">F181 + physical route</span></li></ul>
+              <p class="probe-card-copy">Reads F181 and related identity DIDs, then probes non-destructive diagnostic services. It may change diagnostic session and request a seed, but sends no counted SEND_KEY, reset, persistent write, routine start, or download.</p>
+              <ul class="probe-meta-list"><li class="probe-meta-row"><span class="probe-meta-label">Vehicle state</span><span class="probe-meta-value">Not Ready to Drive</span></li><li class="probe-meta-row"><span class="probe-meta-label">Persistent writes</span><span class="probe-meta-value">None</span></li><li class="probe-meta-row"><span class="probe-meta-label">Primary result</span><span class="probe-meta-value">F181 + physical route</span></li></ul>
               <div class="probe-subtle-divider"></div>
               <div class="probe-actions"><button class="run-btn primary" id="runBtn" type="button">Identify EPS</button></div>
             </div>

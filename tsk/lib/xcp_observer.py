@@ -8,10 +8,10 @@ DTOs on 0x7F8.
 
 This TSK probe deliberately implements only CONNECT, F4, and volatile DAQ
 configuration. It does NOT implement E4 page copy, F6 SET_MTA, F5 UPLOAD, F0
-DOWNLOAD, EC MODIFY_BITS, or any source-memory write. CONNECT reachability may be
-measured on an unknown Toyota EPS, but address reads and DAQ configuration are
-performed only when F181 contains the exact analyzed application ID
-8965B4512000.
+DOWNLOAD, EC MODIFY_BITS, or any source-memory write. Unknown Toyota EPS calibrations
+may use the same bounded F4 reads and temporary DAQ configuration after CONNECT; the
+8965B4512000-derived profile labels are then treated only as candidate addresses, not as
+claims about what those bytes mean on the unknown calibration.
 """
 from __future__ import annotations
 
@@ -289,7 +289,7 @@ def capture_dto(panda, *, bus: int, addresses: Iterable[int], duration: float, m
 
 def probe_xcp(profile: str = "actuation-discriminator", progress_cb=None,
               capture_seconds: float = 1.5, max_frames: int = 512) -> dict:
-  """Measure XCP reachability; observe DAQ only on exact 8965B4512000."""
+  """Measure XCP reachability plus bounded F4/volatile-DAQ observations."""
   if not is_agnos():
     raise NotAGNOSError
   if profile not in PROFILES:
@@ -305,7 +305,8 @@ def probe_xcp(profile: str = "actuation-discriminator", progress_cb=None,
     "profile": profile, "profile_description": PROFILES[profile].description,
     "xcp_request_id": f"0x{REQUEST_ID:03x}", "xcp_response_id": f"0x{RESPONSE_ID:03x}",
     "connect_response": "", "snapshot": [], "frames": [], "message": "",
-    "write_commands_implemented": False,
+    "profile_semantics_verified": False, "volatile_daq_configuration": True,
+    "source_memory_writes_implemented": False, "write_commands_implemented": False,
   }
   try:
     panda = TSKExtractor._connect_panda()
@@ -337,41 +338,57 @@ def probe_xcp(profile: str = "actuation-discriminator", progress_cb=None,
     return result
   result["connect_response"] = response.hex()
 
-  if EXACT_APPLICATION_ID not in identity:
-    result.update(
-      status="reachable",
-      message=" ".join((
-        "CAN 0x7F7/0x7F8 answered CONNECT, but F181 is not the exact analyzed 8965B4512000",
-        "application. TSK stopped before address reads or DAQ configuration.",
-      )),
-    )
-    return result
+  exact_semantics = EXACT_APPLICATION_ID in identity
+  result["profile_semantics_verified"] = exact_semantics
+  result["profile_semantics"] = (
+    "firmware-verified for exact 8965B4512000" if exact_semantics else
+    "8965B4512000-derived candidate addresses; raw values only on this F181"
+  )
 
   addresses = PROFILES[profile].addresses
+  readable_addresses: list[int] = []
   cb(step="snapshot", last="bounded F4 LocalRAM reads")
   for address in addresses:
-    value = short_upload(panda, bus=bus, address=address, length=1, timeout=0.35)
-    result["snapshot"].append({"address": f"0x{address:08x}", "value": value[0]})
+    row = {"address": f"0x{address:08x}"}
+    try:
+      value = short_upload(panda, bus=bus, address=address, length=1, timeout=0.35)
+      row.update(ok=True, value=value[0])
+      readable_addresses.append(address)
+    except XcpObserverError as e:
+      row.update(ok=False, error=str(e))
+    result["snapshot"].append(row)
 
-  cb(step="daq", last=f"configure {profile}")
-  configured = False
-  try:
-    configure_daq(panda, bus=bus, addresses=addresses, timeout=0.35)
-    configured = True
-    cb(step="capture", last="capture 0x7F8 DAQ DTOs")
-    result["frames"] = capture_dto(
-      panda, bus=bus, addresses=addresses, duration=capture_seconds, max_frames=max_frames,
-    )
-  finally:
-    if configured:
-      try:
-        stop_daq(panda, bus=bus, timeout=0.35)
-      except Exception as e:
-        result["cleanup_error"] = f"{type(e).__name__}: {e}"
+  # DAQ configuration mutates only the volatile XCP measurement table. Configure only
+  # addresses that already answered F4 on this target, and always send STOP after a
+  # successful start. This is intentionally allowed cross-calibration because failure
+  # merely rejects the observation; it does not modify source memory or persistent state.
+  if readable_addresses:
+    cb(step="daq", last=f"configure {profile}")
+    configured = False
+    try:
+      configure_daq(panda, bus=bus, addresses=readable_addresses, timeout=0.35)
+      configured = True
+      cb(step="capture", last="capture 0x7F8 DAQ DTOs")
+      result["frames"] = capture_dto(
+        panda, bus=bus, addresses=readable_addresses, duration=capture_seconds, max_frames=max_frames,
+      )
+    except XcpObserverError as e:
+      result["daq_error"] = str(e)
+    finally:
+      if configured:
+        try:
+          stop_daq(panda, bus=bus, timeout=0.35)
+        except Exception as e:
+          result["cleanup_error"] = f"{type(e).__name__}: {e}"
 
-  result["status"] = "observed"
+  result["status"] = "observed" if readable_addresses else "reachable"
+  semantic_note = (
+    "Profile semantics are firmware-verified for this exact calibration." if exact_semantics else
+    "Profile addresses came from 8965B4512000; on this F181 they are raw observation candidates only."
+  )
   result["message"] = " ".join((
-    f"XCP CONNECT, bounded F4 reads, and volatile DAQ observation succeeded for {profile};",
-    f"captured {len(result['frames'])} DTO frame(s). No XCP source-memory write command was implemented.",
+    f"XCP CONNECT succeeded; {len(readable_addresses)}/{len(addresses)} bounded F4 candidate read(s) returned data",
+    f"and {len(result['frames'])} volatile DAQ DTO frame(s) were captured.", semantic_note,
+    "No XCP source-memory write command was implemented.",
   ))
   return result

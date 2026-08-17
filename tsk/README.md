@@ -52,6 +52,30 @@ make vehicle-state and risk boundaries explicit (`READY`, `NOT READY`, `PASSIVE`
 run control after seeing those constraints. The Application `03/04` cross-calibration
 SEND_KEY retains its additional one-attempt arming checkbox.
 
+
+## Risk model: uncertainty should limit interpretation, not observation
+
+TSK gates operations by their **operational consequence**, not by how completely a
+calibration is understood. Unknown F181s are expected during research; lack of a static
+model is not by itself a reason to suppress low-cost evidence collection.
+
+- **Passive/read observation:** CAN capture, identity/DID reads, DTC reads, bounded SID
+  `0x23` reads, and XCP `F4` reads run on unknown targets. Calibration-specific address
+  meanings are annotations only.
+- **Transient diagnostic state:** session changes, REQUEST_SEED, programming handoff/reset
+  probes, and temporary XCP DAQ configuration may perturb volatile ECU state but are
+  useful cross-calibration observations. They remain bounded and use cleanup/reappearance
+  checks rather than exact-F181 compatibility gates.
+- **Counted or consequential writes:** cross-calibration SEND_KEY attempts require explicit
+  arming. WDBI, authenticated RequestDownload/TransferData, RoutineControl that executes a
+  payload, flash/erase, and similar operations require the evidence appropriate to the
+  write they perform.
+- **Persistent/actuation paths:** recovered-key installation and vehicle-control output keep
+  the strongest profile, source-audit, and stationary verification gates.
+
+The practical rule is: **unknown calibration limits what TSK claims a value means; it does
+not block observation unless being wrong has a meaningful cost.**
+
 ## Route model: a Panda bus number is not enough
 
 Every diagnostic route has two independent dimensions:
@@ -136,12 +160,14 @@ profile.
 
 The committed standard, RAM-key, and auto-reset payload fixtures are themselves bound to
 `FEBF0000/0x1000` with callback `FEBF0000`; an otherwise well-evidenced non-default target
-still cannot reuse those binaries if its package geometry differs. The DataFlash dumper
-reads F181 and resolves/validates this contract **before PROGRAMMING, SecurityAccess, DID
-writes, RequestDownload, or payload transfer**. `/api/dataflash-dump` also refuses to
-start unless the already identified F181 has a trusted geometry. The instrumented
-DataFlash diagnostic stops after identity on an unknown target; use the separate
-programming probe when handoff behavior itself is the question.
+still cannot reuse those binaries if its package geometry differs. The production DataFlash
+dumper reads F181 and resolves/validates this contract **before
+PROGRAMMING, SecurityAccess SEND_KEY, DID writes, RequestDownload, or payload transfer**.
+`/api/dataflash-dump` also refuses to start unless the already identified F181 has a
+trusted geometry. The instrumented DataFlash diagnostic is intentionally looser: on an
+unknown target it may continue through PROGRAMMING, bootloader identity, and REQUEST_SEED.
+It stops before the counted cross-calibration SEND_KEY unless explicitly armed, and even an
+accepted armed key cannot unlock WDBI/download/payload execution without verified geometry.
 
 The legacy RAM key-table extractor is stricter still. `8965B4512000` has valid RAM-exec
 geometry but does not have the older `FEBE6E34` CPU-visible key table, so
@@ -261,12 +287,14 @@ d/q actuation discriminator and lifecycle/control-state transitions.
 
 The field tool is deliberately narrower than the recovered firmware capability:
 
-- on an unknown F181 it sends **CONNECT only** and records reachability;
-- bounded F4 address reads and DAQ configuration require exact F181 `8965B4512000`;
+- after a positive CONNECT, bounded F4 reads are allowed on unknown F181s;
+- temporary DAQ configuration is also allowed cross-calibration, but only for addresses
+  that first returned data through F4, and STOP is attempted after a successful start;
+- the profile descriptions and address meanings are firmware-verified only on exact
+  `8965B4512000`; on another F181 the same addresses are raw observation candidates;
 - only `FF`, `F4`, `E3`, `E2`, `E1`, `E0`, and `DE` are implemented;
 - XCP page copy, SET_MTA, generic UPLOAD, DOWNLOAD, MODIFY_BITS, and source-memory writes
-  are not exposed by TSK;
-- DAQ STOP is attempted during cleanup even after a capture/configuration error.
+  are not exposed by TSK.
 
 The recovered 32 KiB XCP write window is a real firmware primitive but has no recovered
 executable, persistent, or motor consumer. It remains research evidence rather than a live
