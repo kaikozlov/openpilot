@@ -2,11 +2,18 @@ import hashlib
 import unittest
 from pathlib import Path
 
-from tsk.lib.dump_dataflash import AUTORESET_PAYLOAD_SHA256, PAYLOAD_LOAD_SIZE, PAYLOAD_SHA256
+from tsk.lib.dump_dataflash import AUTORESET_PAYLOAD_SHA256, PAYLOAD_LOAD_ADDR, PAYLOAD_LOAD_SIZE, PAYLOAD_SHA256
 from tsk.lib.env import DATAFLASH_AUTORESET_PAYLOAD_PATH, DATAFLASH_PAYLOAD_PATH, PAYLOAD_PATH
+from tsk.lib.ram_exec_geometry import COMMITTED_PAYLOAD_CONTRACT
 
 
 class TestPayloadFixtures(unittest.TestCase):
+  def test_committed_payload_geometry_contract(self):
+    self.assertEqual(PAYLOAD_LOAD_ADDR, COMMITTED_PAYLOAD_CONTRACT.load_addr)
+    self.assertEqual(PAYLOAD_LOAD_SIZE, COMMITTED_PAYLOAD_CONTRACT.size)
+    self.assertEqual(COMMITTED_PAYLOAD_CONTRACT.callback_addr, 0xFEBF0000)
+    self.assertEqual(COMMITTED_PAYLOAD_CONTRACT.load_addr, COMMITTED_PAYLOAD_CONTRACT.callback_addr)
+
   def test_ram_dump_payload_fixture(self):
     payload = Path(PAYLOAD_PATH).read_bytes()
     self.assertEqual(len(payload), 0x1000)

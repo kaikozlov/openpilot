@@ -25,6 +25,15 @@ from tsk.lib.env import (
 )
 from tsk.lib.extractor import NotAGNOSError, RetryError, TSKExtractor
 from tsk.lib.programming import ProgrammingHandoffError, enter_programming_bootloader, uds_client
+from tsk.lib.ram_exec_geometry import (
+  COMMITTED_PAYLOAD_CONTRACT,
+  RamExecGeometry,
+  RamExecGeometryError,
+  build_request_download_data,
+  build_verify_routine_data,
+  resolve_ram_exec_geometry,
+  transfer_chunks,
+)
 
 # EPS UDS parameters (shared with the extractor)
 ADDR = TSKExtractor.ADDR  # 0x7a1
@@ -40,11 +49,12 @@ DUMP_TOTAL = DUMP_END - DUMP_START  # 0x8000 == 32768
 KEY_SIZE = 16
 KNOWN_KEY_OFFSET = 0x6E14
 
-# Payload upload/trigger vector. Same as extractor.hack(); only the payload bytes
-# and the dump range differ. The erase routine at TRIGGER_ADDR/TRIGGER_SIZE is the
-# trigger that runs the already-uploaded payload, not the dump target.
-PAYLOAD_LOAD_ADDR = 0xFEBF0000
-PAYLOAD_LOAD_SIZE = 0x1000
+# Payload upload/trigger vector. The committed fixtures are post-link packages bound
+# to the verified 4 KiB FEBF0000 callback geometry. Keep aliases for callers/tests, but
+# derive them from the explicit package contract rather than treating them as a generic
+# cross-calibration RAM window.
+PAYLOAD_LOAD_ADDR = COMMITTED_PAYLOAD_CONTRACT.load_addr
+PAYLOAD_LOAD_SIZE = COMMITTED_PAYLOAD_CONTRACT.size
 TRIGGER_ADDR = 0x000E0000
 TRIGGER_SIZE = 0x8000
 PAYLOAD_SHA256 = "d48988366b5e6d2ddd7438caca5e6f6f02daba9b650263c323a2ffd770a06e34"
@@ -155,13 +165,18 @@ def _finalize(dump_buf, received, frames_count, bytes_received) -> dict:
   }
 
 
-def dump(progress_cb=None, *, auto_reset: bool = False) -> dict:
+def dump(progress_cb=None, *, auto_reset: bool = False,
+         ram_geometry: RamExecGeometry | None = None) -> dict:
   """Upload the payload and dump 0xFF200000-0xFF208000 from the EPS.
 
   ``auto_reset`` explicitly opts into a local derivative of the statically recovered
   candidate-f05 body: the same full dump + boot-reset code, re-authenticated under
   the analyzed Sienna's normal payload-build gate. The raw external candidate
   ciphertext is never sent. This variant is never selected implicitly.
+
+  ``ram_geometry`` is a future evidence-bound override. It must name the exact F181 and
+  prove authenticated download + callback geometry; the committed payload itself must
+  also match that geometry. A linker VMA or successful PROGRAMMING handoff is insufficient.
 
   progress_cb, if given, is called as
     progress_cb(status=, frames=, bytes_done=, total=, message=)
@@ -187,8 +202,8 @@ def dump(progress_cb=None, *, auto_reset: bool = False) -> dict:
   payload = Path(payload_path).read_bytes()
   if hashlib.sha256(payload).hexdigest() != expected_payload_sha:
     raise RetryError("DataFlash payload SHA256 mismatch")
-  if len(payload) != PAYLOAD_LOAD_SIZE:
-    raise RetryError("DataFlash payload wrong size")
+  if len(payload) != COMMITTED_PAYLOAD_CONTRACT.size:
+    raise RetryError("DataFlash payload wrong size for the committed authenticated package")
 
   cb(status="running", frames=0, bytes_done=0, total=DUMP_TOTAL, message="")
 
@@ -209,6 +224,23 @@ def dump(progress_cb=None, *, auto_reset: bool = False) -> dict:
     raise RetryError("EPS did not answer under normal-harness or OBD routing")
   if route["tx"] != ADDR or route["rx"] != ADDR + 8 or route["tx_bus"] != route["rx_bus"]:
     raise RetryError(f"Responder does not match the Sienna payload route: {route_fields(route)}")
+
+  # Resolve the complete authenticated RAM-exec geometry from the application identity
+  # before any PROGRAMMING request, SecurityAccess key, DID write, or download is sent.
+  # A bootloader reappearance on this route does not prove the payload window.
+  app_uds = uds_client(panda, route, timeout=0.3, response_pending_timeout=3.0)
+  try:
+    app_f181 = bytes(app_uds.read_data_by_identifier(0xF181))
+  except Exception as e:
+    raise RetryError("Could not read EPS F181 before the state-changing payload flow") from e
+  try:
+    resolved_geometry = resolve_ram_exec_geometry(app_f181, explicit=ram_geometry)
+    COMMITTED_PAYLOAD_CONTRACT.validate_geometry(resolved_geometry)
+  except RamExecGeometryError as e:
+    raise RetryError(
+      "Refusing DataFlash payload before PROGRAMMING: " +
+      f"{e}. Programming handoff or linker-VMA evidence alone cannot authorize this upload."
+    ) from e
 
   # Application -> bootloader is an asynchronous reset handoff. Preserve the exact
   # physical route; a missing final 50 02 is not failure if the bootloader reappears.
@@ -247,15 +279,14 @@ def dump(progress_cb=None, *, auto_reset: bool = False) -> dict:
     uds.write_data_by_identifier(0x201, TSKExtractor.DID_201_KEY)
     uds.write_data_by_identifier(0x202, TSKExtractor.DID_202_IV)
 
-    request = b"\x01\x46\x01\x00" + struct.pack("!I", PAYLOAD_LOAD_ADDR) + struct.pack("!I", PAYLOAD_LOAD_SIZE)
+    request = build_request_download_data(resolved_geometry)
     uds._uds_request(SERVICE_TYPE.REQUEST_DOWNLOAD, data=request)
 
-    chunk_size = 0x400
-    for i in range(len(payload) // chunk_size):
-      uds.transfer_data(i + 1, payload[i * chunk_size:(i + 1) * chunk_size])
+    for i, chunk in enumerate(transfer_chunks(payload, resolved_geometry), start=1):
+      uds.transfer_data(i, chunk)
     uds.request_transfer_exit()
 
-    verify = b"\x45\x00" + struct.pack("!I", PAYLOAD_LOAD_ADDR) + struct.pack("!I", PAYLOAD_LOAD_SIZE)
+    verify = build_verify_routine_data(resolved_geometry)
     uds.routine_control(ROUTINE_CONTROL_TYPE.START, 0x10f0, verify)
   except (InvalidServiceIdError, MessageTimeoutError, NegativeResponseError) as e:
     raise RetryError("Payload upload failed") from e
@@ -318,6 +349,8 @@ def dump(progress_cb=None, *, auto_reset: bool = False) -> dict:
   result = _finalize(dump_buf, received, frames_count, bytes_received)
   result.update(
     route=route_fields(route),
+    application_f181=app_f181.hex(),
+    ram_exec_geometry={"status": "verified", **resolved_geometry.public_dict()},
     programming_handoff=handoff,
     payload_variant="auto-reset-experimental" if auto_reset else "standard",
     payload_sha256=expected_payload_sha,

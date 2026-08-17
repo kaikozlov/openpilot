@@ -45,6 +45,24 @@ as new control outputs. Likewise, `0x131` is statically confirmed as the second 
 command mode, but that alone does not satisfy the existing dynamic/safety requirement for
 LTA angle actuation.
 
+## Recovery geometry is not inferred from target identity or handoff
+
+The recovery side now has an equally strict calibration boundary. A successful
+application -> bootloader PROGRAMMING handoff proves only that the endpoint transitioned;
+it does not prove the authenticated RequestDownload base/size, routine-`0x10F0`
+verification geometry, or callback address embedded in a payload package.
+
+`tsk/lib/ram_exec_geometry.py` therefore resolves authenticated RAM execution by exact
+F181. The current trusted `FEBF0000 + 0x1000`, callback-`FEBF0000` contract is limited to
+`8965B4209000`, `8965B4233100`, `8965B4509100`, and independently analyzed
+`8965B4512000`. Unknown F181s remain blocked after a successful programming probe until
+that complete contract is evidenced. The externally observed newer-Toyota shellcode VMA
+`FEBE0000` is explicitly **not** treated as a RequestDownload/callback geometry.
+
+This recovery gate and the openpilot integration manifest are independent: proving RAM
+execution does not select a DBC/safety/control profile, and proving a target's openpilot
+profile does not authorize a Sienna-derived payload geometry.
+
 ## Manifest required before implementation
 
 `/target-profile.html` records these fields and an evidence source for every one:

@@ -18,12 +18,18 @@ import argparse
 import binascii
 import hashlib
 import struct
+import sys
 from pathlib import Path
 
 from Crypto.Cipher import AES
 from Crypto.Hash import CMAC
 
-PAYLOAD_SIZE = 0x1000
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from tsk.lib.ram_exec_geometry import COMMITTED_PAYLOAD_CONTRACT
+
+PAYLOAD_SIZE = COMMITTED_PAYLOAD_CONTRACT.size
 CMAC_OFFSET = 0xFF0
 CALLBACK_OFFSET = 0xFD0
 BODY_END = 0x1B2
@@ -63,9 +69,9 @@ def rebuild(codeflash: bytes, source_ciphertext: bytes) -> bytes:
           "candidate-f05 RH850 body hash mismatch")
   require((binascii.crc32(source_plain[:CMAC_OFFSET]) & 0xFFFFFFFF) == 0xFFFFFFFF,
           "candidate-f05 CRC region is invalid")
-  require(struct.unpack_from("<I", source_plain, CALLBACK_OFFSET)[0] == 0xFEBF0000,
+  require(struct.unpack_from("<I", source_plain, CALLBACK_OFFSET)[0] == COMMITTED_PAYLOAD_CONTRACT.callback_addr,
           "candidate-f05 callback pointer changed")
-  require(struct.unpack_from("<II", source_plain, 0xFE0) == (0xFEBF0000, 0xFF0),
+  require(struct.unpack_from("<II", source_plain, 0xFE0) == (COMMITTED_PAYLOAD_CONTRACT.load_addr, 0xFF0),
           "candidate-f05 CRC descriptor changed")
 
   normal_key = AES.new(payload_build_secret, AES.MODE_ECB).encrypt(ZERO)

@@ -24,6 +24,7 @@ from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.key_file_manager import KeyFileManager, format_key
 from tsk.lib.recovered_key import persist_recovered_key, public_recovered_key_status, recovered_key_hex
 from tsk.lib.reboot_manager import REBOOT_ACTIONS, RebootManager
+from tsk.lib.ram_exec_geometry import known_ram_exec_geometry
 from tsk.lib.sniff_can import sniff as sniff_can, summarize_counts
 from tsk.lib.dump_diag import diagnose as dump_diagnose
 from tsk.lib.prog_probe import probe_programming
@@ -303,6 +304,8 @@ df_state = {
   "coverage_path": "",
   "longest_covered_run": 0,
   "known_key_window_covered": False,
+  "application_f181": "",
+  "ram_exec_geometry": {},
   "route": {},
   "programming_handoff": {},
 }
@@ -322,8 +325,8 @@ sniff_state = {
   "message": "",
 }
 
-# Instrumented DataFlash dump (diagnostics). Runs the dump flow step by step and holds
-# the full per-step log, EPS identity, and any traceback, for triaging an unknown EPS.
+# Instrumented DataFlash payload diagnostic. It records identity first and proceeds into
+# the state-changing dump flow only when that exact F181 has verified RAM-exec geometry.
 diag_lock = threading.Lock()
 diag_state = {
   "status": "idle",   # idle | running | dumped | no_frames | rejected | failed
@@ -332,6 +335,7 @@ diag_state = {
   "panda": "",
   "eps_bus": -1,
   "identity": [],
+  "ram_exec_geometry": {},
   "steps": [],
   "failed_at": "",
   "exception": "",
@@ -587,6 +591,28 @@ def _identity_value(identity: list[dict], name: str) -> str:
   return ""
 
 
+def ram_exec_geometry_status(identity: list[dict]) -> dict:
+  """Return the fail-closed authenticated payload geometry status for identity rows."""
+  app_sw = _identity_value(identity, "app_sw_id")
+  geometry = known_ram_exec_geometry(app_sw) if app_sw else None
+  if geometry is None:
+    return {
+      "ready": False,
+      "f181": app_sw,
+      "geometry": None,
+      "message": (
+        "No authenticated RequestDownload/0x10F0/callback geometry is verified for this exact F181. " +
+        "A successful PROGRAMMING handoff or an observed linker VMA is not sufficient evidence."
+      ),
+    }
+  return {
+    "ready": True,
+    "f181": app_sw,
+    "geometry": geometry.public_dict(),
+    "message": "Exact F181 has verified authenticated RAM-exec geometry.",
+  }
+
+
 def persist_verified_recovery(key: str, verification: dict, *, source: str) -> tuple[dict, dict]:
   """Persist a verified key privately and refresh its evidence-bound target profile."""
   recovered = persist_recovered_key(key, verification, source=source)
@@ -615,7 +641,9 @@ def dashboard_payload() -> dict:
   spare_part = _identity_value(identity.get("identity", []), "spare_part_no")
   ecu_serial = _identity_value(identity.get("identity", []), "ecu_serial")
   identity_ready = identity.get("status") == "mapped" and bool(app_sw)
-  known_transfer = bool(app_sw) and any(app_sw.encode() in version for version in TSKExtractor.APPLICATION_VERSIONS)
+  ram_geometry = ram_exec_geometry_status(identity.get("identity", []))
+  ram_geometry_ready = bool(ram_geometry["ready"])
+  known_transfer = bool(ram_geometry_ready and ram_geometry["geometry"].get("programming_handoff_verified"))
   can_ready = bool(can.get("ready") or can.get("status") == "complete")
   key_recovered = bool(recovered.get("recovered"))
   integration_ready = bool(readiness.get("openpilot_integration_reviewed"))
@@ -677,11 +705,25 @@ def dashboard_payload() -> dict:
         "description": "Unknown calibration: confirm bootloader reappearance on the preserved route before sending a dump payload.",
         "href": "/prog-probe.html", "label": "Run handoff probe", "vehicle_state": "Not Ready to Drive", "tone": "primary",
       }
+  elif not key_recovered and not ram_geometry_ready:
+    stage = "ram_geometry"
+    next_action = {
+      "id": "ram_geometry", "title": "Establish authenticated RAM-exec geometry",
+      "description": (
+        "The EPS can reach its bootloader, but this exact F181 has no verified RequestDownload/0x10F0/callback geometry. " +
+        "Do not reuse FEBF0000 or a reported linker VMA until the authenticated payload contract is independently established."
+      ),
+      "href": "", "label": "RAM-exec geometry required", "vehicle_state": "Research / bench",
+      "tone": "warning", "action": "research",
+    }
   elif not key_recovered and not dataflash_ready:
     stage = "dataflash"
     next_action = {
       "id": "dataflash", "title": "Recover key material",
-      "description": "Dump EPS DataFlash on the identified route. A candidate becomes trusted only after it authenticates the captured target traffic.",
+      "description": (
+        "Dump EPS DataFlash using the exact F181's verified authenticated RAM-exec geometry. " +
+        "A recovered candidate becomes trusted only after it authenticates the captured target traffic."
+      ),
       "href": "/dataflash-collector.html", "label": "Dump DataFlash", "vehicle_state": "Not Ready to Drive", "tone": "primary",
     }
   elif not key_recovered:
@@ -757,9 +799,14 @@ def dashboard_payload() -> dict:
     {"id": "programming", "title": "Confirm recovery route", "state": step_state(key_recovered or programming_ready, "programming"),
      "detail": ("Key already recovered" if key_recovered else "Known transfer path" if known_transfer else
                 "Bootloader reappeared" if programming_status == "entered" else "Required if DataFlash recovery is needed")},
+    {"id": "ram_geometry", "title": "Verify RAM-exec geometry", "state": step_state(key_recovered or ram_geometry_ready, "ram_geometry"),
+     "detail": ("Key already recovered" if key_recovered else
+                f"{ram_geometry['geometry']['load_addr']} / {ram_geometry['geometry']['size']} verified for F181" if ram_geometry_ready else
+                "Authenticated RequestDownload/0x10F0/callback geometry not established")},
     {"id": "dataflash", "title": "Recover key material", "state": step_state(key_recovered or dataflash_ready, "dataflash"),
      "detail": ("Key material recovered" if key_recovered else "Complete DataFlash dump" if dataflash.get("ready") else
-                "Usable partial dump" if dataflash.get("status") == "partial" else "Waiting")},
+                "Usable partial dump" if dataflash.get("status") == "partial" else
+                "Blocked on RAM-exec geometry" if not ram_geometry_ready else "Waiting")},
     {"id": "verify", "title": "Cryptographically recover key", "state": step_state(key_recovered, "verify"),
      "detail": (f"Recovered key {recovered.get('key_sha256_prefix', '')}" if key_recovered else "No operational install at this step")},
     {"id": "integration", "title": "Review target integration", "state": step_state(integration_ready, "integration"),
@@ -785,6 +832,7 @@ def dashboard_payload() -> dict:
     "vehicle": {
       "identified": identity_ready,
       "known_transfer": known_transfer,
+      "ram_exec_geometry": ram_geometry,
       "app_sw_id": app_sw,
       "spare_part_no": spare_part,
       "ecu_serial": ecu_serial,
@@ -842,6 +890,8 @@ def _run_dataflash_job(use_recovery_payload: bool = False) -> None:
         coverage_path=result.get("coverage_path", ""),
         longest_covered_run=result.get("longest_covered_run", 0),
         known_key_window_covered=result.get("known_key_window_covered", False),
+        application_f181=result.get("application_f181", ""),
+        ram_exec_geometry=result.get("ram_exec_geometry", {}),
         route=result.get("route", {}),
         programming_handoff=result.get("programming_handoff", {}),
       )
@@ -865,7 +915,7 @@ def start_dataflash_job(*, use_recovery_payload: bool = False) -> bool:
                     message="", ready=False, size=0,
                     payload_variant="auto-reset-experimental" if use_recovery_payload else "standard",
                     coverage_path="", longest_covered_run=0, known_key_window_covered=False,
-                    route={}, programming_handoff={})
+                    application_f181="", ram_exec_geometry={}, route={}, programming_handoff={})
   try:
     threading.Thread(target=_run_dataflash_job, args=(use_recovery_payload,), name="tsk_dataflash_dump", daemon=True).start()
   except Exception:
@@ -887,7 +937,7 @@ def clear_dataflash() -> bool:
     df_state.update(ready=False, status="idle", frames=0, bytes=0,
                     total=DUMP_TOTAL, message="", size=0, payload_variant="standard",
                     coverage_path="", longest_covered_run=0, known_key_window_covered=False,
-                    route={}, programming_handoff={})
+                    application_f181="", ram_exec_geometry={}, route={}, programming_handoff={})
   for path in (dump_path(), partial_dump_path(), partial_coverage_path()):
     try:
       path.unlink()
@@ -1171,16 +1221,17 @@ def _diag_progress(steps=None, last=None) -> None:
 
 
 def _run_diag_mock() -> None:
-  # Laptop dry run: a realistic out-of-family result — identity reads return, the
-  # session flow passes, and the EPS rejects the known 8965B4x bootloader 01/02 key.
-  for i, name in enumerate(("connect panda", "session EXTENDED", "identity", "security SEND_KEY"), 1):
+  # Laptop dry run: an out-of-family F181 stops at the geometry gate. The dedicated
+  # programming probe remains available separately; this diagnostic sends no PROGRAMMING
+  # request or SecurityAccess key when authenticated payload geometry is unknown.
+  for i, name in enumerate(("connect panda", "identity", "RAM-exec geometry"), 1):
     time.sleep(0.3)
     _diag_progress(steps=i, last=name)
   with diag_lock:
     diag_state.update(
       status="rejected",
-      step_count=7,
-      last="security SEND_KEY",
+      step_count=3,
+      last="RAM-exec geometry",
       panda="1.7.0-mock",
       eps_bus=0,
       identity=[
@@ -1188,20 +1239,16 @@ def _run_diag_mock() -> None:
         {"did": "0xf187", "name": "spare_part_no", "hex": "3839363542", "ascii": "8965B"},
         {"did": "0xf18c", "name": "ecu_serial", "hex": "", "ascii": "NRC 0x31 request out of range"},
       ],
+      ram_exec_geometry={"status": "unverified", "error": "no authenticated RAM-exec geometry for mock F181"},
       steps=[
         {"name": "connect panda", "ok": True, "detail": "fw 1.7.0-mock", "ms": 42},
-        {"name": "probe bus 0 (default session)", "ok": True, "detail": "EPS responded", "ms": 12},
-        {"name": "session EXTENDED", "ok": True, "detail": "ok", "ms": 9},
-        {"name": "session PROGRAMMING", "ok": True, "detail": "ok", "ms": 11},
-        {"name": "session PROGRAMMING (repeat)", "ok": True, "detail": "ok", "ms": 8},
-        {"name": "security REQUEST_SEED", "ok": True, "detail": "0011223344556677", "ms": 15},
-        {"name": "security SEND_KEY", "ok": False, "detail": "NRC 0x35 invalid key", "ms": 14},
+        {"name": "RAM-exec geometry", "ok": False, "detail": "unverified exact F181", "ms": 1},
       ],
-      failed_at="security SEND_KEY",
-      exception="NegativeResponseError: securityAccess - invalid key",
-      traceback="(mock traceback)",
+      failed_at="",
+      exception="",
+      traceback="",
       frames=0, bytes=0,
-      message="EPS rejected the known 8965B4x bootloader 01/02 key — secret/algorithm differs (mock).",
+      message="Unknown F181 has no verified authenticated RAM-exec geometry; no PROGRAMMING request was sent. (mock)",
     )
 
 
@@ -1214,6 +1261,7 @@ def _run_diag_job() -> None:
         panda=result.get("panda", ""),
         eps_bus=result.get("eps_bus", -1),
         identity=result.get("identity", []),
+        ram_exec_geometry=result.get("ram_exec_geometry", {}),
         steps=result.get("steps", []),
         step_count=len(result.get("steps", [])),
         failed_at=result.get("failed_at", ""),
@@ -1240,7 +1288,7 @@ def start_diag_job() -> bool:
     return False
   with diag_lock:
     diag_state.update(status="running", step_count=0, last="", panda="", eps_bus=-1,
-                      identity=[], steps=[], failed_at="", exception="", traceback="",
+                      identity=[], ram_exec_geometry={}, steps=[], failed_at="", exception="", traceback="",
                       frames=0, bytes=0, message="")
   try:
     threading.Thread(target=_run_diag_job, name="tsk_dataflash_diag", daemon=True).start()
@@ -2581,6 +2629,16 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     if path == "/api/dataflash-dump":
       request = self._read_json_body()
       use_recovery_payload = bool(request.get("use_recovery_payload", False))
+      with ident_lock:
+        geometry_gate = ram_exec_geometry_status([dict(row) for row in ident_state.get("identity", [])])
+      if not geometry_gate["ready"]:
+        self._send_json({
+          "ok": False,
+          "status": "ram_exec_geometry_required",
+          "ram_exec_geometry": geometry_gate,
+          "message": geometry_gate["message"] + " No programming, SecurityAccess, DID write, or payload upload was started.",
+        }, status=HTTPStatus.CONFLICT)
+        return
       if not start_dataflash_job(use_recovery_payload=use_recovery_payload):
         self._send_json({
           "ok": False,

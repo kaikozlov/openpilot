@@ -3,11 +3,11 @@
 everything — panda info, EPS identity DIDs, every UDS response and negative-response
 code (NRC), and a full traceback on the failing step.
 
-For triaging an unknown EPS outside the known 8965B4x transfer family where the plain
-dump only shows "Dump failed." with no reason. Same UDS sequence, addresses, payload,
-and timing as dump_dataflash.dump(); the only difference is per-step capture instead of
-collapse-to-RetryError. It runs the real dump: if security access passes it uploads and
-triggers the payload like production, with the collection window capped shorter.
+For triaging the payload path on an EPS whose exact F181 already has verified authenticated
+RAM-exec geometry. Same UDS sequence, payload, and timing as dump_dataflash.dump(); the
+only difference is per-step capture instead of collapse-to-RetryError. Unknown F181s stop
+after identity collection: this diagnostic no longer turns a successful PROGRAMMING handoff
+or a candidate RAM address into authorization to upload an authenticated payload.
 
 The identity sweep also answers the standing "capture the EPS app-string every run"
 item — the 8965B... part string that names the EPS variant.
@@ -26,8 +26,15 @@ from tsk.lib.env import is_agnos, DATAFLASH_PAYLOAD_PATH
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.programming import ProgrammingHandoffError, enter_programming_bootloader, uds_client
 from tsk.lib.dump_dataflash import (
-  ADDR, DUMP_START, DUMP_TOTAL, PAYLOAD_LOAD_ADDR, PAYLOAD_LOAD_SIZE,
-  PAYLOAD_SHA256, TRIGGER_ADDR, TRIGGER_SIZE, RESPONSE_PENDING,
+  ADDR, DUMP_START, DUMP_TOTAL, PAYLOAD_SHA256, TRIGGER_ADDR, TRIGGER_SIZE, RESPONSE_PENDING,
+)
+from tsk.lib.ram_exec_geometry import (
+  COMMITTED_PAYLOAD_CONTRACT,
+  RamExecGeometryError,
+  build_request_download_data,
+  build_verify_routine_data,
+  resolve_ram_exec_geometry,
+  transfer_chunks,
 )
 
 DIAG_COLLECT_SECONDS = 30.0   # shorter than the production 240s cap — a probe, not a full dump
@@ -172,10 +179,8 @@ def diagnose(progress_cb=None) -> dict:
   record("discover EPS route", True, str(route_fields(route)), t0)
   time.sleep(0.5)
 
-  call("session EXTENDED", lambda: uds.diagnostic_session_control(SESSION_TYPE.EXTENDED_DIAGNOSTIC))
-  time.sleep(0.7)
-
-  # Identity sweep — independent reads, never stops the run.
+  # Identity sweep — independent default-session reads, never stops the run. Resolve
+  # executable geometry before changing diagnostic session state on an unknown F181.
   for did, label in IDENTITY_DIDS:
     t0 = time.monotonic()
     try:
@@ -188,6 +193,36 @@ def diagnose(progress_cb=None) -> dict:
       identity.append({"did": f"0x{did:04x}", "name": label, "hex": "",
                        "ascii": type(e).__name__})
   cb(steps=len(steps), last="identity")
+
+  # A state-changing payload diagnostic must have the complete authenticated geometry
+  # before it sends PROGRAMMING. Keep programming/prog_probe as the separate tool for an
+  # unknown target whose bootloader handoff still needs characterization.
+  app_row = next((row for row in identity if row.get("name") == "app_sw_id" and row.get("hex")), None)
+  if app_row is None:
+    record("RAM-exec geometry", False, "F181 unavailable", time.monotonic())
+    result.update(status="rejected", message="No F181 identity; refusing the state-changing payload diagnostic.")
+    return result
+  app_f181 = bytes.fromhex(app_row["hex"])
+  try:
+    ram_geometry = resolve_ram_exec_geometry(app_f181)
+    COMMITTED_PAYLOAD_CONTRACT.validate_geometry(ram_geometry)
+  except RamExecGeometryError as e:
+    record("RAM-exec geometry", False, str(e), time.monotonic())
+    result.update(
+      status="rejected",
+      ram_exec_geometry={"status": "unverified", "error": str(e)},
+      message=("F181 does not have verified authenticated RequestDownload/callback geometry. " +
+               "Use the programming probe for handoff characterization; no PROGRAMMING request was sent here."),
+    )
+    return result
+  result["ram_exec_geometry"] = {"status": "verified", **ram_geometry.public_dict()}
+  record("RAM-exec geometry", True, str(result["ram_exec_geometry"]), time.monotonic())
+
+  ok, _ = call("session EXTENDED", lambda: uds.diagnostic_session_control(SESSION_TYPE.EXTENDED_DIAGNOSTIC))
+  if not ok:
+    result.update(status="rejected", message="Verified target rejected EXTENDED session before payload handoff.")
+    return result
+  time.sleep(0.7)
 
   # Phase C: application -> bootloader handoff. A timeout after NRC 0x78 can be the
   # expected reset path, so require reappearance on the exact preserved Panda route
@@ -255,21 +290,26 @@ def diagnose(progress_cb=None) -> dict:
   if ok:
     call("write DID 0x201", lambda: uds.write_data_by_identifier(0x201, TSKExtractor.DID_201_KEY))
     call("write DID 0x202", lambda: uds.write_data_by_identifier(0x202, TSKExtractor.DID_202_IV))
-    req = b"\x01\x46\x01\x00" + struct.pack("!I", PAYLOAD_LOAD_ADDR) + struct.pack("!I", PAYLOAD_LOAD_SIZE)
+    req = build_request_download_data(ram_geometry)
     up_ok, _ = call("request download",
                     lambda: uds._uds_request(SERVICE_TYPE.REQUEST_DOWNLOAD, data=req))
     if up_ok:
-      chunk = 0x400
       xfer_ok = True
-      for i in range(len(payload) // chunk):
-        ok_i, _ = call(f"transfer_data {i + 1}",
-                       lambda i=i: uds.transfer_data(i + 1, payload[i * chunk:(i + 1) * chunk]))
+      try:
+        chunks = transfer_chunks(payload, ram_geometry)
+      except RamExecGeometryError as e:
+        record("payload geometry", False, str(e), time.monotonic())
+        chunks = []
+        xfer_ok = False
+      for i, chunk in enumerate(chunks, start=1):
+        ok_i, _ = call(f"transfer_data {i}",
+                       lambda i=i, chunk=chunk: uds.transfer_data(i, chunk))
         if not ok_i:
           xfer_ok = False
           break
       if xfer_ok:
         call("transfer_exit", lambda: uds.request_transfer_exit())
-        verify = b"\x45\x00" + struct.pack("!I", PAYLOAD_LOAD_ADDR) + struct.pack("!I", PAYLOAD_LOAD_SIZE)
+        verify = build_verify_routine_data(ram_geometry)
         call("verify routine 0x10f0", lambda: uds.routine_control(ROUTINE_CONTROL_TYPE.START, 0x10f0, verify))
 
   # Phase F: trigger + collect (capped short). Report frames/bytes even if the chain

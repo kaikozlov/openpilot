@@ -23,7 +23,7 @@
       <section class="probe-heading">
         <p class="probe-breadcrumb">Recovery · Key material</p>
         <h1 class="probe-title">Dump EPS DataFlash</h1>
-        <p class="probe-description">Run the established payload path on the preserved diagnostic route and retain byte-level coverage for cryptographic candidate scanning.</p>
+        <p class="probe-description">Run the established payload path only after the exact EPS F181 has verified authenticated RequestDownload/0x10F0/callback geometry, then retain byte-level coverage for cryptographic candidate scanning.</p>
         <div class="probe-badges"><span class="probe-badge blue">NOT READY</span><span class="probe-badge amber">RESETS EPS</span><span class="probe-badge amber">ACTIVE</span></div>
       </section>
 
@@ -33,7 +33,7 @@
             <div class="probe-card-body">
               <p class="probe-card-kicker">Operation</p>
               <h2 class="probe-card-title">DataFlash recovery</h2>
-              <p class="probe-card-copy">Uses the known 32 KiB dump payload. The recovered bytes are evidence only until a candidate cryptographically authenticates the captured target SecOC traffic; recovery still does not install SecOCKey.</p>
+              <p class="probe-card-copy">Uses the known 32 KiB dump payload, whose authenticated 4 KiB package is bound to FEBF0000 with callback FEBF0000. Unknown F181s are refused before PROGRAMMING; bootloader reappearance or a linker VMA alone cannot authorize the upload. Recovered bytes remain evidence until a candidate authenticates the captured target SecOC traffic.</p>
               <ul class="probe-meta-list"><li class="probe-meta-row"><span class="probe-meta-label">Vehicle state</span><span class="probe-meta-value">Not Ready to Drive</span></li><li class="probe-meta-row"><span class="probe-meta-label">Range</span><span class="probe-meta-value">0xFF200000–0xFF208000</span></li><li class="probe-meta-row"><span class="probe-meta-label">Default payload</span><span class="probe-meta-value">Standard / no auto-reset</span></li></ul>
               <div class="probe-subtle-divider"></div>
               <div class="probe-actions"><label class="probe-option" for="recoveryPayload"><input type="checkbox" id="recoveryPayload"><span><strong>Experimental auto-reset after dump</strong><br>Uses the locally re-authenticated reset-ending derivative. The raw external candidate is never sent and this variant is not yet vehicle-confirmed.</span></label><button class="run-btn primary" id="startBtn" type="button">Start DataFlash dump</button></div>
