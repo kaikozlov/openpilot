@@ -16,7 +16,9 @@ from tsk.lib.collect_can import collect as collect_can, count_oracle_frames, ora
 from tsk.lib.secoc_discovery import load_oracle_discovery
 from tsk.lib.secoc_profile import CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS, CURRENT_OPENPILOT_LONGITUDINAL_PROTECTED_ADDRS
 from tsk.lib.dump_dataflash import (
-  DUMP_TOTAL, dump as dump_dataflash, dump_path, partial_coverage_path, partial_dump_path,
+  AUTORESET_PAYLOAD_SHA256 as DATAFLASH_AUTORESET_PAYLOAD_SHA256,
+  DUMP_TOTAL, PAYLOAD_SHA256 as DATAFLASH_PAYLOAD_SHA256, dump as dump_dataflash, dump_path,
+  partial_coverage_path, partial_dump_path,
 )
 from tsk.lib.env import is_agnos
 from tsk.lib.evidence import create_evidence_bundle, record_operation
@@ -24,7 +26,11 @@ from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.key_file_manager import KeyFileManager, format_key
 from tsk.lib.recovered_key import persist_recovered_key, public_recovered_key_status, recovered_key_hex
 from tsk.lib.reboot_manager import REBOOT_ACTIONS, RebootManager
-from tsk.lib.ram_exec_geometry import known_ram_exec_geometry
+from tsk.lib.ram_exec_geometry import known_ram_exec_geometry, normalize_f181
+from tsk.lib.bootstrap_profile import RAM_DUMP_FIXTURE_SHA256, fixture_is_evidenced, public_bootstrap_status
+from tsk.lib.ephemeral_runtime import (
+  EphemeralRuntimeError, import_runtime_package_json, public_runtime_status, run_inert_canary,
+)
 from tsk.lib.sniff_can import sniff as sniff_can, summarize_counts
 from tsk.lib.dump_diag import diagnose as dump_diagnose
 from tsk.lib.prog_probe import probe_programming
@@ -61,7 +67,7 @@ READY_OPERATIONS = {"/api/can-collect", "/api/ready-capture", "/api/ready-diff"}
 NRTD_OPERATIONS = {
   "/api/extract", "/api/dataflash-dump", "/api/dataflash-diag", "/api/prog-probe",
   "/api/read-mem", "/api/xcp-observer", "/api/ident-map", "/api/reset-probe", "/api/level3-probe",
-  "/api/sendkey-probe", "/api/preamble-probe", "/api/uds-sweep",
+  "/api/sendkey-probe", "/api/preamble-probe", "/api/uds-sweep", "/api/ephemeral-canary",
 }
 
 
@@ -417,6 +423,19 @@ xcp_state = {
   "message": "",
 }
 
+# Audited inert ephemeral scheduler canary. This is the only live ephemeral-runtime
+# operation exposed by TSK; no steering bridge binary or bridge endpoint exists.
+ephemeral_lock = threading.Lock()
+ephemeral_state = {
+  "status": "idle",   # idle | running | passed | failed
+  "step": "",
+  "message": "",
+  "f181": "",
+  "package": {},
+  "result": {},
+  "bridge_execution_exposed": False,
+}
+
 # EPS identity + observation-oriented service-surface map.
 ident_lock = threading.Lock()
 ident_state = {
@@ -583,6 +602,7 @@ def operation_states_snapshot() -> dict:
       ("sniff", sniff_lock, sniff_state), ("dataflash_diag", diag_lock, diag_state),
       ("programming", probe_lock, probe_state), ("read_memory", readmem_lock, readmem_state),
       ("xcp_observer", xcp_lock, xcp_state),
+      ("ephemeral_canary", ephemeral_lock, ephemeral_state),
       ("identity", ident_lock, ident_state), ("reset", reset_lock, reset_state),
       ("level3", level3_lock, level3_state), ("send_key", sendkey_lock, sendkey_state),
       ("preamble", preamble_lock, preamble_state), ("uds_sweep", sweep_lock, sweep_state),
@@ -600,17 +620,22 @@ def _identity_value(identity: list[dict], name: str) -> str:
   return ""
 
 
-def ram_exec_geometry_status(identity: list[dict]) -> dict:
-  """Return the fail-closed authenticated payload geometry status for identity rows."""
+def ram_exec_geometry_status(identity: list[dict], *, fixture_sha256: str = DATAFLASH_PAYLOAD_SHA256) -> dict:
+  """Return independent boot geometry, bootstrap-family, and fixture gates."""
   app_sw = _identity_value(identity, "app_sw_id")
   geometry = known_ram_exec_geometry(app_sw) if app_sw else None
+  bootstrap = public_bootstrap_status(app_sw, fixture_sha256=fixture_sha256) if app_sw else {
+    "compatible": False, "fixture_evidenced": False, "f181": "", "message": "EPS F181 is not identified."
+  }
   if geometry is None:
     return {
       "ready": False,
       "f181": app_sw,
       "geometry": None,
+      "bootstrap": bootstrap,
+      "dataflash_fixture_ready": bool(bootstrap.get("fixture_evidenced")),
       "message": (
-        "No authenticated RequestDownload/0x10F0/callback geometry is verified for this exact F181. " +
+        "No authenticated RequestDownload/0x10F0/callback geometry is evidenced for this exact F181. " +
         "A successful PROGRAMMING handoff or an observed linker VMA is not sufficient evidence."
       ),
     }
@@ -618,7 +643,13 @@ def ram_exec_geometry_status(identity: list[dict]) -> dict:
     "ready": True,
     "f181": app_sw,
     "geometry": geometry.public_dict(),
-    "message": "Exact F181 has verified authenticated RAM-exec geometry.",
+    "bootstrap": bootstrap,
+    "dataflash_fixture_ready": bool(bootstrap.get("fixture_evidenced")),
+    "message": (
+      "Exact F181 has evidenced authenticated RAM-exec geometry and selected DataFlash fixture."
+      if bootstrap.get("fixture_evidenced") else
+      "Exact F181 has evidenced boot geometry, but selected DataFlash ciphertext is not target-evidenced."
+    ),
   }
 
 
@@ -652,6 +683,11 @@ def dashboard_payload() -> dict:
   identity_ready = identity.get("status") == "mapped" and bool(app_sw)
   ram_geometry = ram_exec_geometry_status(identity.get("identity", []))
   ram_geometry_ready = bool(ram_geometry["ready"])
+  bootstrap_ready = bool(ram_geometry.get("bootstrap", {}).get("compatible"))
+  dataflash_fixture_ready = bool(ram_geometry.get("dataflash_fixture_ready"))
+  legacy_ram_fixture_ready = bool(app_sw and fixture_is_evidenced(app_sw, RAM_DUMP_FIXTURE_SHA256) and
+                                  any(normalize_f181(raw) == app_sw for raw in TSKExtractor.APPLICATION_VERSIONS))
+  runtime = public_runtime_status(app_sw) if app_sw else public_runtime_status("")
   known_transfer = bool(ram_geometry_ready and ram_geometry["geometry"].get("programming_handoff_verified"))
   can_ready = bool(can.get("ready") or can.get("status") == "complete")
   key_recovered = bool(recovered.get("recovered"))
@@ -725,16 +761,37 @@ def dashboard_payload() -> dict:
       "href": "", "label": "RAM-exec geometry required", "vehicle_state": "Research / bench",
       "tone": "warning", "action": "research",
     }
+  elif not key_recovered and not dataflash_fixture_ready and not legacy_ram_fixture_ready:
+    stage = "bootstrap_fixture"
+    next_action = {
+      "id": "bootstrap_fixture", "title": "Establish the exact bootstrap payload",
+      "description": (
+        "This EPS is in an evidenced authenticated-RAM bootstrap family, but the selected 4 KiB DataFlash " +
+        "ciphertext is not evidenced byte-for-byte for this F181. Do not infer fixture acceptance from shared RAM geometry."
+      ),
+      "href": "/ephemeral-runtime.html", "label": "Review runtime/bootstrap evidence",
+      "vehicle_state": "Research / bench", "tone": "warning", "action": "research",
+    }
   elif not key_recovered and not dataflash_ready:
     stage = "dataflash"
-    next_action = {
-      "id": "dataflash", "title": "Recover key material",
-      "description": (
-        "Dump EPS DataFlash using the exact F181's verified authenticated RAM-exec geometry. " +
-        "A recovered candidate becomes trusted only after it authenticates the captured target traffic."
-      ),
-      "href": "/dataflash-collector.html", "label": "Dump DataFlash", "vehicle_state": "Not Ready to Drive", "tone": "primary",
-    }
+    if legacy_ram_fixture_ready and not dataflash_fixture_ready:
+      next_action = {
+        "id": "dataflash", "title": "Recover key material with the known RAM extractor",
+        "description": (
+          "The public RAM payload is target-evidenced for this legacy key-table calibration; the separate DataFlash " +
+          "ciphertext is not. Use the calibration-specific RAM extractor rather than projecting DataFlash fixture acceptance."
+        ),
+        "href": "/extractor.html", "label": "Run RAM extractor", "vehicle_state": "Not Ready to Drive", "tone": "primary",
+      }
+    else:
+      next_action = {
+        "id": "dataflash", "title": "Recover key material",
+        "description": (
+          "Dump EPS DataFlash using the exact F181's evidenced boot geometry and target-evidenced encrypted fixture. " +
+          "A recovered candidate becomes trusted only after it authenticates captured target traffic."
+        ),
+        "href": "/dataflash-collector.html", "label": "Dump DataFlash", "vehicle_state": "Not Ready to Drive", "tone": "primary",
+      }
   elif not key_recovered:
     stage = "verify"
     next_action = {
@@ -808,14 +865,20 @@ def dashboard_payload() -> dict:
     {"id": "programming", "title": "Confirm recovery route", "state": step_state(key_recovered or programming_ready, "programming"),
      "detail": ("Key already recovered" if key_recovered else "Known transfer path" if known_transfer else
                 "Bootloader reappeared" if programming_status == "entered" else "Required if DataFlash recovery is needed")},
-    {"id": "ram_geometry", "title": "Verify RAM-exec geometry", "state": step_state(key_recovered or ram_geometry_ready, "ram_geometry"),
+    {"id": "ram_geometry", "title": "Verify boot RAM-exec geometry", "state": step_state(key_recovered or ram_geometry_ready, "ram_geometry"),
      "detail": ("Key already recovered" if key_recovered else
-                f"{ram_geometry['geometry']['load_addr']} / {ram_geometry['geometry']['size']} verified for F181" if ram_geometry_ready else
+                f"{ram_geometry['geometry']['load_addr']} / {ram_geometry['geometry']['size']} evidenced for F181" if ram_geometry_ready else
                 "Authenticated RequestDownload/0x10F0/callback geometry not established")},
+    {"id": "bootstrap_fixture", "title": "Verify exact bootstrap fixture",
+     "state": step_state(key_recovered or dataflash_fixture_ready or legacy_ram_fixture_ready, "bootstrap_fixture"),
+     "detail": ("Key already recovered" if key_recovered else "DataFlash fixture target-evidenced" if dataflash_fixture_ready else
+                "RAM extractor fixture target-evidenced" if legacy_ram_fixture_ready else
+                "Bootstrap family known; exact ciphertext still required")},
     {"id": "dataflash", "title": "Recover key material", "state": step_state(key_recovered or dataflash_ready, "dataflash"),
      "detail": ("Key material recovered" if key_recovered else "Complete DataFlash dump" if dataflash.get("ready") else
                 "Usable partial dump" if dataflash.get("status") == "partial" else
-                "Blocked on RAM-exec geometry" if not ram_geometry_ready else "Waiting")},
+                "Blocked on boot RAM-exec geometry" if not ram_geometry_ready else
+                "Blocked on exact bootstrap fixture" if not (dataflash_fixture_ready or legacy_ram_fixture_ready) else "Waiting")},
     {"id": "verify", "title": "Cryptographically recover key", "state": step_state(key_recovered, "verify"),
      "detail": (f"Recovered key {recovered.get('key_sha256_prefix', '')}" if key_recovered else "No operational install at this step")},
     {"id": "integration", "title": "Review target integration", "state": step_state(integration_ready, "integration"),
@@ -842,6 +905,9 @@ def dashboard_payload() -> dict:
       "identified": identity_ready,
       "known_transfer": known_transfer,
       "ram_exec_geometry": ram_geometry,
+      "bootstrap_compatible": bootstrap_ready,
+      "dataflash_fixture_ready": dataflash_fixture_ready,
+      "ephemeral_runtime": runtime,
       "app_sw_id": app_sw,
       "spare_part_no": spare_part,
       "ecu_serial": ecu_serial,
@@ -1600,6 +1666,75 @@ def start_xcp_job(profile: str = "actuation-discriminator") -> bool:
   except Exception:
     with xcp_lock:
       xcp_state.update(status="failed", message="Could not start the XCP observer job.")
+    panda_lock.release()
+    return False
+  return True
+
+
+def _ephemeral_progress(step=None, message=None) -> None:
+  with ephemeral_lock:
+    if step is not None:
+      ephemeral_state["step"] = str(step)
+    if message is not None:
+      ephemeral_state["message"] = str(message)
+
+
+def _run_ephemeral_mock(f181: str) -> None:
+  for step, message in (
+      ("identified", f"F181 {f181}; runtime package and route bound"),
+      ("programming", "bootloader reappeared on preserved route"),
+      ("bootstrap-authenticated", "target-accepted bootstrap passed 0x10F0"),
+      ("heartbeat", "heartbeat advanced 0x10 -> 0x20"),
+      ("reset-to-stock", "heartbeat stopped after reset"),
+  ):
+    time.sleep(0.08)
+    _ephemeral_progress(step=step, message=message)
+  result = {
+    "status": "passed", "f181": f181, "scheduler_observed": True,
+    "reset_to_stock_verified": True, "bridge_execution_exposed": False, "mock": True,
+  }
+  with ephemeral_lock:
+    ephemeral_state.update(status="passed", result=result, message="Inert scheduler canary passed (mock).")
+
+
+def _run_ephemeral_canary_job(f181: str) -> None:
+  try:
+    result = run_inert_canary(expected_f181=f181, bench_isolated=True, progress_cb=_ephemeral_progress)
+    with ephemeral_lock:
+      ephemeral_state.update(status="passed", result=result, message=(
+        "Inert scheduler canary heartbeat and reset-to-stock proof passed. "
+        "The steering bridge remains unavailable in TSK."
+      ))
+  except NotAGNOSError:
+    _run_ephemeral_mock(f181)
+  except Exception as e:
+    with ephemeral_lock:
+      ephemeral_state.update(status="failed", message=str(e), result={})
+  finally:
+    TSKExtractor._close_panda()
+    panda_lock.release()
+
+
+def start_ephemeral_canary_job(f181: str, *, bench_isolated: bool) -> bool:
+  target = normalize_f181(f181)
+  if not target or not bench_isolated:
+    return False
+  runtime = public_runtime_status(target)
+  if not runtime.get("live_canary_ready"):
+    return False
+  if not panda_lock.acquire(blocking=False):
+    return False
+  with ephemeral_lock:
+    ephemeral_state.update(
+      status="running", step="", message="", f181=target, package=runtime, result={},
+      bridge_execution_exposed=False,
+    )
+  try:
+    threading.Thread(target=_run_ephemeral_canary_job, args=(target,),
+                     name="tsk_ephemeral_canary", daemon=True).start()
+  except Exception:
+    with ephemeral_lock:
+      ephemeral_state.update(status="failed", message="Could not start the inert canary job.")
     panda_lock.release()
     return False
   return True
@@ -2654,6 +2789,53 @@ class TSKWebHandler(BaseHTTPRequestHandler):
         }, status=HTTPStatus.INTERNAL_SERVER_ERROR)
       return
 
+    if path == "/api/ephemeral-runtime-package":
+      try:
+        request = self._read_json_body()
+        with ident_lock:
+          app_sw = _identity_value([dict(row) for row in ident_state.get("identity", [])], "app_sw_id")
+        if not app_sw:
+          self._send_json({
+            "ok": False, "status": "identity_required",
+            "message": "Identify the EPS F181 before importing a SHA-bound runtime package.",
+          }, status=HTTPStatus.CONFLICT)
+          return
+        status = import_runtime_package_json(request, expected_f181=app_sw)
+        self._send_json({"ok": True, "status": "imported", "runtime": status})
+      except EphemeralRuntimeError as e:
+        self._send_json({"ok": False, "status": "invalid_runtime_package", "message": str(e)},
+                        status=HTTPStatus.CONFLICT)
+      except Exception as e:
+        self._send_json({"ok": False, "status": "error", "message": str(e),
+                         "traceback": traceback.format_exc()}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+      return
+
+    if path == "/api/ephemeral-canary":
+      request = self._read_json_body()
+      if not bool(request.get("bench_isolated", False)):
+        self._send_json({
+          "ok": False, "status": "bench_ack_required",
+          "message": "Inert canary execution requires explicit isolated-bench acknowledgement. No programming request was sent.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      with ident_lock:
+        app_sw = _identity_value([dict(row) for row in ident_state.get("identity", [])], "app_sw_id")
+      runtime = public_runtime_status(app_sw) if app_sw else public_runtime_status("")
+      if not runtime.get("live_canary_ready"):
+        self._send_json({
+          "ok": False, "status": "runtime_not_ready", "runtime": runtime,
+          "message": runtime.get("message", "Audited inert runtime is not ready for this F181."),
+        }, status=HTTPStatus.CONFLICT)
+        return
+      if not start_ephemeral_canary_job(app_sw, bench_isolated=True):
+        self._send_json({
+          "ok": False, "status": "running",
+          "message": "The inert canary could not start; another panda operation may be in progress.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      self._send_json({"ok": True, "status": "running", "runtime": runtime})
+      return
+
     if path == "/api/can-collect":
       if not start_can_job():
         self._send_json({
@@ -2668,14 +2850,26 @@ class TSKWebHandler(BaseHTTPRequestHandler):
     if path == "/api/dataflash-dump":
       request = self._read_json_body()
       use_recovery_payload = bool(request.get("use_recovery_payload", False))
+      selected_fixture_sha = DATAFLASH_AUTORESET_PAYLOAD_SHA256 if use_recovery_payload else DATAFLASH_PAYLOAD_SHA256
       with ident_lock:
-        geometry_gate = ram_exec_geometry_status([dict(row) for row in ident_state.get("identity", [])])
+        geometry_gate = ram_exec_geometry_status(
+          [dict(row) for row in ident_state.get("identity", [])], fixture_sha256=selected_fixture_sha
+        )
       if not geometry_gate["ready"]:
         self._send_json({
           "ok": False,
           "status": "ram_exec_geometry_required",
           "ram_exec_geometry": geometry_gate,
           "message": geometry_gate["message"] + " No programming, SecurityAccess, DID write, or payload upload was started.",
+        }, status=HTTPStatus.CONFLICT)
+        return
+      if not geometry_gate.get("dataflash_fixture_ready"):
+        self._send_json({
+          "ok": False,
+          "status": "bootstrap_fixture_required",
+          "ram_exec_geometry": geometry_gate,
+          "message": (geometry_gate["message"] +
+                      " The selected DataFlash payload was not sent; exact fixture acceptance is independent from shared boot geometry."),
         }, status=HTTPStatus.CONFLICT)
         return
       if not start_dataflash_job(use_recovery_payload=use_recovery_payload):
@@ -2956,6 +3150,17 @@ class TSKWebHandler(BaseHTTPRequestHandler):
       with readmem_lock:
         payload = dict(readmem_state)
       self._send_json(payload, send_body=send_body)
+      return
+
+    if path == "/api/ephemeral-runtime-status":
+      with ident_lock:
+        app_sw = _identity_value([dict(row) for row in ident_state.get("identity", [])], "app_sw_id")
+      with ephemeral_lock:
+        job = dict(ephemeral_state)
+      self._send_json({
+        "runtime": public_runtime_status(app_sw) if app_sw else public_runtime_status(""),
+        "job": job,
+      }, send_body=send_body)
       return
 
     if path == "/api/xcp-observer-status":

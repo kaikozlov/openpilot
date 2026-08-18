@@ -4,6 +4,7 @@ import unittest
 from tsk.lib.ram_exec_geometry import (
   ANALYZED_8965B4512000_RAM_EXEC,
   COMMITTED_PAYLOAD_CONTRACT,
+  COMMUNITY_B4_F3F4_RAM_EXEC,
   LEGACY_8965B4_RAM_EXEC,
   NEWER_TOYOTA_FEBE0000_LINKER_OBSERVATION,
   RamExecGeometry,
@@ -25,6 +26,13 @@ class TestRamExecGeometry(unittest.TestCase):
       self.assertEqual(geometry.load_addr, 0xFEBF0000)
       self.assertEqual(geometry.size, 0x1000)
       self.assertEqual(geometry.callback_addr, geometry.load_addr)
+
+  def test_cross_vehicle_boot_geometry_covers_evidence_graded_b4_f3_f4_ids(self):
+    for target in ("8965B4514000", "8965F3401200", "8965F4207000", "8965F4201000"):
+      geometry = resolve_ram_exec_geometry(target)
+      self.assertEqual(geometry, COMMUNITY_B4_F3F4_RAM_EXEC)
+      self.assertEqual((geometry.load_addr, geometry.size, geometry.callback_addr),
+                       (0xFEBF0000, 0x1000, 0xFEBF0000))
 
   def test_analyzed_4512000_is_separate_from_legacy_ram_key_table_family(self):
     geometry = resolve_ram_exec_geometry(b"\x018965B4512000\x00")

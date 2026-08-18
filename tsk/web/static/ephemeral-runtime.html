@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ephemeral runtime canary · TSK Manager</title>
+    <link rel="stylesheet" href="/css/app.css">
+    <link rel="stylesheet" href="/css/probe.css">
+  </head>
+  <body class="probe-body">
+    <header class="probe-topbar">
+      <div class="probe-topbar-inner">
+        <a class="probe-back" href="/#research"><span class="probe-back-arrow">←</span><span>Research</span></a>
+        <div class="probe-context" aria-label="Current vehicle context">
+          <span class="probe-context-item" id="probeVehicle">Loading vehicle…</span>
+          <span class="probe-context-sep"></span>
+          <span class="probe-context-item route" id="probeRoute">Loading route…</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="probe-page">
+      <section class="probe-heading">
+        <p class="probe-breadcrumb">Research · Transfer experiments</p>
+        <h1 class="probe-title">Ephemeral scheduler canary</h1>
+        <p class="probe-description">Import a resolver-produced, SHA-bound runtime target manifest and its audited inert canary. TSK can execute only the inert scheduler canary, and only when the target also has an independently verified post-auth substitution primitive. Steering-bridge execution is not exposed.</p>
+        <div class="probe-badges"><span class="probe-badge blue">NOT READY / BENCH</span><span class="probe-badge amber">PROGRAMMING RESET</span><span class="probe-badge green">NO CODEFLASH WRITE</span></div>
+      </section>
+
+      <div class="probe-layout">
+        <aside class="probe-side">
+          <section class="probe-card">
+            <div class="probe-card-body">
+              <p class="probe-card-kicker">Static evidence package</p>
+              <h2 class="probe-card-title">Import exact target artifacts</h2>
+              <p class="probe-card-copy">Generate these offline from the target's exact 1 MiB CodeFlash. Importing files performs no vehicle operation.</p>
+              <label class="probe-field-label" for="manifestFile">Target manifest JSON</label>
+              <input id="manifestFile" type="file" accept="application/json,.json">
+              <label class="probe-field-label" for="auditFile">Audited canary JSON</label>
+              <input id="auditFile" type="file" accept="application/json,.json">
+              <label class="probe-field-label" for="canaryFile">Canary binary</label>
+              <input id="canaryFile" type="file" accept="application/octet-stream,.bin">
+              <div class="probe-subtle-divider"></div>
+              <p class="probe-card-copy">Only needed when this F181 does not have an exact built-in 4 KiB bootstrap fixture:</p>
+              <label class="probe-field-label" for="bootstrapFile">Target-accepted bootstrap fixture (optional)</label>
+              <input id="bootstrapFile" type="file" accept="application/octet-stream,.bin">
+              <label class="probe-field-label" for="bootstrapSha">Bootstrap SHA-256</label>
+              <input id="bootstrapSha" class="probe-input" type="text" autocomplete="off" placeholder="64 hex characters">
+              <label class="probe-field-label" for="bootstrapEvidence">Acceptance evidence note</label>
+              <input id="bootstrapEvidence" class="probe-input" type="text" autocomplete="off" placeholder="e.g. 0x10F0 accepted on isolated target">
+              <div class="probe-actions"><button class="run-btn" id="importBtn" type="button">Import audited canary package</button></div>
+            </div>
+          </section>
+
+          <section class="probe-card">
+            <div class="probe-card-body">
+              <p class="probe-card-kicker">Live canary gate</p>
+              <h2 class="probe-card-title">Prove scheduler ownership and reset</h2>
+              <p class="probe-card-copy">The run enters programming, authenticates the known 4 KiB bootstrap, substitutes only the audited inert canary, writes the callback pointer last, triggers it, observes heartbeat progression, then hardware-resets the EPS and verifies the heartbeat stops.</p>
+              <label style="display:flex;gap:10px;align-items:flex-start;margin-top:14px">
+                <input id="benchAck" type="checkbox" style="margin-top:4px">
+                <span>I am on an isolated stationary bench / Not Ready target and accept the EPS programming/reset transition.</span>
+              </label>
+              <div class="probe-actions"><button class="run-btn primary" id="runBtn" type="button">Run inert canary</button></div>
+              <div class="probe-subtle-divider"></div>
+              <p class="probe-card-copy"><strong>Hard boundary:</strong> TSK ships no steering-bridge binary and exposes no bridge-deployment API. Passing this canary does not authorize steering behavior by itself.</p>
+            </div>
+          </section>
+        </aside>
+
+        <section class="probe-card probe-terminal-card">
+          <div class="probe-terminal-head">
+            <span class="probe-terminal-title">Runtime evidence</span>
+            <span class="probe-terminal-hint">F181 · CodeFlash SHA · bootstrap · retention · canary</span>
+          </div>
+          <div class="terminal" id="terminal" role="log" aria-live="polite"></div>
+        </section>
+      </div>
+    </main>
+
+    <script src="/js/probe.js"></script>
+    <script>
+      const terminal = document.getElementById("terminal");
+      const importBtn = document.getElementById("importBtn");
+      const runBtn = document.getElementById("runBtn");
+      const benchAck = document.getElementById("benchAck");
+
+      function write(text, cls) {
+        const span = document.createElement("span");
+        if (cls) span.className = cls;
+        span.textContent = text + "\n";
+        terminal.appendChild(span);
+        terminal.scrollTop = terminal.scrollHeight;
+      }
+      function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+      async function b64(file) {
+        if (!file) return "";
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let binary = "";
+        const step = 0x8000;
+        for (let i = 0; i < bytes.length; i += step) binary += String.fromCharCode(...bytes.subarray(i, i + step));
+        return btoa(binary);
+      }
+      async function status() {
+        const response = await fetch("/api/ephemeral-runtime-status", {cache: "no-store"});
+        return response.json();
+      }
+      function render(payload) {
+        const runtime = payload.runtime || {};
+        const job = payload.job || {};
+        write("Ephemeral runtime status", runtime.present ? "ok" : "warn");
+        write("F181: " + (runtime.f181 || "not identified"));
+        if (!runtime.present) {
+          write(runtime.message || "No package installed.", "warn");
+          return;
+        }
+        write("Package source: " + (runtime.source || "?"));
+        write("CodeFlash SHA-256: " + runtime.codeflash_sha256);
+        write("Target manifest SHA-256: " + runtime.target_manifest_sha256);
+        write("Canary: " + runtime.canary_size + " bytes · " + runtime.canary_sha256);
+        write("Retained R/W/X: " + runtime.retained_base + " .. " + runtime.retained_end_exclusive);
+        write("Callback cell: " + runtime.callback_cell + " · heartbeat: " + runtime.heartbeat_address);
+        write("Bootstrap family: " + (runtime.bootstrap?.compatible ? "evidenced" : "NOT evidenced"), runtime.bootstrap?.compatible ? "ok" : "warn");
+        write("Exact bootstrap fixture: " + (runtime.bootstrap_fixture_ready ? "ready" : "required"), runtime.bootstrap_fixture_ready ? "ok" : "warn");
+        write("Post-auth raw substitution: " + (runtime.raw_substitution_verified ? "target-verified" : "NOT target-verified"), runtime.raw_substitution_verified ? "ok" : "warn");
+        write("Live inert canary: " + (runtime.live_canary_ready ? "ready" : "blocked"), runtime.live_canary_ready ? "ok" : "warn");
+        write("Scheduler observed: " + (runtime.scheduler_observed ? "yes" : "no"));
+        write("Reset-to-stock verified: " + (runtime.reset_to_stock_verified ? "yes" : "no"));
+        write("Steering bridge execution exposed: " + (runtime.bridge_execution_exposed ? "YES" : "no"), runtime.bridge_execution_exposed ? "err" : "ok");
+        if (job.status && job.status !== "idle") write("Job: " + job.status + (job.step ? " · " + job.step : "") + (job.message ? " · " + job.message : ""), job.status === "failed" ? "err" : "dim");
+        if (runtime.message) write(runtime.message, "dim");
+      }
+      async function refresh(clear = true) {
+        if (clear) TSKProbe.clearTerminal();
+        try { render(await status()); } catch (error) { write(String(error), "err"); }
+      }
+
+      importBtn.addEventListener("click", async () => {
+        TSKProbe.clearTerminal();
+        TSKProbe.runButton(importBtn, true, "Importing…");
+        try {
+          const manifest = document.getElementById("manifestFile").files[0];
+          const audit = document.getElementById("auditFile").files[0];
+          const canary = document.getElementById("canaryFile").files[0];
+          if (!manifest || !audit || !canary) { write("Manifest, canary audit, and canary binary are required.", "err"); return; }
+          const bootstrap = document.getElementById("bootstrapFile").files[0];
+          const body = {
+            target_manifest_b64: await b64(manifest),
+            canary_audit_b64: await b64(audit),
+            canary_b64: await b64(canary),
+            bootstrap_fixture_b64: await b64(bootstrap),
+            bootstrap_fixture_sha256: document.getElementById("bootstrapSha").value.trim(),
+            bootstrap_fixture_evidence: document.getElementById("bootstrapEvidence").value.trim(),
+          };
+          const response = await fetch("/api/ephemeral-runtime-package", {method: "POST", cache: "no-store", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+          const result = await response.json();
+          if (!result.ok) { write(result.message || "Runtime package import failed.", "err"); return; }
+          write("Runtime package imported and F181-bound.", "ok");
+          await refresh(false);
+        } finally { TSKProbe.runButton(importBtn, false); }
+      });
+
+      runBtn.addEventListener("click", async () => {
+        TSKProbe.clearTerminal();
+        if (!benchAck.checked) { write("Check the isolated-bench acknowledgement first. No request was sent.", "err"); return; }
+        TSKProbe.runButton(runBtn, true, "Running canary…");
+        try {
+          const response = await fetch("/api/ephemeral-canary", {method: "POST", cache: "no-store", headers: {"Content-Type": "application/json"}, body: JSON.stringify({bench_isolated: true})});
+          const result = await response.json();
+          if (!result.ok) { write(result.message || "Could not start inert canary.", "err"); return; }
+          let previous = "";
+          while (true) {
+            await sleep(300);
+            const current = await status();
+            const job = current.job || {};
+            const marker = `${job.status || ""}:${job.step || ""}:${job.message || ""}`;
+            if (marker !== previous) { previous = marker; if (job.message) write((job.step ? job.step + ": " : "") + job.message, job.status === "failed" ? "err" : "dim"); }
+            if (job.status !== "running") { render(current); break; }
+          }
+        } finally { TSKProbe.runButton(runBtn, false); }
+      });
+
+      refresh();
+    </script>
+  </body>
+</html>

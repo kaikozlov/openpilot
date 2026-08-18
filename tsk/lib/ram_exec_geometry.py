@@ -10,9 +10,11 @@ The bootloader payload path couples four things that must agree:
 * the 0x10F0 verification address/length; and
 * the callback address embedded in the authenticated payload package.
 
-Only calibrations with evidence for that complete contract resolve automatically here.
-Unknown calibrations fail closed.  A future non-default geometry can be represented only
-as an explicitly verified ``RamExecGeometry``; the separate linker-VMA observation type is
+Only calibrations with evidence for that complete *bootloader* contract resolve automatically
+here. This module does not claim that downloaded RAM survives application startup or is
+application-executable; that separate contract is represented by the ephemeral-runtime target
+manifest. Unknown calibrations fail closed. A future non-default boot geometry can be represented
+only as an explicitly evidenced ``RamExecGeometry``; the separate linker-VMA observation type is
 intentionally not accepted by the resolver.
 """
 from __future__ import annotations
@@ -113,20 +115,30 @@ class PayloadGeometryContract:
       )
 
 
-# Historical field-supported Willem/TSKM targets. These are intentionally exact F181s,
-# not a broad 8965B4 prefix rule.
-LEGACY_8965B4_RAM_EXEC = RamExecGeometry(
-  name="legacy-8965B4-authenticated-ram-exec",
+# Cross-vehicle community evidence establishes this exact bootloader download/verify/callback
+# geometry on multiple B4/F3/F4 EPS calibrations. These are exact software IDs, never a prefix
+# rule. Exact encrypted-fixture acceptance is a separate gate in bootstrap_profile.py.
+COMMUNITY_B4_F3F4_RAM_EXEC = RamExecGeometry(
+  name="community-B4-F3-F4-authenticated-ram-exec",
   load_addr=0xFEBF0000,
   size=0x1000,
   callback_addr=0xFEBF0000,
   target_f181=frozenset({
-    "8965B4209000",  # 2021 RAV4 Prime
-    "8965B4233100",  # 2023 RAV4 Prime
-    "8965B4509100",  # 2021 Sienna fixture used by current source audit
+    "8965B4209000",
+    "8965B4233100",
+    "8965B4509100",
+    "8965B4514000",
+    "8965F3401200",
+    "8965F4207000",
+    "8965F4201000",
   }),
-  evidence="field-supported Willem/TSKM 8965B4 transfer fixtures",
+  evidence="SECOC-024/028/063 external-source cross-vehicle authenticated-RAM bootstrap geometry",
 )
+
+# Backwards-compatible name retained for callers/tests that refer specifically to the older
+# Willem RAM-key-table subset. Its object identity is now the broader boot-geometry evidence;
+# extractor.APPLICATION_VERSIONS remains the narrow legacy key-table allow-list.
+LEGACY_8965B4_RAM_EXEC = COMMUNITY_B4_F3F4_RAM_EXEC
 
 # The analyzed 4512000 image independently verifies the same 4 KiB authenticated
 # download/0x10F0/callback geometry. It is a separate profile because its CPU-visible key
@@ -140,7 +152,7 @@ ANALYZED_8965B4512000_RAM_EXEC = RamExecGeometry(
   evidence="firmware-verified 8965B4512000 RequestDownload/0x10F0/callback geometry",
 )
 
-KNOWN_RAM_EXEC_GEOMETRIES = (LEGACY_8965B4_RAM_EXEC, ANALYZED_8965B4512000_RAM_EXEC)
+KNOWN_RAM_EXEC_GEOMETRIES = (COMMUNITY_B4_F3F4_RAM_EXEC, ANALYZED_8965B4512000_RAM_EXEC)
 
 # External yc/newer-Toyota evidence observed code linked/deployed at FEBE0000. It does not
 # establish the authenticated bootloader RequestDownload window or callback package, so it
@@ -195,8 +207,9 @@ def resolve_ram_exec_geometry(
   """Resolve executable geometry for one exact F181, failing closed otherwise.
 
   ``explicit`` is the future extension point for a newly evidenced calibration. It must
-  itself assert verified authenticated-download and callback geometry and must name the
+  itself assert evidenced authenticated-download and callback geometry and must name the
   exact target being operated on. Merely observing a linker VMA cannot satisfy this API.
+  A successful result here says nothing about application-retained executable RAM.
   """
   target = normalize_f181(f181)
   known = known_ram_exec_geometry(target)

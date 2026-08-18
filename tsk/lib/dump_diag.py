@@ -30,6 +30,9 @@ from tsk.lib.programming import ProgrammingHandoffError, enter_programming_bootl
 from tsk.lib.dump_dataflash import (
   ADDR, DUMP_START, DUMP_TOTAL, PAYLOAD_SHA256, TRIGGER_ADDR, TRIGGER_SIZE, RESPONSE_PENDING,
 )
+from tsk.lib.bootstrap_profile import (
+  known_bootstrap_target, public_bootstrap_status, fixture_is_evidenced,
+)
 from tsk.lib.ram_exec_geometry import (
   COMMITTED_PAYLOAD_CONTRACT,
   RamExecGeometryError,
@@ -218,6 +221,8 @@ def diagnose(progress_cb=None, *, allow_cross_calibration_send_key: bool = False
   except RamExecGeometryError as e:
     result["ram_exec_geometry"] = {"status": "unverified", "f181": app_f181_name, "error": str(e)}
     record("classify RAM-exec geometry", True, f"unverified; observation continues: {e}", time.monotonic())
+  result["bootstrap"] = public_bootstrap_status(app_f181_name, fixture_sha256=PAYLOAD_SHA256)
+  record("classify bootstrap family", True, result["bootstrap"]["message"], time.monotonic())
 
   ok, _ = call("session EXTENDED", lambda: uds.diagnostic_session_control(SESSION_TYPE.EXTENDED_DIAGNOSTIC))
   if not ok:
@@ -296,7 +301,7 @@ def diagnose(progress_cb=None, *, allow_cross_calibration_send_key: bool = False
     result["message"] = "Bootloader seed observation failed unexpectedly."
     return result
 
-  cross_calibration = ram_geometry is None
+  cross_calibration = known_bootstrap_target(app_f181_name) is None
   result["cross_calibration_send_key"] = cross_calibration
   if cross_calibration and not allow_cross_calibration_send_key:
     result.update(
@@ -353,10 +358,26 @@ def diagnose(progress_cb=None, *, allow_cross_calibration_send_key: bool = False
                          "The target no longer matches the expected payload path.")
     return result
 
-  # Phase E: payload upload on a target whose authenticated geometry is verified.
+  # Phase E: payload upload requires both boot geometry and exact encrypted-fixture evidence.
+  # A shared bootstrap family is not enough to authorize this committed DataFlash ciphertext.
   payload = Path(DATAFLASH_PAYLOAD_PATH).read_bytes()
-  sha_ok = hashlib.sha256(payload).hexdigest() == PAYLOAD_SHA256
+  payload_sha = hashlib.sha256(payload).hexdigest()
+  sha_ok = payload_sha == PAYLOAD_SHA256
   record("payload sha256", sha_ok, "match" if sha_ok else "MISMATCH", time.monotonic())
+  if not sha_ok:
+    result.update(status="failed", message="Committed DataFlash payload hash mismatch; no WDBI or download was sent.")
+    return result
+  if not fixture_is_evidenced(app_f181_name, payload_sha):
+    result.update(
+      status="observed",
+      message=(
+        "Bootloader SecurityAccess/bootstrap compatibility was characterized, but the committed DataFlash "
+        "ciphertext is not evidenced byte-for-byte for this F181. No WDBI, RequestDownload, TransferData, "
+        "0x10F0 start, or payload trigger was sent."
+      ),
+    )
+    record("exact payload fixture gate", True, "not target-evidenced; payload phase stopped", time.monotonic())
+    return result
 
   ok, _ = call("write DID 0x203", lambda: uds.write_data_by_identifier(0x203, b"\x00" * 5))
   if ok:

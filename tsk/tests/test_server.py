@@ -16,6 +16,8 @@ from tsk.web.server import (
   ready_diff_state,
   ready_lock,
   ready_state,
+  ephemeral_lock,
+  ephemeral_state,
   resolve_asset,
   start_ready_diff_job,
   start_ready_job,
@@ -131,12 +133,12 @@ class TestServer(unittest.TestCase):
       "can-collector.html", "can-sniff.html", "dataflash-collector.html", "dataflash-diag.html",
       "extractor.html", "ident-map.html", "level3-probe.html", "preamble-probe.html",
       "prog-probe.html", "read-mem.html", "ready-capture.html", "reset-probe.html",
-      "sendkey-probe.html", "uds-sweep.html", "xcp-observer.html",
+      "sendkey-probe.html", "uds-sweep.html", "xcp-observer.html", "ephemeral-runtime.html",
     )
     explicit_run_pages = (
       "can-collector.html", "can-sniff.html", "dataflash-diag.html", "ident-map.html",
       "level3-probe.html", "preamble-probe.html", "prog-probe.html", "read-mem.html",
-      "reset-probe.html", "xcp-observer.html",
+      "reset-probe.html", "xcp-observer.html", "ephemeral-runtime.html",
     )
 
     for page in probe_pages:
@@ -165,6 +167,15 @@ class TestServer(unittest.TestCase):
     self.assertIn("zero-actuation", stationary)
     self.assertIn("does not transmit steering commands", stationary)
 
+  def test_ephemeral_runtime_page_is_canary_only_and_has_no_bridge_execution_api(self):
+    page = resolve_asset("/ephemeral-runtime.html").read_text(encoding="utf-8")
+    self.assertIn("/api/ephemeral-runtime-package", page)
+    self.assertIn("/api/ephemeral-canary", page)
+    self.assertIn("Steering-bridge execution is not exposed", page)
+    self.assertNotIn("/api/ephemeral-bridge", page)
+    index = resolve_asset("/index.html").read_text(encoding="utf-8")
+    self.assertIn('href="/ephemeral-runtime.html"', index)
+
   def test_dataflash_endpoint_requires_verified_ram_exec_geometry(self):
     server = TSKWebServer(("127.0.0.1", 0), TSKWebHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -186,6 +197,78 @@ class TestServer(unittest.TestCase):
       self.assertEqual(body["status"], "ram_exec_geometry_required")
       self.assertIn("No programming", body["message"])
       start.assert_not_called()
+    finally:
+      server.shutdown()
+      server.server_close()
+      thread.join(timeout=3)
+
+  def test_dataflash_endpoint_requires_exact_fixture_after_boot_geometry(self):
+    server = TSKWebServer(("127.0.0.1", 0), TSKWebHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+      gate = {
+        "ready": True, "f181": "8965B4509100", "geometry": {"load_addr": "0xFEBF0000"},
+        "bootstrap": {"compatible": True, "fixture_evidenced": False},
+        "dataflash_fixture_ready": False,
+        "message": "Boot geometry is evidenced; selected DataFlash ciphertext is not target-evidenced.",
+      }
+      with patch("tsk.web.server.ram_exec_geometry_status", return_value=gate), \
+           patch("tsk.web.server.start_dataflash_job") as start, \
+           patch("tsk.web.server.record_operation"):
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        connection.request("POST", "/api/dataflash-dump", body=b"{}", headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+      self.assertEqual(response.status, 409)
+      self.assertEqual(body["status"], "bootstrap_fixture_required")
+      self.assertIn("not sent", body["message"]
+                    .lower())
+      start.assert_not_called()
+    finally:
+      server.shutdown()
+      server.server_close()
+      thread.join(timeout=3)
+
+  def test_ephemeral_canary_requires_explicit_bench_ack_before_start(self):
+    server = TSKWebServer(("127.0.0.1", 0), TSKWebHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+      with patch("tsk.web.server.start_ephemeral_canary_job") as start, \
+           patch("tsk.web.server.record_operation"):
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        connection.request("POST", "/api/ephemeral-canary", body=b"{}", headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+      self.assertEqual(response.status, 409)
+      self.assertEqual(body["status"], "bench_ack_required")
+      self.assertIn("No programming request was sent", body["message"])
+      start.assert_not_called()
+    finally:
+      server.shutdown()
+      server.server_close()
+      thread.join(timeout=3)
+
+  def test_ephemeral_package_import_is_bound_to_identified_f181(self):
+    server = TSKWebServer(("127.0.0.1", 0), TSKWebHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+      imported = {"present": True, "f181": "8965B4512000", "canary_static_ready": True}
+      with patch("tsk.web.server._identity_value", return_value="8965B4512000"), \
+           patch("tsk.web.server.import_runtime_package_json", return_value=imported) as importer, \
+           patch("tsk.web.server.record_operation"):
+        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+        connection.request("POST", "/api/ephemeral-runtime-package", body=b"{}", headers={"Content-Type": "application/json"})
+        response = connection.getresponse()
+        body = json.loads(response.read())
+        connection.close()
+      self.assertEqual(response.status, 200)
+      self.assertEqual(body["status"], "imported")
+      importer.assert_called_once_with({}, expected_f181="8965B4512000")
     finally:
       server.shutdown()
       server.server_close()
@@ -239,6 +322,7 @@ class TestServer(unittest.TestCase):
     self.assertIn("READY", expected_vehicle_state("/api/ready-capture"))
     self.assertIn("Not Ready", expected_vehicle_state("/api/uds-sweep"))
     self.assertIn("Not Ready", expected_vehicle_state("/api/xcp-observer"))
+    self.assertIn("Not Ready", expected_vehicle_state("/api/ephemeral-canary"))
     self.assertEqual(expected_vehicle_state("/api/health"), "unspecified")
 
   def test_operation_snapshot_has_split_ready_states(self):
@@ -246,6 +330,8 @@ class TestServer(unittest.TestCase):
     self.assertIn("ready_passive", snapshot)
     self.assertIn("ready_active_diff", snapshot)
     self.assertIn("xcp_observer", snapshot)
+    self.assertIn("ephemeral_canary", snapshot)
+    self.assertFalse(snapshot["ephemeral_canary"]["bridge_execution_exposed"])
     self.assertEqual(snapshot["ready_passive"]["mode"], "passive")
     self.assertEqual(snapshot["ready_active_diff"]["mode"], "active_diff")
 

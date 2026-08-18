@@ -13,6 +13,7 @@ from uuid import uuid4
 from tsk.lib.env import (
   CACHE_DIR, DATAFLASH_AUTORESET_PAYLOAD_PATH, DATAFLASH_PAYLOAD_PATH, OPENPILOT_DIR, PAYLOAD_PATH,
 )
+from tsk.lib.ephemeral_runtime import BUILTIN_AUDIT_PATH, BUILTIN_CANARY_PATH, BUILTIN_MANIFEST_PATH
 
 EVIDENCE_ROOT = Path(CACHE_DIR) / "tsk"
 BUNDLE_DIR = EVIDENCE_ROOT / "evidence"
@@ -90,6 +91,16 @@ def build_manifest(operation_states: dict | None = None) -> dict:
       "sha256": sha256_file(path) if path.exists() else None,
     })
 
+  runtime_artifacts = []
+  for label, path in (("builtin_target_manifest", BUILTIN_MANIFEST_PATH),
+                      ("builtin_canary_audit", BUILTIN_AUDIT_PATH),
+                      ("builtin_inert_canary", BUILTIN_CANARY_PATH)):
+    runtime_artifacts.append({
+      "name": label, "path": str(path),
+      "size": path.stat().st_size if path.exists() else None,
+      "sha256": sha256_file(path) if path.exists() else None,
+    })
+
   files = []
   for path in _candidate_files():
     try:
@@ -121,6 +132,7 @@ def build_manifest(operation_states: dict | None = None) -> dict:
       "dongle_id_sha256_prefix": _device_id_hash(),
     },
     "payloads": payloads,
+    "ephemeral_runtime_artifacts": runtime_artifacts,
     "operation_states": operation_states or {},
     "files": files,
   }

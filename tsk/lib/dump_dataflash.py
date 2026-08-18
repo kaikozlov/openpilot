@@ -24,6 +24,9 @@ from tsk.lib.env import (
   is_agnos, DATAFLASH_AUTORESET_PAYLOAD_PATH, DATAFLASH_DIR, DATAFLASH_PAYLOAD_PATH,
 )
 from tsk.lib.extractor import NotAGNOSError, RetryError, TSKExtractor
+from tsk.lib.bootstrap_profile import (
+  BootstrapProfileError, public_bootstrap_status, require_evidenced_fixture,
+)
 from tsk.lib.programming import ProgrammingHandoffError, enter_programming_bootloader, uds_client
 from tsk.lib.ram_exec_geometry import (
   COMMITTED_PAYLOAD_CONTRACT,
@@ -241,6 +244,13 @@ def dump(progress_cb=None, *, auto_reset: bool = False,
       "Refusing DataFlash payload before PROGRAMMING: " +
       f"{e}. Programming handoff or linker-VMA evidence alone cannot authorize this upload."
     ) from e
+  try:
+    bootstrap_evidence = require_evidenced_fixture(app_f181, expected_payload_sha)
+  except BootstrapProfileError as e:
+    raise RetryError(
+      "Refusing DataFlash payload before PROGRAMMING: authenticated RAM-exec geometry may be "
+      "compatible, but exact encrypted-fixture acceptance is a separate gate. " + str(e)
+    ) from e
 
   # Application -> bootloader is an asynchronous reset handoff. Preserve the exact
   # physical route; a missing final 50 02 is not failure if the bootloader reappears.
@@ -351,6 +361,8 @@ def dump(progress_cb=None, *, auto_reset: bool = False,
     route=route_fields(route),
     application_f181=app_f181.hex(),
     ram_exec_geometry={"status": "verified", **resolved_geometry.public_dict()},
+    bootstrap=public_bootstrap_status(app_f181, fixture_sha256=expected_payload_sha),
+    bootstrap_evidence=bootstrap_evidence.public_dict(),
     programming_handoff=handoff,
     payload_variant="auto-reset-experimental" if auto_reset else "standard",
     payload_sha256=expected_payload_sha,

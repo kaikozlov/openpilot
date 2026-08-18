@@ -135,44 +135,108 @@ handoff, record `panda.health()` and `panda.can_health(bus)`, and require the di
 endpoint to reappear on that route. A response timeout alone is not classified as
 failure.
 
-## Authenticated RAM-exec geometry is a separate gate
+## Boot bootstrap, exact ciphertext, and application-retained runtime are separate gates
 
-A successful PROGRAMMING handoff does **not** establish where that bootloader accepts an
-authenticated payload. The executable path couples the RequestDownload destination and
-length, the bytes transferred, routine `0x10F0`'s verification address/length, and the
-callback pointer embedded in the authenticated 4 KiB package. TSK now represents that
-contract explicitly in `tsk/lib/ram_exec_geometry.py` and resolves it by **exact F181**.
+A successful PROGRAMMING handoff proves only that the endpoint transitioned. It does not
+by itself prove any of the following:
 
-The currently trusted geometries are deliberately narrow:
+1. the bootloader's authenticated `RequestDownload`/`0x10F0`/`0xFF00` contract;
+2. acceptance of a particular encrypted 4 KiB payload fixture; or
+3. that downloaded RAM survives application initialization as executable memory.
 
-| exact F181 | load/verify range | callback | evidence scope |
-|---|---:|---:|---|
-| `8965B4209000` | `FEBF0000 + 0x1000` | `FEBF0000` | historical field-supported Willem/TSKM transfer |
-| `8965B4233100` | `FEBF0000 + 0x1000` | `FEBF0000` | historical field-supported Willem/TSKM transfer |
-| `8965B4509100` | `FEBF0000 + 0x1000` | `FEBF0000` | historical field-supported Willem/TSKM transfer |
-| `8965B4512000` | `FEBF0000 + 0x1000` | `FEBF0000` | firmware-verified authenticated download/`0x10F0`/callback geometry |
+TSK now models those as independent evidence axes instead of one coarse “RAM-exec
+compatible” bit.
 
-There is **no prefix rule** for `8965B4...`, and programming reappearance alone cannot
-add a target to this table. A newer-Toyota external report that linked/deployed shellcode
-at `FEBE0000` is retained only as a linker-VMA observation: authenticated RequestDownload
-base/size and callback geometry remain unknown, so `FEBE0000` is not an executable TSK
-profile.
+### 1. Authenticated-RAM boot geometry / bootstrap family
 
-The committed standard, RAM-key, and auto-reset payload fixtures are themselves bound to
-`FEBF0000/0x1000` with callback `FEBF0000`; an otherwise well-evidenced non-default target
-still cannot reuse those binaries if its package geometry differs. The production DataFlash
-dumper reads F181 and resolves/validates this contract **before
-PROGRAMMING, SecurityAccess SEND_KEY, DID writes, RequestDownload, or payload transfer**.
-`/api/dataflash-dump` also refuses to start unless the already identified F181 has a
-trusted geometry. The instrumented DataFlash diagnostic is intentionally looser: on an
-unknown target it may continue through PROGRAMMING, bootloader identity, and REQUEST_SEED.
-It stops before the counted cross-calibration SEND_KEY unless explicitly armed, and even an
-accepted armed key cannot unlock WDBI/download/payload execution without verified geometry.
+`tsk/lib/ram_exec_geometry.py` and `tsk/lib/bootstrap_profile.py` resolve exact F181s; there
+is still **no prefix rule**. Cross-vehicle evidence now covers the shared
+`f05f36b7d78c03e24ab4faef2a57d044` boot SecurityAccess family, zero `0201/0202`,
+`FEBF0000 + 0x1000`, `0x10F0`, and `0xFF00` on these exact Toyota/Denso EPS software IDs:
 
-The legacy RAM key-table extractor is stricter still. `8965B4512000` has valid RAM-exec
-geometry but does not have the older `FEBE6E34` CPU-visible key table, so
-`extractor.hack()` accepts only the three historical field-supported F181s above and
-refuses every other calibration before PROGRAMMING.
+| exact F181 | boot geometry | evidence grade |
+|---|---|---|
+| `8965B4512000` | `FEBF0000 + 0x1000`, callback `FEBF0000` | local firmware-static + generated-artifact verified |
+| `8965B4209000` | same | external-source / field-supported public RAM extractor |
+| `8965B4233100` | same | external-source / field-supported public RAM extractor |
+| `8965B4509100` | same | external-source / field-supported public RAM extractor |
+| `8965B4514000` | same bootstrap family | external-source partner payload/DataFlash workflow |
+| `8965F3401200` | same bootstrap structure | external-source blurbdust patcher, dual CPU |
+| `8965F4207000` | same bootstrap structure | external-source blurbdust patcher |
+| `8965F4201000` | same bootstrap structure | external-source blurbdust patcher |
+
+The newer-Toyota `FEBE0000` shellcode report remains only a linker-VMA observation. It is
+not promoted to authenticated download geometry, callback geometry, or application-retained
+runtime geometry.
+
+### 2. Exact encrypted-fixture acceptance
+
+Shared boot geometry does **not** mean every committed ciphertext transfers. TSK now checks
+the selected payload SHA independently before any production DataFlash WDBI/download:
+
+| fixture | SHA-256 | exact-F181 evidence used by TSK |
+|---|---|---|
+| public RAM key-table payload | `d972d4bf432685217591768600a9abd7820d35b04a72270edc87074365356be2` | `B4209000`, `B4233100`, `B4509100`, and locally verified `B4512000` |
+| standard 32 KiB DataFlash payload | `d48988366b5e6d2ddd7438caca5e6f6f02daba9b650263c323a2ffd770a06e34` | locally verified `B4512000` |
+| auto-reset DataFlash derivative | `bf62449f85648ea24708961749bf53f75f36083c01bcf54114d567da0e178725` | locally rebuilt/verified `B4512000` gate |
+
+For `B4514000` and the F3/F4 targets, the bootstrap family is evidenced but TSK does not
+invent an exact local fixture mapping. A target-accepted fixture must be supplied with an
+explicit SHA/evidence record, and the target's own `0x10F0` remains the live discriminator.
+
+The production DataFlash dumper therefore resolves **both** boot geometry and selected
+fixture identity before PROGRAMMING, SecurityAccess, DID writes, RequestDownload, or
+payload transfer. The instrumented diagnostic may still observe PROGRAMMING, bootloader
+identity, and `REQUEST_SEED`; even after a family-supported SecurityAccess result it stops
+before WDBI/download when the exact DataFlash ciphertext is not evidenced.
+
+The legacy RAM key-table extractor remains narrower than the bootstrap family. It uses the
+public `d972...` fixture and the old CPU-visible `FEBE6E34` key-table layout, so it accepts
+only `8965B4209000`, `8965B4233100`, and `8965B4509100`. `8965B4512000` shares the boot
+geometry but does not maintain that legacy key table.
+
+### 3. SHA-bound application-retained ephemeral runtime
+
+The callback-free scheduler bridge is a different contract again. Offline analysis must
+start from an exact 1 MiB CodeFlash image and produce a
+`p1me-ephemeral-runtime-target-manifest-v1` that proves the target's application startup,
+scheduler/SecOC/COM anchors **and** SHA-bound retained application R/W/X geometry. TSK
+validates that manifest together with the audited inert canary in
+`tsk/lib/ephemeral_runtime.py`.
+
+The built-in package currently covers only `8965B4512000`:
+
+```text
+CodeFlash SHA-256  21140bbd65e530a9e518a3e84e20e5d85679675bc09cc724cb177bb7c76bafde
+manifest SHA-256   562393d0e40ba8dce158131860e2a2f3f97022cf480ee841247adacfa981b134
+retained R/W/X     FEBF0000..FEBF0307  (0x308 bytes)
+callback cell      FEBF0FD0
+heartbeat          FEBFFBF0
+inert canary       332 bytes
+canary SHA-256     81176c6e1c33451cfa63bd3b4a0e07b8b0fb952c70b3d67442f1a294ed6b651e
+```
+
+`/ephemeral-runtime.html` can import a foreign resolver package, but import is evidence
+handling only. Live arbitrary-RAM substitution additionally requires target-specific proof
+of the post-`0x10F0` short-chunk primitive; cross-vehicle bootstrap reuse does not imply
+that memory-safety bug. At present TSK enables the live canary only on the exact
+`B4512000` CodeFlash where MEM-SAFE-001 is verified.
+
+The live operation is intentionally **canary-only**: it authenticates the known bootstrap,
+substitutes the audited 332-byte inert scheduler, writes `FEBF0FD0` last, triggers the
+existing `0xFF00` callback path, proves the application heartbeat advances, then hard-resets
+the EPS and proves the heartbeat stops. It requires explicit isolated-bench acknowledgement.
+TSK ships **no steering-bridge binary and no bridge-deployment endpoint** in this change.
+
+Openpilot proper is nevertheless prepared for the eventual bridge: the old one-off MAC28
+ablation (which corrupted forwarded stock camera frames and suppressed openpilot's own
+commands) is removed. A dormant, exact-F181-bound `ToyotaEphemeralSecOCBridge` mode can
+mark openpilot's own secured lateral `0x2E4/0x131` frames with an all-zero MAC28 while
+preserving the transmitted freshness nibble. Stock conflicting frames return to normal
+static blocking. A real `SecOCKey` takes priority, and the bridge mode refuses
+openpilot-longitudinal targets because the resident bridge does not cover protected
+`0x183`. TSK does not arm this parameter until a future bridge deployment is separately
+validated.
 
 ## SecurityAccess domains are separate
 
@@ -363,28 +427,35 @@ replay/future-sync/tag-guess trials automatically; those remain isolated-bench e
    subfunctions remain separated from observation-oriented work.
 5. **Programming handoff probe** — if key recovery requires it, perform one
    route-preserving handoff and inspect endpoint reappearance plus Panda/CAN health.
-6. **Authenticated RAM-exec geometry** — bind the exact F181 to independently evidenced
-   RequestDownload/`0x10F0`/callback geometry. A successful handoff is not enough; only
-   after this gate passes may an applicable bootloader/payload or DataFlash path run.
-7. **Cryptographic key recovery** — verify the candidate against the discovered target
-   streams and persist it privately; do not install it yet.
-8. **Target integration review** — fill every openpilot/DBC/safety/control field with an
-   explicit evidence source in `target-profile.html`.
-9. **opendbc implementation audit** — implement the exact target/F181 in `opendbc_repo`,
-   then use **Re-audit opendbc** to prove source agreement with the reviewed profile. See
-   [`OPENPILOT_TARGET_INTEGRATION.md`](OPENPILOT_TARGET_INTEGRATION.md).
-10. **Stationary/bench acceptance** — capture a zero-actuation signed-command session and
-   validate target-specific status feedback plus before/after fault state.
-11. **Operational install** — only after the profile-bound gates pass, install the
-    already recovered key through `/api/install-recovered-key`.
-12. **Evidence export** — download the bundle before clearing data or moving to another
+6. **Bootstrap-family and boot geometry** — bind the exact F181 to evidenced
+   SecurityAccess/DID/RequestDownload/`0x10F0`/callback behavior. Keep this separate from
+   application-retention claims.
+7. **Exact payload fixture** — prove the specific encrypted 4 KiB ciphertext selected for
+   this operation. Shared `FEBF0000` geometry alone does not authorize a DataFlash payload.
+8. **Optional ephemeral-runtime research** — for the callback-free route, acquire the exact
+   1 MiB CodeFlash offline, run the semantic resolver, import its SHA-bound target manifest,
+   and execute only the inert canary on an isolated bench. A foreign target additionally
+   needs its own post-auth substitution evidence. Do not deploy the steering bridge yet.
+9. **Cryptographic key recovery** — when a readable key route exists, verify the candidate
+   against the discovered target streams and persist it privately; do not install it yet.
+10. **Target integration review** — fill every openpilot/DBC/safety/control field with an
+    explicit evidence source in `target-profile.html`.
+11. **opendbc implementation audit** — implement the exact target/F181 in `opendbc_repo`,
+    then use **Re-audit opendbc** to prove source agreement with the reviewed profile. See
+    [`OPENPILOT_TARGET_INTEGRATION.md`](OPENPILOT_TARGET_INTEGRATION.md).
+12. **Stationary/bench acceptance** — capture a zero-actuation signed-command session and
+    validate target-specific status feedback plus before/after fault state.
+13. **Operational install** — only after the profile-bound gates pass, install the already
+    recovered key through `/api/install-recovered-key`. The future ephemeral-bridge path has
+    a separate deployment/validation gate and does not masquerade as a key.
+14. **Evidence export** — download the bundle before clearing data or moving to another
     target/session.
 
 ## DataFlash payload variants
 
 The standard 32 KiB DataFlash payload remains the default. It is **not** a generic
-cross-calibration shellcode blob: the authenticated package is tied to the verified
-`FEBF0000/0x1000` geometry and embedded callback described above.
+cross-calibration shellcode blob: TSK requires both compatible authenticated boot geometry
+and exact-F181 evidence for this ciphertext. `FEBF0000/0x1000` by itself is insufficient.
 
 ```text
 SHA-256 d48988366b5e6d2ddd7438caca5e6f6f02daba9b650263c323a2ffd770a06e34
@@ -424,15 +495,16 @@ deletion. The bundle endpoint is:
 ```
 
 The `.tar.gz` contains `session-manifest.json`, operation history, raw NDJSON captures,
-UDS transcripts, DataFlash binaries, payload hashes, job states, route metadata,
-programming-handoff health telemetry, and device logs. The manifest records the openpilot
+UDS transcripts, DataFlash binaries, payload hashes, SHA-bound ephemeral-runtime package/
+validation artifacts, job states, route metadata, programming-handoff health telemetry,
+and device logs. The manifest records the openpilot
 branch/commit and a hash prefix rather than the plaintext dongle ID.
 
 ## Local verification
 
 ```bash
-python3 -m unittest discover -s tsk/tests -v
-python3 -m compileall -q tsk
+PYTHONPATH=opendbc_repo:panda uv run python -m unittest discover -s tsk/tests -v
+PYTHONPATH=opendbc_repo:panda uv run python -m compileall -q tsk
 bash -n launch_chffrplus.sh
 git diff --check
 ```
