@@ -8,6 +8,10 @@ from tsk.lib.diagnostic_route import (
 )
 from tsk.lib.env import is_agnos, PAYLOAD_PATH
 from tsk.lib.programming import ProgrammingHandoffError, enter_programming_bootloader, uds_client as make_uds_client
+from tsk.lib.bootstrap_profile import (
+  BOOT_SA_SECRET as SHARED_BOOT_SA_SECRET, BootstrapProfileError,
+  DID_0201_DEFAULT, DID_0202_DEFAULT, RAM_DUMP_FIXTURE_SHA256, require_evidenced_fixture,
+)
 from tsk.lib.ram_exec_geometry import (
   COMMITTED_PAYLOAD_CONTRACT,
   RamExecGeometryError,
@@ -65,12 +69,12 @@ class TSKExtractor:
 
   # Distinct security domains. The bootloader uses 01/02; the analyzed Sienna
   # application uses 03/04 with an independent secret.
-  BOOT_SA_SECRET = b'\xf0\x5f\x36\xb7\xd7\x8c\x03\xe2\x4a\xb4\xfa\xef\x2a\x57\xd0\x44'
+  BOOT_SA_SECRET = SHARED_BOOT_SA_SECRET
   APPLICATION_03_04_SA_SECRET_8965B4512000 = bytes.fromhex("893e08418c741ffa2a9c044bffa55813")
 
   # These are the key and IV used to encrypt the payload in build_payload.py
-  DID_201_KEY = b'\x00' * 16
-  DID_202_IV = b'\x00' * 16
+  DID_201_KEY = DID_0201_DEFAULT
+  DID_202_IV = DID_0202_DEFAULT
 
   # Confirmed working on the following versions
   APPLICATION_VERSIONS = {
@@ -200,6 +204,14 @@ class TSKExtractor:
         "layout used by extractor.hack() is not verified for this exact F181. Use the " +
         "calibration-appropriate recovery path instead of projecting the older FEBE6E34 table."
       )
+    try:
+      bootstrap_evidence = require_evidenced_fixture(bytes(app_version), RAM_DUMP_FIXTURE_SHA256)
+    except BootstrapProfileError as e:
+      raise RetryError(
+        "Refusing RAM extraction before PROGRAMMING: the boot geometry is compatible, but " +
+        f"the exact payload fixture is not target-evidenced: {e}"
+      ) from e
+    cls._last_extraction_metadata["bootstrap"] = bootstrap_evidence.public_dict()
 
     # The first application 10 02 is asynchronous on the analyzed Sienna: it may emit
     # NRC 0x78 and reset before a final 50 02. Preserve the exact physical route and

@@ -127,6 +127,7 @@ class Car:
       except Exception:
         pass
 
+      key_loaded = False
       secoc_key = self.params.get("SecOCKey")
       if secoc_key is not None:
         try:
@@ -134,12 +135,33 @@ class Car:
         except ValueError:
           saved_secoc_key = b""
         if len(saved_secoc_key) == 16:
+          key_loaded = True
           self.CP.secOcKeyAvailable = True
           self.CI.CS.secoc_key = saved_secoc_key
           if controller_available:
             self.CI.CC.secoc_key = saved_secoc_key
         else:
           cloudlog.warning("Saved SecOC key is invalid")
+
+      # A resident EPS bridge is a separate SecOC transport mechanism, not a key.
+      # It is deliberately dormant unless a future evidence-gated deployment stores
+      # both the bridge flag and the exact EPS F181 it was validated against. A real
+      # SecOC key always takes priority, and the current bridge covers lateral only.
+      bridge_requested = self.params.get_bool("ToyotaEphemeralSecOCBridge")
+      bridge_f181_raw = self.params.get("ToyotaEphemeralSecOCBridgeF181")
+      bridge_f181 = bridge_f181_raw.decode(errors="ignore").strip() if bridge_f181_raw is not None else ""
+      eps_versions = [bytes(fw.fwVersion) for fw in self.CP.carFw if fw.ecu == structs.CarParams.Ecu.eps]
+      bridge_target_matches = bool(bridge_f181 and any(bridge_f181.encode() in fw for fw in eps_versions))
+      if bridge_requested and not key_loaded:
+        if not bridge_target_matches:
+          cloudlog.warning("Ignoring Toyota ephemeral SecOC bridge: validated F181 does not match current EPS")
+        elif self.CP.openpilotLongitudinalControl:
+          cloudlog.warning("Ignoring Toyota ephemeral SecOC bridge: resident bridge does not cover secured ACC 0x183")
+        else:
+          self.CP.secOcKeyAvailable = True
+          if controller_available:
+            self.CI.CC.ephemeral_secoc_bridge = True
+          cloudlog.warning(f"Using target-bound Toyota ephemeral SecOC bridge for EPS {bridge_f181}")
 
     # Write previous route's CarParams
     prev_cp = self.params.get("CarParamsPersistent")

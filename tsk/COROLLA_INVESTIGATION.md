@@ -139,30 +139,31 @@ old operational assumptions without rewriting the chronology that produced them.
    The reset-ending body is still not vehicle-confirmed, so the derivative remains behind
    an explicit experimental checkbox.
 
-9. **2026-08-16 correction: programming reappearance is not enough to authorize the
-   payload geometry.** The historical Sienna flow treated `FEBF0000 + 0x1000` as a
-   transferable RAM window once the bootloader could be reached. The authenticated path
-   actually couples RequestDownload address/size, TransferData length, routine `0x10F0`
-   verification address/size, and the callback embedded in the post-link payload package.
-   Current TSKM resolves that contract by exact F181 and refuses **payload execution** on
-   an unknown calibration. The production dump/extractor paths stop before PROGRAMMING;
-   the instrumented diagnostic may still observe PROGRAMMING, bootloader identity, and a
-   non-counted seed before reaching the separate SEND_KEY/payload boundaries. Exact trusted targets are
-   `8965B4209000`, `8965B4233100`, `8965B4509100`, and independently analyzed
-   `8965B4512000`, all at `FEBF0000/0x1000` with callback `FEBF0000`. A newer-Toyota
-   external report of code linked/deployed at `FEBE0000` is retained only as a linker-VMA
-   observation; it does **not** establish authenticated RequestDownload or callback
-   geometry. The programming probe remains the correct way to characterize an unknown
-   handoff without promoting it into executable-payload support.
+9. **2026-08-17 correction: programming reappearance, bootstrap-family membership,
+   exact ciphertext acceptance, and application retention are separate claims.** The old
+   flow collapsed them into one `FEBF0000 + 0x1000` “RAM-exec compatibility” decision.
+   Cross-vehicle evidence now establishes the shared authenticated-RAM boot family on exact
+   B4/F3/F4 software IDs (`B4209000`, `B4233100`, `B4509100`, `B4512000`, `B4514000`,
+   `F3401200`, `F4207000`, `F4201000`), but TSK still refuses a particular encrypted
+   fixture unless that fixture is separately evidenced for the exact F181. The public
+   `d972...` RAM extractor is therefore usable only where its transfer is evidenced; the
+   committed `d489...` DataFlash package remains exact-gated to `B4512000`. The
+   instrumented diagnostic may characterize PROGRAMMING, bootloader identity, seed, and
+   known-family SecurityAccess without silently crossing into WDBI/download. A newer-Toyota
+   `FEBE0000` linker VMA still proves none of the boot callback or application-retention
+   geometry. Application-resident ephemeral execution is a third contract generated from
+   the target's exact CodeFlash; the built-in scheduler canary is currently SHA-bound only
+   to `B4512000`, and live raw substitution is limited to that image because MEM-SAFE-001
+   has not been transferred by assumption.
 
-10. **2026-08-16 risk-boundary correction: unknown calibration now limits interpretation,
-    not low-cost observation.** Bounded SID `0x23` reads already followed this rule. The XCP
-    observer now does too: after a positive CONNECT, bounded F4 reads and temporary DAQ
-    configuration may run on an unknown F181, while the `8965B4512000` profile labels remain
-    only candidate-address annotations. The DataFlash diagnostic similarly continues through
-    PROGRAMMING, bootloader DIDs, and REQUEST_SEED. A cross-calibration bootloader SEND_KEY
-    remains an explicit one-attempt opt-in, and unknown authenticated RAM geometry still blocks
-    WDBI, RequestDownload/TransferData, verification start, and payload execution.
+10. **Risk boundary: uncertainty limits interpretation and write authority, not cheap
+    observation.** Bounded SID `0x23` and XCP observations may still characterize an unknown
+    target. The DataFlash diagnostic can likewise continue through PROGRAMMING, bootloader
+    DIDs, and REQUEST_SEED. A truly unknown bootstrap family still requires explicit arming
+    before spending a counted bootloader SEND_KEY attempt. For a known bootstrap-family
+    F181, family-supported SecurityAccess may be characterized, but exact payload-fixture
+    evidence remains a separate mandatory gate before WDBI/RequestDownload/TransferData/
+    `0x10F0` start or payload execution.
 
 The unresolved Corolla question is therefore split cleanly: **what exactly happens to
 `8965F1208000` across the PROGRAMMING transition on the correct physical Panda route, and

@@ -45,23 +45,65 @@ as new control outputs. Likewise, `0x131` is statically confirmed as the second 
 command mode, but that alone does not satisfy the existing dynamic/safety requirement for
 LTA angle actuation.
 
-## Recovery geometry is not inferred from target identity or handoff
+## Recovery compatibility is split into independent evidence gates
 
-The recovery side now has an equally strict calibration boundary. A successful
+The recovery side uses the same evidence discipline as target integration. A successful
 application -> bootloader PROGRAMMING handoff proves only that the endpoint transitioned;
-it does not prove the authenticated RequestDownload base/size, routine-`0x10F0`
-verification geometry, or callback address embedded in a payload package.
+it does not prove an encrypted payload or application-resident runtime is portable.
 
-`tsk/lib/ram_exec_geometry.py` therefore resolves authenticated RAM execution by exact
-F181. The current trusted `FEBF0000 + 0x1000`, callback-`FEBF0000` contract is limited to
-`8965B4209000`, `8965B4233100`, `8965B4509100`, and independently analyzed
-`8965B4512000`. Unknown F181s remain blocked after a successful programming probe until
-that complete contract is evidenced. The externally observed newer-Toyota shellcode VMA
-`FEBE0000` is explicitly **not** treated as a RequestDownload/callback geometry.
+TSK therefore separates three contracts:
 
-This recovery gate and the openpilot integration manifest are independent: proving RAM
-execution does not select a DBC/safety/control profile, and proving a target's openpilot
-profile does not authorize a Sienna-derived payload geometry.
+1. **authenticated-RAM bootstrap / boot geometry** — exact-F181 evidence for the shared
+   boot SecurityAccess family, `0203→0201→0202`, `FEBF0000 + 0x1000`, `0x10F0`, and
+   `0xFF00` callback route;
+2. **exact encrypted fixture acceptance** — the selected 4 KiB ciphertext must be
+   independently evidenced for that F181; and
+3. **application-retained ephemeral runtime** — an exact 1 MiB CodeFlash SHA must resolve
+   the callback-free startup/scheduler/SecOC/COM contract and retained application R/W/X
+   geometry.
+
+The first contract is already cross-vehicle. `tsk/lib/bootstrap_profile.py` records
+exact-F181, evidence-graded rows for `8965B4209000`, `8965B4233100`, `8965B4509100`,
+`8965B4512000`, `8965B4514000`, `8965F3401200`, `8965F4207000`, and `8965F4201000`.
+There is no family-prefix fallback. The externally observed newer-Toyota `FEBE0000`
+shellcode VMA remains only a linker observation and cannot satisfy any of these gates.
+
+Fixture identity is narrower. The public `d972...` RAM extractor is evidenced on the
+legacy B4 targets and locally verified on `B4512000`; the committed DataFlash `d489...`
+and local auto-reset `bf624...` packages are currently exact-gated to `B4512000` in TSK.
+A shared `FEBF0000` window does not authorize those ciphertexts on another calibration.
+
+Application-retained runtime evidence is narrower again. The built-in inert scheduler
+package is bound to `B4512000` CodeFlash SHA
+`21140bbd65e530a9e518a3e84e20e5d85679675bc09cc724cb177bb7c76bafde`; foreign runtime
+packages must be generated offline from their own exact CodeFlash and imported into TSK.
+Live substitution additionally requires target-specific evidence for the post-auth
+short-chunk primitive; cross-vehicle bootstrap reuse does not imply MEM-SAFE-001.
+
+This recovery model and the openpilot integration manifest are independent: proving any
+boot/runtime primitive does not select a DBC, safetyParam, steering mode, or longitudinal
+topology, and proving a target's openpilot profile does not authorize a payload/runtime
+from another calibration.
+
+### Key-backed SecOC versus the future ephemeral bridge
+
+Normal openpilot SecOC remains key-backed. The one-off MAC28 ablation experiment has been
+retired: Panda no longer corrupts forwarded stock camera MACs, openpilot no longer suppresses
+its own SecOC command messages, and normal Toyota static forwarding blocks are restored.
+
+opendbc now contains a dormant bridge transport for a future separately validated resident
+EPS runtime. When explicitly armed, it marks openpilot's own secured lateral `0x2E4` and
+`0x131` envelopes with an all-zero MAC28 while preserving the transmitted freshness nibble.
+The mode is not a key and is not selected from Toyota platform identity alone. Root openpilot
+requires persistent `ToyotaEphemeralSecOCBridge` plus an exact
+`ToyotaEphemeralSecOCBridgeF181` match against the current EPS firmware inventory. A valid
+`SecOCKey` always takes priority. The bridge is also refused when openpilot longitudinal is
+active because the current resident bridge does not cover protected ACC `0x183`.
+
+TSK currently ships and executes only the audited **inert canary**. It does not ship the
+704-byte steering bridge, expose a bridge-deployment endpoint, or set the bridge parameters.
+Those remain future steps after heartbeat/reset-to-stock and subsequent isolated-bench
+steering validation succeed.
 
 ## Manifest required before implementation
 
