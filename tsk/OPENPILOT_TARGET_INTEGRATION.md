@@ -5,6 +5,30 @@ The target must first be observed, then implemented in the checked-out `opendbc_
 then verified stationary/bench-side before TSK permits operational `SecOCKey`
 installation.
 
+## 2026-08-23 reverse-engineering sync status
+
+This fork has been reconciled against the current `ghidra_rh850_analysis` evidence rather
+than the older state that originally produced the ephemeral-runtime integration:
+
+| RE result | OpenPilot/TSK state |
+|---|---|
+| H/F authenticated-RAM bootstrap transfer | exact `8965H1202000` / `8965F1208000` geometry is recognized; exact ciphertext remains separately gated |
+| historical B4 payload-family evidence | retained as bootstrap evidence, but no longer treated as byte-for-byte proof for the local Sienna `d972...` fixture |
+| KEYLESS-006 application-SA LocalRAM mirror | integrated into the read-only SID `0x23` workflow for exact B451/H/F identities; no automatic SEND_KEY |
+| boot `27 01/02` failure timer | live canary handles NRC `0x37` with one bounded post-delay seed retry; no pre-emptive delay or permanent-lock assumption |
+| Span `8965F1208000` direct route | `(bus1,param1)` is recorded as dynamically proven for that specimen, not a Toyota-B universal |
+| XCP F4/volatile DAQ observer | already integrated read-only; source-memory writers remain deliberately absent |
+| current B451 runtime resolver/audit | built-in target manifest/audit refreshed to the current SHA-bound RE artifacts; canary binary remains unchanged |
+| H/F steering census | treated as negative capability evidence: no EPS-local classic `0x2E4/0x131`, therefore no Sienna-bridge transfer |
+| command-5 RAM signing proxy | **not deployed**: deterministic software path exists in RE, but live ICU-S slot-4 permission is still hardware-unproved |
+| 704-byte Sienna steering bridge | dormant openpilot transport support only; no TSK deployment endpoint until canary/scheduler/steering bench proofs pass |
+| XCP F0/EC/E4 write/pivot paths | RE-only research surface; not exposed in field tooling |
+| persistent Gate-2 patching | not part of the production path; ephemeral/reset-to-stock work remains preferred |
+
+This table is an implementation boundary, not a backlog invitation: entries marked as
+hardware-unproved should stay out of the operational path until their named discriminator
+is actually measured.
+
 ## Why this gate exists
 
 Toyota platform selection controls more than the MAC key. In the current opendbc Toyota
