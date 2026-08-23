@@ -7,27 +7,41 @@ installation.
 
 ## 2026-08-23 reverse-engineering sync status
 
-This fork has been reconciled against the current `ghidra_rh850_analysis` evidence rather
-than the older state that originally produced the ephemeral-runtime integration:
+This fork has been reconciled against `ghidra_rh850_analysis` commit `7a82d14` rather
+than the older state that originally produced the ephemeral-runtime integration. The
+H/F manifest copies below are byte-identical to the generated artifacts at that checkpoint.
 
-| RE result | OpenPilot/TSK state |
-|---|---|
-| H/F authenticated-RAM bootstrap transfer | exact `8965H1202000` / `8965F1208000` geometry is recognized; exact ciphertext remains separately gated |
-| historical B4 payload-family evidence | retained as bootstrap evidence, but no longer treated as byte-for-byte proof for the local Sienna `d972...` fixture |
-| KEYLESS-006 application-SA LocalRAM mirror | integrated into the read-only SID `0x23` workflow for exact B451/H/F identities; no automatic SEND_KEY |
-| boot `27 01/02` failure timer | live canary handles NRC `0x37` with one bounded post-delay seed retry; no pre-emptive delay or permanent-lock assumption |
-| Span `8965F1208000` direct route | `(bus1,param1)` is recorded as dynamically proven for that specimen, not a Toyota-B universal |
-| XCP F4/volatile DAQ observer | already integrated read-only; source-memory writers remain deliberately absent |
-| current B451 runtime resolver/audit | built-in target manifest/audit refreshed to the current SHA-bound RE artifacts; canary binary remains unchanged |
-| H/F steering census | treated as negative capability evidence: no EPS-local classic `0x2E4/0x131`, therefore no Sienna-bridge transfer |
-| command-5 RAM signing proxy | **not deployed**: deterministic software path exists in RE, but live ICU-S slot-4 permission is still hardware-unproved |
-| 704-byte Sienna steering bridge | dormant openpilot transport support only; no TSK deployment endpoint until canary/scheduler/steering bench proofs pass |
-| XCP F0/EC/E4 write/pivot paths | RE-only research surface; not exposed in field tooling |
-| persistent Gate-2 patching | not part of the production path; ephemeral/reset-to-stock work remains preferred |
+The status vocabulary below is deliberate: **implemented** means the code path is present;
+**implemented-read-only** means only evidence acquisition/inspection is exposed;
+**prepared-but-hardware-gated** means host-side code or transport scaffolding exists but cannot
+be promoted operationally without the named live proof; **intentionally-not-applicable** means
+current firmware evidence disproves that transfer for the named target; and
+**not-yet-implementable** means the target-native contract needed to write correct openpilot code
+has not been recovered yet.
 
-This table is an implementation boundary, not a backlog invitation: entries marked as
-hardware-unproved should stay out of the operational path until their named discriminator
-is actually measured.
+| RE result / capability | status | OpenPilot/TSK implementation boundary |
+|---|---|---|
+| H/F authenticated-RAM bootstrap transfer | **implemented** | exact `8965H1202000` / `8965F1208000` boot geometry is recognized; exact ciphertext remains a separate gate |
+| H/F semantic runtime resolver outputs | **implemented-read-only** | exact RE-generated manifests are bundled as negative-capability evidence; they report `semantic-resolved-steering-unsupported`, never satisfy the executable runtime-package gate, and expose no bridge execution |
+| historical B4 payload-family evidence | **implemented** | retained as bootstrap evidence but no longer treated as byte-for-byte proof for the local Sienna `d972...` fixture |
+| old/new UDS + CPU0/CPU1 bootstrap request geometry | **prepared-but-hardware-gated** | pure request builders model memory-ID, DID `0203`, and `45 00`/`45 01`; the live built-in B451 path remains pinned to its reviewed single-CPU/old-stack byte sequence and no foreign live target is enabled by these builders |
+| KEYLESS-006 application-SA LocalRAM mirror | **implemented-read-only** | SID `0x23` reads the exact B451/H/F mirror after exact F181 identification; no automatic SEND_KEY or write |
+| software-only execution without boot SecurityAccess | **not-yet-implementable** | the current keyless audit recovers no attacker-selected-PC path that bypasses the independent boot `27 01/02` gate; TSK does not pretend application-SA disclosure is a boot-SA bypass |
+| boot `27 01/02` failure timer | **implemented** | live canary handles NRC `0x37` with one bounded post-delay seed retry; no pre-emptive delay or persistent-lock assumption |
+| Span `8965F1208000` direct route | **implemented** | `(bus1,param1)` is recorded as dynamically proven for that specimen, not a Toyota-B universal |
+| XCP F4/volatile DAQ observer | **implemented-read-only** | all current RE read/DAQ profiles, including `secoc-verification-state`, are available; source-memory writers/page-copy paths remain absent and firmware-excluded SecOC command-5 cells are not presented as XCP-readable |
+| XCP shadow retention across boot handoff | **prepared-but-hardware-gated** | RE proves the application XCP shadow contents can survive the handoff, but no attacker-selected control-transfer consumer is recovered; TSK therefore does not convert retention into a write/pivot or execution endpoint |
+| current B451 inert runtime package | **prepared-but-hardware-gated** | current SHA-bound manifest/audit + unchanged canary binary are installed; live execution still requires isolated-bench acknowledgement and the canary/scheduler/reset proof is not yet recorded |
+| H/F classic Sienna steering bridge | **intentionally-not-applicable** | their EPS receive census has no classic `0x2E4/0x131`; these manifests are regression evidence, not steering deployment targets |
+| command-5 RAM signing proxy | **prepared-but-hardware-gated** | TSK surfaces the current B451 dispatcher/record/selector/mailbox geometry as static evidence only; live ICU-S protected-slot-4 command-5 permission is unknown, so the write-capable mailbox client/binary are not imported and execution is not exposed |
+| 704-byte Sienna steering bridge | **prepared-but-hardware-gated** | openpilot/opendbc contains dormant exact-F181/lateral-only transport support; TSK ships no bridge binary/deployment endpoint and does not arm its params until canary, scheduler, queue-capture, COM-delivery, and steering proofs pass |
+| XCP F0/EC/E4 write/pivot paths | **prepared-but-hardware-gated** | kept RE-only; field tooling intentionally contains no source-memory writer/page-copy/pivot command builder |
+| persistent Gate-2 patching | **intentionally-not-applicable** to the production path | patch/restore evidence remains RE-side; the product direction prefers ephemeral/reset-to-stock behavior |
+| newer-Toyota target platform/DBC/safety/controller definition | **not-yet-implementable** | boot/runtime access is no longer the main blocker; the exact target-native external lateral command/status/ownership contract is still required before adding or aliasing an opendbc platform |
+
+This table is the durable repo-to-repo audit checkpoint. A later session should change a row
+only when new firmware/dynamic evidence changes the boundary; it should not rediscover these
+same distinctions from scratch.
 
 ## Why this gate exists
 
@@ -105,6 +119,19 @@ package is bound to `B4512000` CodeFlash SHA
 packages must be generated offline from their own exact CodeFlash and imported into TSK.
 Live substitution additionally requires target-specific evidence for the post-auth
 short-chunk primitive; cross-vehicle bootstrap reuse does not imply MEM-SAFE-001.
+
+TSK now also carries the exact resolver manifests for `8965H1202000` and `8965F1208000`
+as **evidence-only negative-capability regressions**. Both are semantically resolved but
+`semantic-resolved-steering-unsupported`: their three-record SecOC queue lacks classic
+`0x2E4`/`0x131`, retained-RWX geometry is unresolved, and neither manifest can satisfy the
+executable canary-package validator. This lets the field UI report why those exact targets
+are blocked without turning a foreign manifest into execution authority.
+
+The host-side bootstrap request builder also models both recovered Denso protocol axes:
+old/new routine magic (`45 00` / `45 01`) and CPU0/CPU1 (`memory_id=1` + DID `0203=01...`
+versus `memory_id=0` + zero DID `0203`). Those builders are planning semantics only. The
+only live built-in canary remains explicitly pinned to the reviewed B4512000 old-stack,
+CPU0 values; no F3/F4 or dual-CPU live path is enabled by having the constructor available.
 
 This recovery model and the openpilot integration manifest are independent: proving any
 boot/runtime primitive does not select a DBC, safetyParam, steering mode, or longitudinal

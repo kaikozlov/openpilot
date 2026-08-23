@@ -111,6 +111,17 @@
         write("Ephemeral runtime status", runtime.present ? "ok" : "warn");
         write("F181: " + (runtime.f181 || "not identified"));
         if (!runtime.present) {
+          const evidence = runtime.target_evidence || {};
+          if (evidence.f181) {
+            write("Bundled resolver evidence: " + (evidence.status || "?"), "warn");
+            write("Manifest SHA-256: " + (evidence.manifest_sha256 || "?"));
+            write("CodeFlash SHA-256: " + (evidence.codeflash_sha256 || "?"));
+            write("SecOC records: " + (evidence.secoc_record_count ?? "?"));
+            write("Steering bridge applicable: " + (evidence.steering_bridge_applicable ? "yes" : "NO"), evidence.steering_bridge_applicable ? "ok" : "warn");
+            if ((evidence.steering_bridge_missing_ids || []).length) write("Missing steering records: " + evidence.steering_bridge_missing_ids.join(", "), "warn");
+            write("Executable runtime package: blocked — evidence-only manifest", "ok");
+            write("Steering bridge execution exposed: no", "ok");
+          }
           write(runtime.message || "No package installed.", "warn");
           return;
         }
@@ -123,6 +134,12 @@
         write("Bootstrap family: " + (runtime.bootstrap?.compatible ? "evidenced" : "NOT evidenced"), runtime.bootstrap?.compatible ? "ok" : "warn");
         write("Exact bootstrap fixture: " + (runtime.bootstrap_fixture_ready ? "ready" : "required"), runtime.bootstrap_fixture_ready ? "ok" : "warn");
         write("Post-auth raw substitution: " + (runtime.raw_substitution_verified ? "target-verified" : "NOT target-verified"), runtime.raw_substitution_verified ? "ok" : "warn");
+        const command5 = runtime.command5_proxy_evidence || {};
+        if (command5.available) {
+          write(`Command-5 static proxy geometry: dispatcher ${command5.dispatcher}, record ${command5.driver_record}, selector ${command5.key_selector}`);
+          write(`Command-5 mailbox: ${command5.mailbox} + 0x${Number(command5.mailbox_size).toString(16)} · permission ${command5.slot4_permission}`, "warn");
+          write("Command-5 mailbox writer/execution exposed in TSK: no", "ok");
+        }
         write("Live inert canary: " + (runtime.live_canary_ready ? "ready" : "blocked"), runtime.live_canary_ready ? "ok" : "warn");
         write("Scheduler observed: " + (runtime.scheduler_observed ? "yes" : "no"));
         write("Reset-to-stock verified: " + (runtime.reset_to_stock_verified ? "yes" : "no"));

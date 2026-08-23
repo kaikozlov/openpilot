@@ -5,8 +5,13 @@ from unittest.mock import patch
 
 from tsk.lib.xcp_observer import (
   CONNECT_REQUEST,
+  FORBIDDEN_COMMANDS,
   PROFILES,
+  SCHEMA,
+  SECOC_XCP_EXCLUDED_CANDIDATES,
   XcpObserverError,
+  assert_no_write_commands,
+  control_rtt_statistics,
   clear_daq_list_request,
   configuration_requests,
   decode_dto,
@@ -75,10 +80,24 @@ class TestXcpObserver(unittest.TestCase):
   def test_profiles_are_within_verified_readable_localram(self):
     for profile in PROFILES.values():
       self.assertLessEqual(len(profile.addresses), 28)
+      self.assertTrue(profile.finding_ids)
       for address in profile.addresses:
         validate_localram_read(address, 1)
     with self.assertRaises(XcpObserverError):
       validate_localram_read(0xFEBF0300, 1)
+
+  def test_secoc_verification_profile_matches_current_re_read_only_contract(self):
+    profile = PROFILES["secoc-verification-state"]
+    self.assertEqual(profile.addresses, (
+      0xFEBE555C, 0xFEBE5568, 0xFEBE556C, 0xFEBE5560, 0xFEBE5562, 0xFEBE5564,
+    ))
+    self.assertEqual(profile.finding_ids, ("SECOC-011", "SECOC-012", "SECOC-029"))
+    excluded = {address for address, _reason in SECOC_XCP_EXCLUDED_CANDIDATES}
+    self.assertEqual(excluded, {0xFEBE51AA, 0xFEBF13BE})
+    self.assertTrue(excluded.isdisjoint(profile.addresses))
+    for address in excluded:
+      with self.assertRaises(XcpObserverError):
+        validate_localram_read(address, 1)
 
   def test_configuration_uses_only_connect_and_daq_subset(self):
     requests = configuration_requests(PROFILES["actuation-discriminator"].addresses)
@@ -89,6 +108,23 @@ class TestXcpObserver(unittest.TestCase):
     self.assertNotIn(0xE4, [request[0] for _, request in requests])
     self.assertNotIn(0xF5, [request[0] for _, request in requests])
     self.assertNotIn(0xF6, [request[0] for _, request in requests])
+    assert_no_write_commands(requests)
+
+  def test_write_guard_pins_current_re_forbidden_source_memory_mutations(self):
+    self.assertEqual(set(FORBIDDEN_COMMANDS), {0xF0, 0xEC, 0xE4})
+    for opcode in FORBIDDEN_COMMANDS:
+      with self.assertRaisesRegex(XcpObserverError, "forbidden opcode"):
+        assert_no_write_commands((("crafted", bytes((opcode,)) + b"\x00" * 7),))
+    # E1 writes the volatile DAQ configuration table; it does not mutate observed source memory.
+    assert_no_write_commands((("write_daq", write_daq_request(0xFEBE6D28)),))
+
+  def test_control_timing_statistics_use_monotonic_deltas(self):
+    stats = control_rtt_statistics([{"rtt_seconds": 0.001}, {"rtt_seconds": 0.003}])
+    self.assertEqual(stats["count"], 2)
+    self.assertEqual(stats["min_seconds"], 0.001)
+    self.assertEqual(stats["max_seconds"], 0.003)
+    self.assertAlmostEqual(stats["mean_seconds"], 0.002)
+    self.assertEqual(stats["samples_source"], "time.monotonic deltas only")
 
   def test_dto_decoder_maps_profile_addresses(self):
     addresses = PROFILES["actuation-discriminator"].addresses
@@ -129,6 +165,15 @@ class TestXcpObserver(unittest.TestCase):
     self.assertEqual(opcodes.count(0xDE), 2)
     self.assertTrue({0xF0, 0xEC, 0xE4, 0xF5, 0xF6}.isdisjoint(opcodes))
     self.assertFalse(result["source_memory_writes_implemented"])
+    self.assertEqual(result["schema"], SCHEMA)
+    self.assertEqual(set(result["forbidden_command_opcodes"]), {"0xE4", "0xEC", "0xF0"})
+    self.assertFalse(result["wall_clock_rate_claimed"])
+    self.assertGreaterEqual(len(result["control_timing"]["requests"]), 1)
+    self.assertGreaterEqual(result["control_timing"]["rtt_statistics"]["count"], 1)
+    self.assertEqual(result["capture_window"]["clocks"],
+                     "monotonic deltas only for intervals; UTC for cross-log correlation")
+    self.assertIn("captured_monotonic", result["frames"][0])
+    self.assertIn("captured_wall_utc", result["frames"][0])
 
   @patch("tsk.lib.xcp_observer.time.sleep", return_value=None)
   @patch("tsk.lib.xcp_observer.subprocess.run")
@@ -182,6 +227,10 @@ class TestXcpObserver(unittest.TestCase):
     self.assertEqual(opcodes.count(0xDE), 2)  # start + unconditional stop
     self.assertTrue({0xF0, 0xEC, 0xE4, 0xF5, 0xF6}.isdisjoint(opcodes))
     self.assertFalse(result["write_commands_implemented"])
+    self.assertEqual(result["schema"], SCHEMA)
+    self.assertEqual(set(result["forbidden_command_opcodes"]), {"0xE4", "0xEC", "0xF0"})
+    self.assertFalse(result["wall_clock_rate_claimed"])
+    self.assertTrue(result["control_timing"]["requests"])
 
   def test_source_contains_no_generic_xcp_write_or_page_copy_request_builder(self):
     source = Path("tsk/lib/xcp_observer.py").read_text(encoding="utf-8")

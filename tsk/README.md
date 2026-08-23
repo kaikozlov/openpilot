@@ -225,11 +225,26 @@ inert canary       332 bytes
 canary SHA-256     81176c6e1c33451cfa63bd3b4a0e07b8b0fb952c70b3d67442f1a294ed6b651e
 ```
 
-`/ephemeral-runtime.html` can import a foreign resolver package, but import is evidence
-handling only. Live arbitrary-RAM substitution additionally requires target-specific proof
-of the post-`0x10F0` short-chunk primitive; cross-vehicle bootstrap reuse does not imply
-that memory-safety bug. At present TSK enables the live canary only on the exact
-`B4512000` CodeFlash where MEM-SAFE-001 is verified.
+TSK also bundles the exact resolver manifests for `8965H1202000` and `8965F1208000` as
+read-only regression evidence. Both resolve the foreign image semantics but report
+`semantic-resolved-steering-unsupported`, three SecOC records with classic `0x2E4/0x131`
+missing, and unresolved image-bound retained-RWX geometry. They are displayed as evidence
+on the runtime page but **cannot** satisfy the executable package gate.
+
+The host-side bootstrap constructor now models both recovered Denso protocol axes used by
+the RE live installer: old/new routine magic (`45 00` / `45 01`) and CPU0/CPU1 memory-ID
+plus DID-`0203` geometry. This does not broaden live authority. The built-in canary path is
+still explicitly pinned to old-stack/CPU0 B4512000 and preserves its already-reviewed
+five-zero-byte DID-`0203` request; the generic CPU0 `01 00 00 00 00` convention and the
+other constructor values are request-planning support for a future exact target with its
+own evidence.
+
+`/ephemeral-runtime.html` can import a complete foreign **executable** package only when it
+contains a runtime-build-ready resolver manifest, its matching audited inert canary, and the
+required exact image bindings. Live arbitrary-RAM substitution additionally requires
+target-specific proof of the post-`0x10F0` short-chunk primitive; cross-vehicle bootstrap
+reuse does not imply that memory-safety bug. At present TSK enables the live canary only on
+the exact `B4512000` CodeFlash where MEM-SAFE-001 is verified.
 
 The live operation is intentionally **canary-only**: it authenticates the known bootstrap,
 substitutes the audited 332-byte inert scheduler, writes `FEBF0FD0` last, triggers the
@@ -431,9 +446,10 @@ roles before openpilot integration is enabled.
 Receiver freshness is also now bounded more tightly. The analyzed application clears its
 SecOC receive windows at initialization and accepts any authenticated forward sync
 trip/reset jump without a maximum delta. Failed MAC verification does not advance
-freshness. The recovered retry budget is **per queued PDU**: one queued message can be
-re-verified only a bounded number of times, but distinct newly queued bad frames are not
-subject to a recovered persistent/per-source throttle. That creates reset-window,
+freshness. The recovered retry budget is **per queued PDU**: an ordinary bad-MAC PDU gets
+one retry of that same queued message, then admission of the next fresh PDU resets the
+counter. Distinct newly queued bad frames are therefore not subject to a recovered
+persistent/per-source throttle. That creates reset-window,
 future-sync, and theoretical 28-bit online-guess avenues, but their practical timing,
 throughput, suppression, and recovery behavior are still dynamic. TSK does not inject
 replay/future-sync/tag-guess trials automatically; those remain isolated-bench experiments.

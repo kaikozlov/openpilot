@@ -50,80 +50,86 @@ BOOTSTRAP_TARGETS = {
   "8965B4512000": BootstrapTargetEvidence(
     software_id="8965B4512000",
     grade="verified",
-    source="firmware-static + generated-artifact (SECOC-062/063)",
-    fixture_transfer="exact-local-fixtures-verified",
+    source="firmware-static+generated-artifact",
+    fixture_transfer="exact-local-fixture-verified",
     exact_fixture_sha256=frozenset({
       RAM_DUMP_FIXTURE_SHA256,
       DATAFLASH_FIXTURE_SHA256,
       AUTORESET_DATAFLASH_FIXTURE_SHA256,
     }),
-    notes="Exact payload-gate proof; auto-reset derivative is rebuilt under the same verified gate.",
+    notes=("Exact local CodeFlash gate plus pinned ram_dump_payload.bin acceptance. TSK additionally pins its " +
+           "locally verified DataFlash and auto-reset derivatives under the same gate."),
   ),
   "8965H1202000": BootstrapTargetEvidence(
     software_id="8965H1202000",
     grade="observed",
     source="community/albinoelephant/raw-20260818/MANIFEST.txt + recovered CodeFlash",
     fixture_transfer="target-built-range-payloads-observed",
-    notes=("Contributor field acquisition executed target-built range-dump payloads through the shared "
-           "authenticated-RAM path; exact acceptance of the repository Sienna fixture is not claimed."),
+    notes=("Contributor field acquisition used the shared authenticated-RAM path to execute range-dump payloads " +
+           "and recover CodeFlash/DataFlash/RAM on the 2023 Corolla EPS; exact local Sienna fixture-byte " +
+           "acceptance is not claimed."),
   ),
   "8965F1208000": BootstrapTargetEvidence(
     software_id="8965F1208000",
     grade="observed",
     source="community/spanconstant/raw-20260821/MANIFEST.txt + recovered CodeFlash",
     fixture_transfer="target-built-range-payloads-observed",
-    notes=("Span's acquisition executed target-built range-dump payloads through the shared authenticated-RAM "
-           "path; exact acceptance of the repository Sienna fixture is not claimed."),
+    notes=("Span's 2025 Corolla acquisition used the same authenticated-RAM range-dump workflow to recover " +
+           "CodeFlash/DataFlash/extended-CodeFlash/GlobalRAM/LocalRAM. The image independently preserves the " +
+           "H-family payload-build and boot-SA roots and boot flow; exact acceptance of the repository Sienna " +
+           "ram_dump_payload.bin is not claimed."),
   ),
   "8965B4209000": BootstrapTargetEvidence(
     software_id="8965B4209000",
     grade="external-source",
     source="SECOC-024 / pinned I-CAN-hack+Bk2ol lineage",
     fixture_transfer="shared-public-payload-reported",
-    notes="Historical field-supported bootstrap family; exact repository-fixture acceptance is not pinned.",
+    notes="RAV4 Prime-class EPS in the established 8965B4x authenticated-RAM bootstrap family.",
   ),
   "8965B4233100": BootstrapTargetEvidence(
     software_id="8965B4233100",
     grade="external-source",
     source="SECOC-024 / pinned I-CAN-hack+Bk2ol lineage",
     fixture_transfer="shared-public-payload-reported",
-    notes="Historical field-supported bootstrap family; exact repository-fixture acceptance is not pinned.",
+    notes="RAV4 Prime-class EPS in the established 8965B4x authenticated-RAM bootstrap family.",
   ),
   "8965B4509100": BootstrapTargetEvidence(
     software_id="8965B4509100",
     grade="external-source",
     source="SECOC-024 / pinned I-CAN-hack+Bk2ol lineage",
     fixture_transfer="shared-public-payload-reported",
-    notes="Historical field-supported bootstrap family; exact repository-fixture acceptance is not pinned.",
+    notes="Sienna-class EPS in the established 8965B4x authenticated-RAM bootstrap family.",
   ),
   "8965B4514000": BootstrapTargetEvidence(
     software_id="8965B4514000",
     grade="external-source",
     source="SECOC-024 / pinned I-CAN-hack+Bk2ol lineage",
     fixture_transfer="shared-public-payload-reported",
-    notes=("Partner execution is externally reported, but retained public artifacts do not identify which exact "
-           "4 KiB ciphertext executed; require an explicitly target-accepted fixture."),
+    notes="Community tooling reports the same authenticated-RAM bootstrap/public payload family operating on this EPS calibration.",
   ),
   "8965F3401200": BootstrapTargetEvidence(
     software_id="8965F3401200",
     grade="external-source",
-    source="blurbdust SecOC flash patcher target table (SECOC-028/063)",
+    source="community/blurbdust_secoc_flash_patcher/flash_patcher.py",
     fixture_transfer="shared-flash-payload-path-reported",
-    notes="Dual-CPU target; shared bootstrap structure is reported, exact local TSK fixture is not pinned.",
+    notes=("Published dual-CPU patcher target uses the same SA secret, zero 0201/0202, FEBF0000/0x1000, " +
+           "10F0/FF00 and shared flash_payload.bin path."),
   ),
   "8965F4207000": BootstrapTargetEvidence(
     software_id="8965F4207000",
     grade="external-source",
-    source="blurbdust SecOC flash patcher target table (SECOC-028/063)",
+    source="community/blurbdust_secoc_flash_patcher/flash_patcher.py",
     fixture_transfer="shared-flash-payload-path-reported",
-    notes="Shared bootstrap structure is reported; exact local TSK fixture is not pinned.",
+    notes=("Published single-CPU patcher target uses the same SA secret, zero 0201/0202, FEBF0000/0x1000, " +
+           "10F0/FF00 and shared flash_payload.bin path."),
   ),
   "8965F4201000": BootstrapTargetEvidence(
     software_id="8965F4201000",
     grade="external-source",
-    source="blurbdust SecOC flash patcher target table (SECOC-028/063)",
+    source="community/blurbdust_secoc_flash_patcher/flash_patcher.py",
     fixture_transfer="shared-flash-payload-path-reported",
-    notes="Shared bootstrap structure is reported; exact local TSK fixture is not pinned.",
+    notes=("Published single-CPU patcher target uses the same SA secret, zero 0201/0202, FEBF0000/0x1000, " +
+           "10F0/FF00 and shared flash_payload.bin path."),
   ),
 }
 
@@ -155,7 +161,7 @@ def require_evidenced_fixture(f181: bytes | bytearray | str, sha256: str) -> Boo
   target = require_bootstrap_target(f181)
   if sha256.lower() not in target.exact_fixture_sha256:
     raise BootstrapProfileError(
-      f"bootstrap family {PROFILE_ID} covers {target.software_id}, but fixture {sha256.lower()} is not "
+      f"bootstrap family {PROFILE_ID} covers {target.software_id}, but fixture {sha256.lower()} is not " +
       "evidenced byte-for-byte for that F181"
     )
   return target

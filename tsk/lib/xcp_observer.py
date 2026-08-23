@@ -19,6 +19,7 @@ import subprocess
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from tsk.lib.diagnostic_route import configure_elm327, discover_eps_route_with_routing, route_fields
 from tsk.lib.dump_dataflash import ADDR
@@ -26,10 +27,20 @@ from tsk.lib.dump_diag import CANDIDATE_BUSES
 from tsk.lib.env import is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 
+SCHEMA = "tsk-xcp-daq-observer-v2"
 REQUEST_ID = 0x7F7
 RESPONSE_ID = 0x7F8
 FRAME_SIZE = 8
 EXACT_APPLICATION_ID = b"8965B4512000"
+
+# Generic XCP write commands and the shadow-window page copy are deliberately
+# absent from this observer. E4 is grouped with the writes because the copy
+# mutates the 0xFEBF7C00 shadow window even though its CodeFlash source is fixed.
+FORBIDDEN_COMMANDS = {
+  0xF0: "DOWNLOAD is a generic write command and is not implemented",
+  0xEC: "MODIFY_BITS is a generic write command and is not implemented",
+  0xE4: "page copy mutates the shadow window (fixed source, still a mutation)",
+}
 
 LOCALRAM_START = 0xFEBE0000
 LOCALRAM_END_EXCLUSIVE = 0xFEC00000
@@ -59,33 +70,59 @@ class ObservationProfile:
   name: str
   description: str
   addresses: tuple[int, ...]
+  finding_ids: tuple[str, ...]
+
+
+# These two SecOC state cells are intentionally absent from every XCP profile. The
+# firmware LocalRAM range checker excludes them, so the read-only observer must never
+# imply they are available through F4/DAQ. Command-5 remains behind its separate bench
+# experiment rather than smuggling a write-capable path into this observer.
+SECOC_XCP_EXCLUDED_CANDIDATES = (
+  (0xFEBE51AA, "command-5 generated-result buffer inside FEBE5030..FEBE529B exclusion"),
+  (0xFEBF13BE, "ICU-S job-completion polling word inside FEBF0288..FEBF13CC exclusion"),
+)
 
 
 PROFILES: dict[str, ObservationProfile] = {
+  "secoc-verification-state": ObservationProfile(
+    "secoc-verification-state",
+    ("MAC verification result byte plus current and pending synchronization " +
+     "trip/reset words: dynamic discriminators for SecOC Gate-2 acceptance and " +
+     "the post-reset replay window without any write primitive. The " +
+     "command-5 generated-result buffer and ICU-S driver polling word are " +
+     "firmware-excluded from XCP and deliberately absent"),
+    (0xFEBE555C, 0xFEBE5568, 0xFEBE556C, 0xFEBE5560, 0xFEBE5562, 0xFEBE5564),
+    ("SECOC-011", "SECOC-012", "SECOC-029"),
+  ),
   "actuation-discriminator": ObservationProfile(
     "actuation-discriminator",
-    "d/q-reference words plus staged TSG3 comparison bytes",
+    "d/q-reference words plus the three staged TSG3 comparison bytes",
     (0xFEBE6D28, 0xFEBE6D29, 0xFEBE6D2A, 0xFEBE6D2B, 0xFEBE38A2, 0xFEBE38A4, 0xFEBE38A6),
+    ("COM-007",),
   ),
   "diagnostic-control-state": ObservationProfile(
     "diagnostic-control-state",
-    "volatile state associated with WDBI 2012/2013/2014",
+    "volatile state associated with WDBI 2012/2013/2014 lifecycle/control findings",
     (0xFEBEB18F, 0xFEBEB18E, 0xFEBEB434, 0xFEBEB435, 0xFEBEB3EE, 0xFEBEB3EC, 0xFEBEB3E7),
+    ("DIAG-APP-016", "DIAG-APP-017", "DIAG-APP-018"),
   ),
   "routine-lifecycle-state": ObservationProfile(
     "routine-lifecycle-state",
-    "RoutineControl one-shot flags and lifecycle group states",
+    "one-shot/state-gated RoutineControl lifecycle flags and group states",
     (0xFEBE8157, 0xFEBE8158, 0xFEBE8159, 0xFEBEB454, 0xFEBEB455, 0xFEBEB456, 0xFEBEB2D5),
+    ("DIAG-APP-010", "DIAG-APP-011"),
   ),
   "async-ba-state": ObservationProfile(
     "async-ba-state",
-    "async-operation queue plus BA authorization marker/countdown",
+    "shared async-operation queue plus persistent BA authorization marker/countdown",
     (0xFEBE828C, 0xFEBE8290, 0xFEBE8291, 0xFEBE8292, 0xFEBE8293, 0xFEBE5F27, 0xFEBE5F28),
+    ("DIAG-APP-023", "SEC-APP-007"),
   ),
   "ba-operational-state": ObservationProfile(
     "ba-operational-state",
-    "SID-BA lifecycle, alternate-speed, and inhibit state",
+    "SID-BA lifecycle/alternate-speed/inhibit state without invoking any BA operation",
     (0xFEBEB112, 0xFEBEB113, 0xFEBEB116, 0xFEBEB117, 0xFEBEB118, 0xFEBEE894, 0xFEBEE895),
+    ("DIAG-APP-024",),
   ),
 }
 
@@ -147,6 +184,18 @@ def start_stop_daq_list_request(start: bool) -> bytes:
   return bytes((0xDE, 1 if start else 0)) + _u16le(LIST_INDEX) + b"\x00" * 4
 
 
+def assert_no_write_commands(requests: Iterable[tuple[str, bytes]]) -> None:
+  """Fail closed if a supposedly read-only plan contains a source-memory mutation."""
+  for operation, request in requests:
+    if len(request) != FRAME_SIZE:
+      raise XcpObserverError(f"{operation} request must be exactly eight bytes")
+    opcode = request[0]
+    if opcode in FORBIDDEN_COMMANDS:
+      raise XcpObserverError(
+        f"{operation} uses forbidden opcode 0x{opcode:02X}: {FORBIDDEN_COMMANDS[opcode]}"
+      )
+
+
 def validate_addresses(addresses: Iterable[int]) -> tuple[int, ...]:
   values = tuple(int(a) for a in addresses)
   if not values:
@@ -175,7 +224,10 @@ def configuration_requests(addresses: Iterable[int]) -> tuple[tuple[str, bytes],
     ("set_daq_list_mode", set_daq_list_mode_request()),
     ("start_daq_list", start_stop_daq_list_request(True)),
   ))
-  return tuple(requests)
+  planned = tuple(requests)
+  assert_no_write_commands(planned)
+  assert_no_write_commands((("stop_daq_list", start_stop_daq_list_request(False)),))
+  return planned
 
 
 def _recv_control(panda, *, bus: int, timeout: float, operation: str) -> bytes:
@@ -196,12 +248,25 @@ def _recv_control(panda, *, bus: int, timeout: float, operation: str) -> bytes:
   raise XcpObserverError(f"timed out waiting for {operation} response on 0x{RESPONSE_ID:03X}")
 
 
-def _exchange(panda, *, bus: int, request: bytes, timeout: float, operation: str) -> bytes:
-  if len(request) != FRAME_SIZE:
-    raise XcpObserverError("XCP requests must be exactly eight bytes")
+def _exchange(panda, *, bus: int, request: bytes, timeout: float, operation: str,
+              timings: list[dict] | None = None) -> bytes:
+  assert_no_write_commands(((operation, request),))
+  if timeout <= 0:
+    raise XcpObserverError("XCP response timeout must be positive")
   panda.can_recv()
+  requested_monotonic = time.monotonic()
   panda.can_send(REQUEST_ID, request, bus)
   response = _recv_control(panda, bus=bus, timeout=timeout, operation=operation)
+  received_monotonic = time.monotonic()
+  if timings is not None:
+    timings.append({
+      "operation": operation,
+      "request_hex": request.hex(),
+      "requested_monotonic": requested_monotonic,
+      "received_monotonic": received_monotonic,
+      "rtt_seconds": received_monotonic - requested_monotonic,
+      "received_wall_utc": datetime.now(UTC).isoformat(timespec="milliseconds"),
+    })
   if response[0] == 0xFE:
     raise XcpObserverError(f"{operation} returned XCP error 0x{response[1]:02X}")
   if response[0] != 0xFF:
@@ -219,26 +284,33 @@ def short_upload(panda, *, bus: int, address: int, length: int, timeout: float) 
   return response[1:1 + length]
 
 
-def configure_daq(panda, *, bus: int, addresses: Iterable[int], timeout: float) -> None:
+def configure_daq(panda, *, bus: int, addresses: Iterable[int], timeout: float) -> list[dict]:
+  timings: list[dict] = []
   start_sent = False
   try:
     for operation, request in configuration_requests(addresses):
       if operation == "start_daq_list":
         start_sent = True
-      response = _exchange(panda, bus=bus, request=request, timeout=timeout, operation=operation)
+      response = _exchange(
+        panda, bus=bus, request=request, timeout=timeout, operation=operation, timings=timings,
+      )
       if operation == "start_daq_list" and response[1] != 0:
         raise XcpObserverError(f"START_DAQ_LIST first PID is 0x{response[1]:02X}, expected 0")
   except Exception:
     if start_sent:
       try:
-        stop_daq(panda, bus=bus, timeout=timeout)
+        stop_daq(panda, bus=bus, timeout=timeout, timings=timings)
       except Exception:
         pass
     raise
+  return timings
 
 
-def stop_daq(panda, *, bus: int, timeout: float) -> None:
-  _exchange(panda, bus=bus, request=start_stop_daq_list_request(False), timeout=timeout, operation="stop_daq_list")
+def stop_daq(panda, *, bus: int, timeout: float, timings: list[dict] | None = None) -> None:
+  _exchange(
+    panda, bus=bus, request=start_stop_daq_list_request(False), timeout=timeout,
+    operation="stop_daq_list", timings=timings,
+  )
 
 
 def decode_dto(data: bytes, addresses: Iterable[int]) -> dict | None:
@@ -260,6 +332,25 @@ def decode_dto(data: bytes, addresses: Iterable[int]) -> dict | None:
   }
 
 
+def _latency_statistics(seconds: list[float]) -> dict | None:
+  if not seconds:
+    return None
+  ordered = sorted(seconds)
+  return {
+    "count": len(seconds),
+    "min_seconds": min(seconds),
+    "max_seconds": max(seconds),
+    "mean_seconds": sum(seconds) / len(seconds),
+    "median_seconds": ordered[len(ordered) // 2],
+    "jitter_seconds": max(seconds) - min(seconds),
+    "samples_source": "time.monotonic deltas only",
+  }
+
+
+def control_rtt_statistics(timings: list[dict]) -> dict | None:
+  return _latency_statistics([float(row["rtt_seconds"]) for row in timings])
+
+
 def capture_dto(panda, *, bus: int, addresses: Iterable[int], duration: float, max_frames: int) -> list[dict]:
   if not 0 < duration <= 10:
     raise XcpObserverError("capture duration must be >0 and <=10 seconds")
@@ -279,7 +370,10 @@ def capture_dto(panda, *, bus: int, addresses: Iterable[int], duration: float, m
       decoded = decode_dto(data, values)
       if decoded is None:
         continue
-      decoded["t_ms"] = round((time.monotonic() - started) * 1000.0, 3)
+      captured_monotonic = time.monotonic()
+      decoded["t_ms"] = round((captured_monotonic - started) * 1000.0, 3)
+      decoded["captured_monotonic"] = captured_monotonic
+      decoded["captured_wall_utc"] = datetime.now(UTC).isoformat(timespec="milliseconds")
       captured.append(decoded)
       if len(captured) >= max_frames:
         break
@@ -301,12 +395,17 @@ def probe_xcp(profile: str = "actuation-discriminator", progress_cb=None,
   time.sleep(2)
 
   result = {
+    "schema": SCHEMA,
     "status": "failed", "panda": "", "eps_bus": -1, "f181": "", "f181_hex": "",
     "profile": profile, "profile_description": PROFILES[profile].description,
+    "profile_finding_ids": list(PROFILES[profile].finding_ids),
     "xcp_request_id": f"0x{REQUEST_ID:03x}", "xcp_response_id": f"0x{RESPONSE_ID:03x}",
     "connect_response": "", "snapshot": [], "frames": [], "message": "",
     "profile_semantics_verified": False, "volatile_daq_configuration": True,
     "source_memory_writes_implemented": False, "write_commands_implemented": False,
+    "forbidden_command_opcodes": {f"0x{opcode:02X}": reason for opcode, reason in sorted(FORBIDDEN_COMMANDS.items())},
+    "wall_clock_rate_claimed": False, "control_timing": {"requests": [], "rtt_statistics": None},
+    "capture_window": {},
   }
   try:
     panda = TSKExtractor._connect_panda()
@@ -365,21 +464,38 @@ def probe_xcp(profile: str = "actuation-discriminator", progress_cb=None,
   if readable_addresses:
     cb(step="daq", last=f"configure {profile}")
     configured = False
+    control_timings: list[dict] = []
     try:
-      configure_daq(panda, bus=bus, addresses=readable_addresses, timeout=0.35)
+      control_timings = configure_daq(panda, bus=bus, addresses=readable_addresses, timeout=0.35)
       configured = True
       cb(step="capture", last="capture 0x7F8 DAQ DTOs")
+      capture_started_monotonic = time.monotonic()
+      capture_started_wall = datetime.now(UTC).isoformat(timespec="milliseconds")
       result["frames"] = capture_dto(
         panda, bus=bus, addresses=readable_addresses, duration=capture_seconds, max_frames=max_frames,
       )
+      result["capture_window"] = {
+        "started_monotonic": capture_started_monotonic,
+        "finished_monotonic": time.monotonic(),
+        "started_wall_utc": capture_started_wall,
+        "finished_wall_utc": datetime.now(UTC).isoformat(timespec="milliseconds"),
+        "requested_duration_seconds": capture_seconds,
+        "requested_max_frames": max_frames,
+        "truncated_by_frame_cap": len(result["frames"]) >= max_frames,
+        "clocks": "monotonic deltas only for intervals; UTC for cross-log correlation",
+      }
     except XcpObserverError as e:
       result["daq_error"] = str(e)
     finally:
       if configured:
         try:
-          stop_daq(panda, bus=bus, timeout=0.35)
+          stop_daq(panda, bus=bus, timeout=0.35, timings=control_timings)
         except Exception as e:
           result["cleanup_error"] = f"{type(e).__name__}: {e}"
+      result["control_timing"] = {
+        "requests": control_timings,
+        "rtt_statistics": control_rtt_statistics(control_timings),
+      }
 
   result["status"] = "observed" if readable_addresses else "reachable"
   semantic_note = (

@@ -21,6 +21,7 @@ import os
 import struct
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from tsk.lib.bootstrap_profile import (
@@ -32,7 +33,6 @@ from tsk.lib.bootstrap_profile import (
   DOWNLOAD_SIZE,
   EXECUTE_ROUTINE,
   PROFILE_ID,
-  RAM_DUMP_FIXTURE_SHA256,
   SECURITY_ACCESS_DATA_RECORD,
   VERIFY_ROUTINE,
   fixture_is_evidenced,
@@ -68,6 +68,21 @@ BUILTIN_DIR = Path(__file__).resolve().parents[1] / "runtime"
 BUILTIN_MANIFEST_PATH = BUILTIN_DIR / "target_manifest_8965B4512000.json"
 BUILTIN_AUDIT_PATH = BUILTIN_DIR / "audited_canary_8965B4512000.json"
 BUILTIN_CANARY_PATH = BUILTIN_DIR / "canary_8965B4512000.bin"
+FOREIGN_EVIDENCE_MANIFEST_PATHS = {
+  "8965H1202000": BUILTIN_DIR / "target_manifest_8965H1202000.json",
+  "8965F1208000": BUILTIN_DIR / "target_manifest_8965F1208000.json",
+}
+
+# The only live built-in runtime package today is the analyzed single-CPU, old-stack
+# B4512000 target. Protocol builders deliberately support both observed Denso bootstrap
+# dialect axes, but live execution remains pinned to these reviewed values.
+BUILTIN_RUNTIME_UDS_VARIANT = "old"
+BUILTIN_RUNTIME_CPU_INDEX = 0
+# Preserve the already-shipped B4512000 live byte sequence exactly. The analyzed
+# Sienna ignores the five DID-0203 data bytes, while the generalized RE route model
+# uses 01 00 00 00 00 for CPU0. Keep that generalized convention plan-only until a
+# target that needs it is explicitly enabled.
+BUILTIN_RUNTIME_DID_0203 = b"\x00" * 5
 
 # MEM-SAFE-001 is verified from this exact CodeFlash. Cross-vehicle bootstrap reuse does
 # not silently transfer this memory-safety primitive. A future target must add equivalent
@@ -82,6 +97,27 @@ FF00_TRIGGER_SIZE = 0x8000
 
 class EphemeralRuntimeError(ValueError):
   pass
+
+
+def bootstrap_protocol_values(*, uds_variant: str, cpu_index: int) -> dict:
+  """Construct Denso bootstrap dialect fields without granting live authority.
+
+  ``old`` uses routine magic 45 00 and ``new`` uses 45 01. CPU0 uses memory-ID 1
+  and DID 0203 = 01 00 00 00 00; CPU1 uses memory-ID 0 and five zero bytes.
+  These are request-construction semantics only: selecting either value is not evidence
+  that a target accepts that protocol path.
+  """
+  if uds_variant not in ("old", "new"):
+    raise EphemeralRuntimeError("UDS variant must be old or new")
+  if cpu_index not in (0, 1):
+    raise EphemeralRuntimeError("cpu_index must be 0 or 1")
+  return {
+    "uds_variant": uds_variant,
+    "cpu_index": cpu_index,
+    "memory_id": 1 if cpu_index == 0 else 0,
+    "did_0203": b"\x01\x00\x00\x00\x00" if cpu_index == 0 else b"\x00" * 5,
+    "routine_magic": b"\x45\x01" if uds_variant == "new" else b"\x45\x00",
+  }
 
 
 def _sha256(data: bytes) -> str:
@@ -154,6 +190,115 @@ def _validate_bootstrap_join(manifest: dict, f181: str) -> dict:
   if not isinstance(matched, list) or not any(row.get("software_id") == f181 for row in matched if isinstance(row, dict)):
     raise EphemeralRuntimeError("target manifest bootstrap evidence is not bound to this F181")
   return bootstrap
+
+
+def inspect_command5_proxy_geometry(geometry: dict) -> dict:
+  """Expose command-5 proxy geometry as static evidence only.
+
+  The current B451 resolver records enough addresses to build the RE RAM proxy, but
+  protected slot-4 command-5 permission is still a live hardware unknown. This helper
+  intentionally returns no execution primitive and imports no XCP mailbox writer.
+  """
+  if geometry.get("command5_dispatch_address") in (None, ""):
+    return {
+      "available": False,
+      "slot4_permission": "unknown",
+      "execution_exposed": False,
+      "mailbox_writer_imported": False,
+    }
+  required = (
+    "command5_dispatch_address", "command5_done_flag", "command5_driver_record",
+    "command5_key_selector", "command5_mailbox_address", "command5_mailbox_size",
+    "command5_status_flag",
+  )
+  missing = [name for name in required if geometry.get(name) in (None, "")]
+  if missing:
+    raise EphemeralRuntimeError(f"target manifest has incomplete command-5 proxy geometry: {', '.join(missing)}")
+  mailbox = _hex_u32(geometry["command5_mailbox_address"], "command-5 mailbox")
+  mailbox_size = _hex_u32(geometry["command5_mailbox_size"], "command-5 mailbox size")
+  return {
+    "available": True,
+    "dispatcher": f"0x{_hex_u32(geometry['command5_dispatch_address'], 'command-5 dispatcher'):08X}",
+    "driver_record": int(geometry["command5_driver_record"]),
+    "key_selector": int(geometry["command5_key_selector"]),
+    "done_flag": f"0x{_hex_u32(geometry['command5_done_flag'], 'command-5 done flag'):08X}",
+    "status_flag": f"0x{_hex_u32(geometry['command5_status_flag'], 'command-5 status flag'):08X}",
+    "mailbox": f"0x{mailbox:08X}",
+    "mailbox_size": mailbox_size,
+    "mailbox_end_exclusive": f"0x{mailbox + mailbox_size:08X}",
+    "mailbox_transport": str(geometry.get("command5_mailbox_transport", "")),
+    "slot4_permission": "dynamic-unknown",
+    "execution_exposed": False,
+    "mailbox_writer_imported": False,
+  }
+
+
+def inspect_runtime_target_manifest(manifest_raw: bytes, *, expected_f181: str | None = None) -> dict:
+  """Validate resolver evidence without treating it as an executable runtime package.
+
+  This intentionally accepts resolver outputs such as the H/F Corolla manifests whose
+  semantic analysis is complete but whose steering bridge is unsupported. No canary,
+  bootstrap fixture, write authority, or live execution path is created by this function.
+  """
+  manifest = _json_bytes(manifest_raw, "target manifest")
+  if manifest.get("schema") != RUNTIME_SCHEMA:
+    raise EphemeralRuntimeError("unsupported ephemeral runtime target-manifest schema")
+  image = manifest.get("image")
+  if not isinstance(image, dict):
+    raise EphemeralRuntimeError("target manifest is missing image identity")
+  image_sha = str(image.get("sha256", "")).lower()
+  if len(image_sha) != 64 or any(c not in "0123456789abcdef" for c in image_sha):
+    raise EphemeralRuntimeError("target manifest has an invalid CodeFlash SHA-256")
+  if int(image.get("size", 0)) != 0x100000:
+    raise EphemeralRuntimeError("target manifest is not bound to an exact 1 MiB P1M-E CodeFlash image")
+  software_ids = [str(value) for value in image.get("software_ids", [])]
+
+  bootstrap = manifest.get("authenticated_bootstrap_profile")
+  matched = bootstrap.get("matched_evidence", []) if isinstance(bootstrap, dict) else []
+  matched_ids = [str(row.get("software_id")) for row in matched
+                 if isinstance(row, dict) and row.get("software_id") in BOOTSTRAP_TARGETS]
+  if expected_f181 is not None:
+    target = normalize_f181(expected_f181)
+  elif len(matched_ids) == 1:
+    target = matched_ids[0]
+  else:
+    raise EphemeralRuntimeError("target manifest does not identify one exact bootstrap-evidence F181")
+  if target not in software_ids:
+    raise EphemeralRuntimeError(f"runtime target manifest CodeFlash does not contain target F181 {target}")
+  _validate_bootstrap_join(manifest, target)
+
+  geometry = manifest.get("ram_execution_geometry")
+  secoc = manifest.get("secoc_records")
+  if not isinstance(geometry, dict) or not isinstance(secoc, dict):
+    raise EphemeralRuntimeError("target manifest is missing RAM/SecOC resolver evidence")
+  required = [str(value) for value in secoc.get("steering_bridge_required_ids", [])]
+  missing = [str(value) for value in secoc.get("steering_bridge_missing_ids", [])]
+  incompatible = [str(value) for value in secoc.get("steering_bridge_incompatible_ids", [])]
+  return {
+    "f181": target,
+    "manifest_sha256": _sha256(manifest_raw),
+    "codeflash_sha256": image_sha,
+    "status": str(manifest.get("status", "")),
+    "runtime_build_ready": manifest.get("runtime_build_ready") is True,
+    "ram_geometry_status": str(geometry.get("status", "")),
+    "ram_geometry_selection_source": str(geometry.get("selection_source", "")),
+    "secoc_record_count": int(secoc.get("record_count", len(secoc.get("records", [])))),
+    "steering_bridge_applicable": secoc.get("steering_bridge_applicable") is True,
+    "steering_bridge_required_ids": required,
+    "steering_bridge_missing_ids": missing,
+    "steering_bridge_incompatible_ids": incompatible,
+    "command5_proxy_evidence": inspect_command5_proxy_geometry(geometry),
+    "evidence_only": manifest.get("runtime_build_ready") is not True,
+    "bridge_execution_exposed": False,
+  }
+
+
+def builtin_runtime_evidence(f181: str) -> dict | None:
+  target = normalize_f181(f181)
+  path = FOREIGN_EVIDENCE_MANIFEST_PATHS.get(target)
+  if path is None or not path.is_file():
+    return None
+  return inspect_runtime_target_manifest(path.read_bytes(), expected_f181=target)
 
 
 def validate_runtime_package(manifest_raw: bytes, audit_raw: bytes, canary: bytes,
@@ -245,6 +390,7 @@ def validate_runtime_package(manifest_raw: bytes, audit_raw: bytes, canary: byte
     "heartbeat_address": f"0x{heartbeat:08X}",
     "heartbeat_observation_method": str(geometry.get("canary_observation_method", "")),
     "bootstrap": public_bootstrap_status(target),
+    "command5_proxy_evidence": inspect_command5_proxy_geometry(geometry),
     "raw_substitution_verified": image_sha in RAW_SUBSTITUTION_VERIFIED_CODEFLASH,
     "canary_static_ready": True,
     "bridge_artifact_present": False,
@@ -310,7 +456,7 @@ def persist_runtime_package(manifest_raw: bytes, audit_raw: bytes, canary: bytes
     **metadata,
     "source": "imported",
     "bootstrap_fixture": imported_fixture,
-    "imported_utc": time.time(),
+    "imported_utc": datetime.now(UTC).timestamp(),
   }
   _atomic_write(IMPORTED_METADATA_PATH, (json.dumps(package_metadata, indent=2, sort_keys=True) + "\n").encode())
   try:
@@ -382,7 +528,14 @@ def _selected_bootstrap_fixture(f181: str, package_source: str) -> tuple[bytes, 
 def public_runtime_status(f181: str) -> dict:
   target = normalize_f181(f181)
   loaded = load_runtime_package(target) if target else None
+  evidence = builtin_runtime_evidence(target) if target else None
   if loaded is None:
+    message = "No SHA-bound ephemeral runtime canary package is installed for this F181."
+    if evidence is not None:
+      message = (
+        "Resolver evidence is bundled for this exact F181, but it is evidence-only and cannot be executed. " +
+        f"Status: {evidence['status']}; steering bridge applicable: {evidence['steering_bridge_applicable']}."
+      )
     return {
       "present": False,
       "f181": target,
@@ -390,7 +543,8 @@ def public_runtime_status(f181: str) -> dict:
       "scheduler_observed": False,
       "reset_to_stock_verified": False,
       "bridge_execution_exposed": False,
-      "message": "No SHA-bound ephemeral runtime canary package is installed for this F181.",
+      "target_evidence": evidence or {},
+      "message": message,
     }
   metadata, _, _, _, source = loaded
   try:
@@ -422,12 +576,46 @@ def public_runtime_status(f181: str) -> dict:
   }
 
 
-def _request_download_record(address: int, length: int) -> bytes:
+def _download_record(address: int, length: int, *, memory_id: int) -> bytes:
+  if not 0 <= memory_id <= 0xFF:
+    raise EphemeralRuntimeError("RequestDownload memory ID must fit one byte")
+  if length <= 0 or length > 0xFFFFFFFF or not 0 <= address <= 0xFFFFFFFF:
+    raise EphemeralRuntimeError("RequestDownload address/length must be non-wrapping uint32 values")
+  if address + length > 0x100000000:
+    raise EphemeralRuntimeError("RequestDownload range wraps uint32")
+  return b"\x01\x46" + bytes((memory_id, 0)) + struct.pack("!II", address, length)
+
+
+def _request_download_record(address: int, length: int, *, memory_id: int = 1) -> bytes:
   if not 1 <= length <= MAX_RAW_CHUNK:
     raise EphemeralRuntimeError("raw substitution chunks must be 1..15 bytes")
   if not DOWNLOAD_BASE <= address or address + length > DOWNLOAD_BASE + DOWNLOAD_SIZE:
     raise EphemeralRuntimeError("raw substitution is outside authenticated download window")
-  return b"\x01\x46\x01\x00" + struct.pack("!II", address, length)
+  return _download_record(address, length, memory_id=memory_id)
+
+
+def bootstrap_protocol_plan(*, uds_variant: str, cpu_index: int) -> dict:
+  protocol = bootstrap_protocol_values(uds_variant=uds_variant, cpu_index=cpu_index)
+  magic = protocol["routine_magic"]
+  return {
+    **protocol,
+    "request_download": _download_record(DOWNLOAD_BASE, DOWNLOAD_SIZE, memory_id=protocol["memory_id"]),
+    "verify_data": magic + struct.pack("!II", DOWNLOAD_BASE, DOWNLOAD_SIZE),
+    "execution_trigger": b"\x31\x01\xff\x00" + magic + struct.pack("!II", FF00_TRIGGER_ADDR, FF00_TRIGGER_SIZE),
+  }
+
+
+def builtin_runtime_protocol_plan() -> dict:
+  """Return the exact already-reviewed B4512000 live request shape.
+
+  The generalized cpu-index model is useful for planning F3/F4 and newer-stack work,
+  but it must not silently rewrite bytes on the only built-in live target.
+  """
+  plan = bootstrap_protocol_plan(
+    uds_variant=BUILTIN_RUNTIME_UDS_VARIANT,
+    cpu_index=BUILTIN_RUNTIME_CPU_INDEX,
+  )
+  return {**plan, "did_0203": BUILTIN_RUNTIME_DID_0203}
 
 
 def _raw_substitution_plan(base: int, canary: bytes, callback_cell: int) -> list[tuple[int, bytes]]:
@@ -517,27 +705,28 @@ def run_inert_canary(*, expected_f181: str, bench_isolated: bool,
   boot.security_access(ACCESS_TYPE.SEND_KEY, key)
   cb(step="security-access", message="boot SecurityAccess accepted")
 
-  boot.write_data_by_identifier(0x203, b"\x00" * 5)
+  protocol = builtin_runtime_protocol_plan()
+  boot.write_data_by_identifier(0x203, protocol["did_0203"])
   boot.write_data_by_identifier(0x201, DID_0201_DEFAULT)
   boot.write_data_by_identifier(0x202, DID_0202_DEFAULT)
-  full_download = b"\x01\x46\x01\x00" + struct.pack("!II", DOWNLOAD_BASE, DOWNLOAD_SIZE)
-  boot._uds_request(SERVICE_TYPE.REQUEST_DOWNLOAD, data=full_download)
+  boot._uds_request(SERVICE_TYPE.REQUEST_DOWNLOAD, data=protocol["request_download"])
   for index, offset in enumerate(range(0, len(bootstrap_fixture), 0x400), start=1):
     boot.transfer_data(index, bootstrap_fixture[offset:offset + 0x400])
   boot.request_transfer_exit()
-  verify = b"\x45\x00" + struct.pack("!II", DOWNLOAD_BASE, DOWNLOAD_SIZE)
-  boot.routine_control(ROUTINE_CONTROL_TYPE.START, VERIFY_ROUTINE, verify)
+  boot.routine_control(ROUTINE_CONTROL_TYPE.START, VERIFY_ROUTINE, protocol["verify_data"])
   cb(step="bootstrap-authenticated", message="target-accepted 4 KiB bootstrap passed 0x10F0")
 
   substitutions = _raw_substitution_plan(runtime_base, canary, callback_cell)
   for index, (address, data) in enumerate(substitutions):
-    boot._uds_request(SERVICE_TYPE.REQUEST_DOWNLOAD, data=_request_download_record(address, len(data)))
+    boot._uds_request(
+      SERVICE_TYPE.REQUEST_DOWNLOAD,
+      data=_request_download_record(address, len(data), memory_id=protocol["memory_id"]),
+    )
     boot.transfer_data(1, data)
     boot.request_transfer_exit()
     if index == len(substitutions) - 1:
       cb(step="callback-last", message=f"callback cell 0x{callback_cell:08X} written last")
-  trigger = b"\x31\x01\xff\x00\x45\x00" + struct.pack("!II", FF00_TRIGGER_ADDR, FF00_TRIGGER_SIZE)
-  isotp_send(panda, trigger, boot_route["tx"], bus=boot_route["tx_bus"])
+  isotp_send(panda, protocol["execution_trigger"], boot_route["tx"], bus=boot_route["tx_bus"])
   cb(step="triggered", message="inert runtime triggered; waiting for application diagnostics")
 
   deadline = time.monotonic() + 8.0
@@ -604,7 +793,7 @@ def run_inert_canary(*, expected_f181: str, bench_isolated: bool,
     "route": route_fields(route),
     "programming_handoff": handoff,
     "bootstrap_fixture": bootstrap_meta,
-    "validated_utc": time.time(),
+    "validated_utc": datetime.now(UTC).timestamp(),
     "bridge_execution_exposed": False,
   }
   _atomic_write(CANARY_VALIDATION_PATH, (json.dumps(record, indent=2, sort_keys=True) + "\n").encode())

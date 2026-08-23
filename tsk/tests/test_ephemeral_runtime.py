@@ -1,4 +1,3 @@
-import copy
 import json
 import tempfile
 import unittest
@@ -26,12 +25,100 @@ class TestEphemeralRuntimePackage(unittest.TestCase):
     self.assertEqual(result["canary_size"], 332)
     self.assertEqual(result["canary_sha256"], "81176c6e1c33451cfa63bd3b4a0e07b8b0fb952c70b3d67442f1a294ed6b651e")
     self.assertEqual(result["target_manifest_sha256"], "e0fddd8204ec9ec34b6cdf88d3b34f24097cef9609d7471f50c181b8ef626395")
+    command5 = result["command5_proxy_evidence"]
+    self.assertTrue(command5["available"])
+    self.assertEqual(command5["dispatcher"], "0x00088350")
+    self.assertEqual(command5["driver_record"], 0)
+    self.assertEqual(command5["key_selector"], 4)
+    self.assertEqual(command5["mailbox"], "0xFEBFFB80")
+    self.assertEqual(command5["mailbox_size"], 0x80)
+    self.assertEqual(command5["slot4_permission"], "dynamic-unknown")
+    self.assertFalse(command5["execution_exposed"])
+    self.assertFalse(command5["mailbox_writer_imported"])
 
   def test_wrong_f181_is_rejected(self):
     with self.assertRaisesRegex(runtime.EphemeralRuntimeError, "does not contain target F181"):
       runtime.validate_runtime_package(
         self.manifest_raw, self.audit_raw, self.canary, expected_f181="8965F4201000"
       )
+
+  def test_foreign_h_f_manifests_are_exact_evidence_only_negative_capability_fixtures(self):
+    expected = {
+      "8965H1202000": "d2f4d4bd1eff92ae801b5aae3fccfeb94cf0f402f41bf7eb32ae74ef48e9fa38",
+      "8965F1208000": "432ccc6801b97e75f96a4fc7cd1e466e87c2064fd368bd298ad17ca8a8c95186",
+    }
+    for f181, manifest_sha in expected.items():
+      path = runtime.FOREIGN_EVIDENCE_MANIFEST_PATHS[f181]
+      raw = path.read_bytes()
+      self.assertEqual(runtime._sha256(raw), manifest_sha)
+      evidence = runtime.inspect_runtime_target_manifest(raw, expected_f181=f181)
+      self.assertEqual(evidence["f181"], f181)
+      self.assertEqual(evidence["manifest_sha256"], manifest_sha)
+      self.assertEqual(evidence["status"], "semantic-resolved-steering-unsupported")
+      self.assertFalse(evidence["runtime_build_ready"])
+      self.assertTrue(evidence["evidence_only"])
+      self.assertEqual(evidence["ram_geometry_status"], "unresolved")
+      self.assertFalse(evidence["steering_bridge_applicable"])
+      self.assertEqual(evidence["steering_bridge_required_ids"], ["0x2E4", "0x131"])
+      self.assertEqual(evidence["steering_bridge_missing_ids"], ["0x2E4", "0x131"])
+      self.assertEqual(evidence["secoc_record_count"], 3)
+      self.assertFalse(evidence["command5_proxy_evidence"]["available"])
+      self.assertFalse(evidence["command5_proxy_evidence"]["execution_exposed"])
+      self.assertFalse(evidence["bridge_execution_exposed"])
+      self.assertEqual(runtime.builtin_runtime_evidence(f181), evidence)
+
+  def test_foreign_evidence_manifest_never_satisfies_executable_package_gate(self):
+    raw = runtime.FOREIGN_EVIDENCE_MANIFEST_PATHS["8965H1202000"].read_bytes()
+    with self.assertRaisesRegex(runtime.EphemeralRuntimeError, "not runtime-build-ready"):
+      runtime.validate_runtime_package(raw, self.audit_raw, self.canary, expected_f181="8965H1202000")
+
+    # A future regression must not be able to promote this fixture by flipping only
+    # the top-level status bits. Its exact image still has no verified retained-RWX
+    # geometry, and the executable-package validator must reject on that independent gate.
+    doctored = json.loads(raw)
+    doctored["status"] = "runtime-build-ready"
+    doctored["runtime_build_ready"] = True
+    with self.assertRaisesRegex(runtime.EphemeralRuntimeError, "RAM retention geometry is not exact-image verified"):
+      runtime.validate_runtime_package(
+        json.dumps(doctored).encode(), self.audit_raw, self.canary, expected_f181="8965H1202000"
+      )
+
+  def test_foreign_public_status_reports_negative_capability_without_live_readiness(self):
+    with patch.object(runtime, "load_runtime_package", return_value=None):
+      status = runtime.public_runtime_status("8965F1208000")
+    self.assertFalse(status["present"])
+    self.assertFalse(status["canary_static_ready"])
+    self.assertFalse(status["bridge_execution_exposed"])
+    self.assertEqual(status["target_evidence"]["status"], "semantic-resolved-steering-unsupported")
+    self.assertEqual(status["target_evidence"]["steering_bridge_missing_ids"], ["0x2E4", "0x131"])
+    self.assertIn("evidence-only", status["message"])
+
+  def test_bootstrap_protocol_builder_covers_old_new_and_cpu0_cpu1_without_authorizing_them(self):
+    old0 = runtime.bootstrap_protocol_plan(uds_variant="old", cpu_index=0)
+    self.assertEqual(old0["did_0203"], bytes.fromhex("0100000000"))
+    self.assertEqual(old0["memory_id"], 1)
+    builtin = runtime.builtin_runtime_protocol_plan()
+    self.assertEqual(builtin["did_0203"], b"\x00" * 5)  # preserve shipped B4512000 live bytes
+    self.assertEqual(builtin["memory_id"], 1)
+    self.assertEqual(builtin["routine_magic"], bytes.fromhex("4500"))
+    self.assertEqual(old0["request_download"], bytes.fromhex("01460100febf000000001000"))
+    self.assertEqual(old0["verify_data"], bytes.fromhex("4500febf000000001000"))
+    self.assertEqual(old0["execution_trigger"], bytes.fromhex("3101ff004500000e000000008000"))
+
+    new0 = runtime.bootstrap_protocol_plan(uds_variant="new", cpu_index=0)
+    self.assertEqual(new0["routine_magic"], bytes.fromhex("4501"))
+    self.assertEqual(new0["verify_data"][:2], bytes.fromhex("4501"))
+    self.assertEqual(new0["execution_trigger"][4:6], bytes.fromhex("4501"))
+
+    old1 = runtime.bootstrap_protocol_plan(uds_variant="old", cpu_index=1)
+    self.assertEqual(old1["did_0203"], b"\x00" * 5)
+    self.assertEqual(old1["memory_id"], 0)
+    self.assertEqual(old1["request_download"], bytes.fromhex("01460000febf000000001000"))
+
+    with self.assertRaisesRegex(runtime.EphemeralRuntimeError, "old or new"):
+      runtime.bootstrap_protocol_plan(uds_variant="future", cpu_index=0)
+    with self.assertRaisesRegex(runtime.EphemeralRuntimeError, "cpu_index"):
+      runtime.bootstrap_protocol_plan(uds_variant="old", cpu_index=2)
 
   def test_non_build_ready_manifest_is_rejected_before_execution(self):
     manifest = json.loads(self.manifest_raw)

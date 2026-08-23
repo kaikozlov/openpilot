@@ -37,6 +37,7 @@
               <label class="probe-field-label" for="profile">Profile</label>
               <select id="profile" class="probe-select">
                 <option value="actuation-discriminator">Actuation discriminator</option>
+                <option value="secoc-verification-state">SecOC verification + sync state</option>
                 <option value="diagnostic-control-state">WDBI control state</option>
                 <option value="routine-lifecycle-state">Routine lifecycle state</option>
                 <option value="async-ba-state">Async + BA authorization state</option>
@@ -102,6 +103,7 @@
         termWrite("CONNECT: " + (s.connect_response || "no positive response"), s.connect_response ? "ok" : "warn");
         termWrite("Profile: " + (s.profile || "?"));
         if (s.profile_description) termWrite("  " + s.profile_description, "dim");
+        if ((s.profile_finding_ids || []).length) termWrite("  RE findings: " + s.profile_finding_ids.join(", "), "dim");
         termWrite("Profile semantics: " + (s.profile_semantics || "unknown"), s.profile_semantics_verified ? "ok" : "warn");
 
         if ((s.snapshot || []).length) {
@@ -127,6 +129,13 @@
         termWrite("");
         termWrite("XCP source-memory write commands implemented: " + (s.source_memory_writes_implemented ? "YES" : "no"), s.source_memory_writes_implemented ? "err" : "ok");
         termWrite("Volatile DAQ configuration: " + (s.volatile_daq_configuration ? "yes" : "no"), "dim");
+        const forbidden = s.forbidden_command_opcodes || {};
+        if (Object.keys(forbidden).length) termWrite("Forbidden source-memory mutation opcodes: " + Object.keys(forbidden).join(", "), "dim");
+        const timing = s.control_timing || {};
+        const stats = timing.rtt_statistics || null;
+        if (stats) termWrite(`Control RTT: ${stats.count} response(s), mean ${(Number(stats.mean_seconds) * 1000).toFixed(3)} ms, jitter ${(Number(stats.jitter_seconds) * 1000).toFixed(3)} ms`, "dim");
+        const window = s.capture_window || {};
+        if (window.clocks) termWrite("Capture clocks: " + window.clocks, "dim");
         if (s.daq_error) termWrite("DAQ configuration/capture warning: " + s.daq_error, "warn");
         if (s.cleanup_error) termWrite("STOP cleanup warning: " + s.cleanup_error, "err");
         if (s.message) termWrite(s.message, s.status === "observed" ? "ok" : "warn");

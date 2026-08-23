@@ -35,7 +35,7 @@ from tsk.lib.sniff_can import sniff as sniff_can, summarize_counts
 from tsk.lib.dump_diag import diagnose as dump_diagnose
 from tsk.lib.prog_probe import probe_programming
 from tsk.lib.read_mem import read_key_region
-from tsk.lib.xcp_observer import PROFILES as XCP_PROFILES, probe_xcp
+from tsk.lib.xcp_observer import FORBIDDEN_COMMANDS as XCP_FORBIDDEN_COMMANDS, PROFILES as XCP_PROFILES, probe_xcp
 from tsk.lib.ident_map import map_surface
 from tsk.lib.integration_profile import manifest_template as integration_manifest_template, save_and_refresh as save_integration_and_refresh
 from tsk.lib.reset_probe import probe_reset_window
@@ -409,8 +409,10 @@ xcp_state = {
   "eps_rx": "",
   "f181": "",
   "f181_hex": "",
+  "schema": "tsk-xcp-daq-observer-v2",
   "profile": "actuation-discriminator",
   "profile_description": "",
+  "profile_finding_ids": [],
   "xcp_request_id": "0x7f7",
   "xcp_response_id": "0x7f8",
   "connect_response": "",
@@ -421,6 +423,10 @@ xcp_state = {
   "volatile_daq_configuration": True,
   "source_memory_writes_implemented": False,
   "write_commands_implemented": False,
+  "forbidden_command_opcodes": {},
+  "wall_clock_rate_claimed": False,
+  "control_timing": {"requests": [], "rtt_statistics": None},
+  "capture_window": {},
   "message": "",
 }
 
@@ -1609,13 +1615,24 @@ def _run_xcp_mock(profile: str) -> None:
     xcp_state.update(
       status="observed", count=2, panda="1.7.0-mock", eps_bus=1, eps_rx_bus=1,
       eps_tx="0x7a1", eps_rx="0x7a9", elm327_param=1, semantic_path="normal-harness",
-      f181="8965B4512000", f181_hex=b"8965B4512000".hex(), profile=profile,
-      profile_description=selected.description, xcp_request_id="0x7f7", xcp_response_id="0x7f8",
+      f181="8965B4512000", f181_hex=b"8965B4512000".hex(), schema="tsk-xcp-daq-observer-v2", profile=profile,
+      profile_description=selected.description, profile_finding_ids=list(selected.finding_ids),
+      xcp_request_id="0x7f7", xcp_response_id="0x7f8",
       connect_response="ff00000000000000", snapshot=snapshot,
       frames=[{"pid": 0, "t_ms": 0.0, "raw": "0001020304050607", "values": sample_values},
               {"pid": 0, "t_ms": 2.0, "raw": "0002030405060708", "values": sample_values}],
       profile_semantics_verified=True, profile_semantics="firmware-verified for exact 8965B4512000",
       volatile_daq_configuration=True, source_memory_writes_implemented=False, write_commands_implemented=False,
+      forbidden_command_opcodes={f"0x{opcode:02X}": reason for opcode, reason in sorted(XCP_FORBIDDEN_COMMANDS.items())},
+      wall_clock_rate_claimed=False,
+      control_timing={"requests": [{"operation": "connect", "request_hex": "ff00000000000000",
+                                    "rtt_seconds": 0.001}],
+                      "rtt_statistics": {"count": 1, "min_seconds": 0.001, "max_seconds": 0.001,
+                                         "mean_seconds": 0.001, "median_seconds": 0.001,
+                                         "jitter_seconds": 0.0, "samples_source": "time.monotonic deltas only"}},
+      capture_window={"requested_duration_seconds": 1.5, "requested_max_frames": 512,
+                      "truncated_by_frame_cap": False,
+                      "clocks": "monotonic deltas only for intervals; UTC for cross-log correlation"},
       message=" ".join((
         f"XCP CONNECT, bounded F4 reads, and volatile DAQ observation succeeded for {profile};",
         "captured 2 DTO frame(s). No XCP source-memory write command was implemented. (mock)",
@@ -1632,7 +1649,9 @@ def _run_xcp_job(profile: str) -> None:
         eps_bus=result.get("eps_bus", -1), eps_rx_bus=result.get("eps_rx_bus", -1),
         eps_tx=result.get("eps_tx", ""), eps_rx=result.get("eps_rx", ""),
         f181=result.get("f181", ""), f181_hex=result.get("f181_hex", ""),
-        profile=result.get("profile", profile), profile_description=result.get("profile_description", ""),
+        schema=result.get("schema", ""), profile=result.get("profile", profile),
+        profile_description=result.get("profile_description", ""),
+        profile_finding_ids=result.get("profile_finding_ids", []),
         xcp_request_id=result.get("xcp_request_id", "0x7f7"),
         xcp_response_id=result.get("xcp_response_id", "0x7f8"),
         connect_response=result.get("connect_response", ""), snapshot=result.get("snapshot", []),
@@ -1642,6 +1661,10 @@ def _run_xcp_job(profile: str) -> None:
         volatile_daq_configuration=bool(result.get("volatile_daq_configuration", True)),
         source_memory_writes_implemented=bool(result.get("source_memory_writes_implemented", False)),
         write_commands_implemented=bool(result.get("write_commands_implemented", False)),
+        forbidden_command_opcodes=result.get("forbidden_command_opcodes", {}),
+        wall_clock_rate_claimed=bool(result.get("wall_clock_rate_claimed", False)),
+        control_timing=result.get("control_timing", {"requests": [], "rtt_statistics": None}),
+        capture_window=result.get("capture_window", {}),
         message=result.get("message", ""),
         **_route_metadata(result),
       )
@@ -1668,9 +1691,12 @@ def start_xcp_job(profile: str = "actuation-discriminator") -> bool:
     xcp_state.update(
       status="running", count=0, last="", step="", panda="", eps_bus=-1, eps_rx_bus=-1,
       eps_tx="", eps_rx="", f181="", f181_hex="", profile=profile,
-      profile_description=XCP_PROFILES[profile].description, connect_response="", snapshot=[], frames=[],
-      profile_semantics_verified=False, profile_semantics="", volatile_daq_configuration=True,
-      source_memory_writes_implemented=False, cleanup_error="", daq_error="", write_commands_implemented=False, message="",
+      profile_description=XCP_PROFILES[profile].description,
+      profile_finding_ids=list(XCP_PROFILES[profile].finding_ids), connect_response="", snapshot=[], frames=[],
+      schema="tsk-xcp-daq-observer-v2", profile_semantics_verified=False, profile_semantics="",
+      volatile_daq_configuration=True, source_memory_writes_implemented=False, cleanup_error="", daq_error="",
+      write_commands_implemented=False, forbidden_command_opcodes={}, wall_clock_rate_claimed=False,
+      control_timing={"requests": [], "rtt_statistics": None}, capture_window={}, message="",
     )
   try:
     threading.Thread(target=_run_xcp_job, args=(profile,), name="tsk_xcp_observer", daemon=True).start()
@@ -1713,7 +1739,7 @@ def _run_ephemeral_canary_job(f181: str) -> None:
     result = run_inert_canary(expected_f181=f181, bench_isolated=True, progress_cb=_ephemeral_progress)
     with ephemeral_lock:
       ephemeral_state.update(status="passed", result=result, message=(
-        "Inert scheduler canary heartbeat and reset-to-stock proof passed. "
+        "Inert scheduler canary heartbeat and reset-to-stock proof passed. " +
         "The steering bridge remains unavailable in TSK."
       ))
   except NotAGNOSError:
