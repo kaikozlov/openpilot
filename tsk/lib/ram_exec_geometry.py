@@ -135,7 +135,7 @@ COMMUNITY_B4_F3F4_RAM_EXEC = RamExecGeometry(
     "8965H1202000",
     "8965F1208000",
   }),
-  evidence=("SECOC-024/028/063 external-source B4/F3/F4 geometry plus KEYLESS-018/VAR-003/039 "
+  evidence=("SECOC-024/028/063 external-source B4/F3/F4 geometry plus KEYLESS-018/VAR-003/039 " +
             "observed H/F authenticated-RAM range-payload execution"),
 )
 
