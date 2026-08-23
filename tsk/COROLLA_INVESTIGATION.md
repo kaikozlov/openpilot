@@ -139,16 +139,17 @@ old operational assumptions without rewriting the chronology that produced them.
    The reset-ending body is still not vehicle-confirmed, so the derivative remains behind
    an explicit experimental checkbox.
 
-9. **2026-08-17 correction: programming reappearance, bootstrap-family membership,
+9. **2026-08-17/23 correction: programming reappearance, bootstrap-family membership,
    exact ciphertext acceptance, and application retention are separate claims.** The old
    flow collapsed them into one `FEBF0000 + 0x1000` “RAM-exec compatibility” decision.
-   Cross-vehicle evidence now establishes the shared authenticated-RAM boot family on exact
-   B4/F3/F4 software IDs (`B4209000`, `B4233100`, `B4509100`, `B4512000`, `B4514000`,
-   `F3401200`, `F4207000`, `F4201000`), but TSK still refuses a particular encrypted
-   fixture unless that fixture is separately evidenced for the exact F181. The public
-   `d972...` RAM extractor is therefore usable only where its transfer is evidenced; the
-   committed `d489...` DataFlash package remains exact-gated to `B4512000`. The
-   instrumented diagnostic may characterize PROGRAMMING, bootloader identity, seed, and
+   Cross-vehicle evidence now establishes the shared authenticated-RAM boot family on the
+   exact B4/F3/F4 rows plus direct observed range-payload execution on `8965H1202000` and
+   `8965F1208000`, but TSK still refuses a particular encrypted fixture unless that fixture
+   is separately evidenced for the exact F181. Exact byte-for-byte acceptance of the
+   repository `d972...` Sienna RAM fixture is locally pinned only on `B4512000`; historical
+   B4 public-payload-family evidence no longer authorizes replay of this local ciphertext.
+   The committed `d489...` DataFlash package likewise remains exact-gated to `B4512000`.
+   The instrumented diagnostic may characterize PROGRAMMING, bootloader identity, seed, and
    known-family SecurityAccess without silently crossing into WDBI/download. A newer-Toyota
    `FEBE0000` linker VMA still proves none of the boot callback or application-retention
    geometry. Application-resident ephemeral execution is a third contract generated from
@@ -165,13 +166,34 @@ old operational assumptions without rewriting the chronology that produced them.
     evidence remains a separate mandatory gate before WDBI/RequestDownload/TransferData/
     `0x10F0` start or payload execution.
 
-The unresolved Corolla question is therefore split cleanly: **what exactly happens to
-`8965F1208000` across the PROGRAMMING transition on the correct physical Panda route, and
-if a bootloader does reappear, what authenticated RAM-exec geometry does that exact
-calibration actually accept?** The Sienna firmware findings explain how the old
-instrumentation could misclassify the transition; they do not prove the Corolla shares
-Sienna's session policy, reset sequence, SecurityAccess secrets, `FEBF0000` payload gate,
-callback geometry, or key storage.
+11. **2026-08-23 boot SecurityAccess lockout correction.** Static/deterministic recovery now
+    pins the boot `27 01/02` failure policy: the first bad `27 02` returns NRC `0x35`; the
+    second bad key returns NRC `0x36` and arms a RAM-only approximately 10-second delay;
+    `27 01` during that delay returns NRC `0x37`. The delay is not NVRAM-backed and no
+    permanent boot SecurityAccess lockout is recovered. TSK's live canary therefore does
+    not sleep pre-emptively; it waits and retries REQUEST_SEED once only if NRC `0x37` is
+    actually observed. This does not make blind key guessing a useful strategy.
+
+12. **2026-08-23 Span route correction.** The persisted 2026-08-21 `8965F1208000`
+    acquisition closes the old PROGRAMMING-route question for that specimen. Corrected
+    stock-wire `(logical bus 1, ELM327 param 1)` opened PROGRAMMING, returned a boot
+    SecurityAccess seed, accepted the key, and the same acquisition completed
+    CodeFlash/DataFlash/local/global-RAM dumps. The older `(bus1,param0)` timeout was an
+    indirect OBD/gateway-route observation, not evidence that the EPS rejects PROGRAMMING.
+    This is specimen-specific dynamic proof, not a universal Toyota-B bus mapping.
+
+13. **2026-08-23 steering applicability correction.** The exact H/F Corolla CodeFlash
+    receive census has no EPS-local classic secured `0x2E4`/`0x131` profiles. Their shared
+    authenticated-RAM bootstrap therefore does not make the current Sienna SecOC steering
+    bridge portable. H/F are useful negative-capability regressions; their actual lateral
+    command provenance must be recovered independently before any openpilot output path is
+    enabled.
+
+The unresolved Corolla problem has consequently moved up-stack: **where does the newer H/F
+lateral command actually enter the EPS, and which vehicle/controller supplies it?** The
+boot SecurityAccess/bootstrap mechanics are no longer the main unknown on Span's specimen.
+The remaining work is to identify the target-native steering ingress/provenance and then
+build an exact-target control path without projecting Sienna `0x2E4/0x131` semantics.
 
 ---
 
@@ -1743,17 +1765,17 @@ lean on resume.
     level, and the shot most likely to simply work. De-risk it first with an offline oracle
     if one has been obtained by then.
 
-### 14.4 Lockout-exposed — deliberate gamble, not a sweep
+### 14.4 Historical lockout warning — superseded for boot `0x01/0x02`
 
-12. Key-variant SEND_KEY with different transforms, byte orders, or candidate secrets. Each
-    wrong key is a *counted* SecurityAccess attempt returning `0x35`; past the threshold the
-    ECU returns `0x36`/`0x37`, and if that counter is NVRAM-backed it could **permanently
-    lock SecurityAccess on Spanconstant's vehicle** — the one failure a power cycle will not
-    undo. One attempt has already been spent (15:16 on 07-24), and although a later clean
-    seed shows no persistent lock resulted, the threshold and persistence are both unknown.
-    At most one or two hand-picked guesses, from a fresh session, halting on the first
-    `0x36`. **Pointless without an offline oracle**, because without one there is no way to
-    pre-filter candidates.
+12. The original warning against a key-variant sweep was directionally correct—blind
+    counted SEND_KEY guesses are still poor field practice—but the permanent-lockout model
+    is now superseded for the recovered boot SecurityAccess implementation. The first bad
+    `27 02` returns `0x35`; the second returns `0x36` and starts a RAM-only ~10-second
+    delay; `27 01` during that window returns `0x37`. No NVRAM/permanent boot lockout was
+    recovered. Application `0x03/0x04` is a separate domain; for the three exact tracked
+    images KEYLESS-006 now permits read-only recovery of that root before spending a
+    SEND_KEY attempt. Do not resurrect the old transform sweep merely because the boot
+    failure state is volatile; an offline or read-only discriminator is still preferable.
 
 ### 14.5 Parallel route
 

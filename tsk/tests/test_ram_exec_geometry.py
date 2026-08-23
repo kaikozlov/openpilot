@@ -27,8 +27,9 @@ class TestRamExecGeometry(unittest.TestCase):
       self.assertEqual(geometry.size, 0x1000)
       self.assertEqual(geometry.callback_addr, geometry.load_addr)
 
-  def test_cross_vehicle_boot_geometry_covers_evidence_graded_b4_f3_f4_ids(self):
-    for target in ("8965B4514000", "8965F3401200", "8965F4207000", "8965F4201000"):
+  def test_cross_vehicle_boot_geometry_covers_evidence_graded_b4_f3_f4_and_observed_hf_ids(self):
+    for target in ("8965B4514000", "8965F3401200", "8965F4207000", "8965F4201000",
+                   "8965H1202000", "8965F1208000"):
       geometry = resolve_ram_exec_geometry(target)
       self.assertEqual(geometry, COMMUNITY_B4_F3F4_RAM_EXEC)
       self.assertEqual((geometry.load_addr, geometry.size, geometry.callback_addr),

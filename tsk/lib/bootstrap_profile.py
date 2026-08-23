@@ -43,8 +43,9 @@ class BootstrapTargetEvidence:
     return data
 
 
-# Source of truth for this transfer table: ghidra_rh850_analysis SECOC-024/028/063,
-# finalized at c0e8175. The rows deliberately preserve their evidence grade.
+# Source of truth for this transfer table:
+# ghidra_rh850_analysis/data/variant_bootstrap_profiles.json.  The rows deliberately
+# preserve bootstrap-family evidence separately from exact encrypted-fixture evidence.
 BOOTSTRAP_TARGETS = {
   "8965B4512000": BootstrapTargetEvidence(
     software_id="8965B4512000",
@@ -58,37 +59,50 @@ BOOTSTRAP_TARGETS = {
     }),
     notes="Exact payload-gate proof; auto-reset derivative is rebuilt under the same verified gate.",
   ),
+  "8965H1202000": BootstrapTargetEvidence(
+    software_id="8965H1202000",
+    grade="observed",
+    source="community/albinoelephant/raw-20260818/MANIFEST.txt + recovered CodeFlash",
+    fixture_transfer="target-built-range-payloads-observed",
+    notes=("Contributor field acquisition executed target-built range-dump payloads through the shared "
+           "authenticated-RAM path; exact acceptance of the repository Sienna fixture is not claimed."),
+  ),
+  "8965F1208000": BootstrapTargetEvidence(
+    software_id="8965F1208000",
+    grade="observed",
+    source="community/spanconstant/raw-20260821/MANIFEST.txt + recovered CodeFlash",
+    fixture_transfer="target-built-range-payloads-observed",
+    notes=("Span's acquisition executed target-built range-dump payloads through the shared authenticated-RAM "
+           "path; exact acceptance of the repository Sienna fixture is not claimed."),
+  ),
   "8965B4209000": BootstrapTargetEvidence(
     software_id="8965B4209000",
     grade="external-source",
-    source="pinned I-CAN-hack/Willem family (SECOC-024)",
-    fixture_transfer="shared-public-ram-payload-reported",
-    exact_fixture_sha256=frozenset({RAM_DUMP_FIXTURE_SHA256}),
-    notes="Historical field-supported RAM key-table extractor target.",
+    source="SECOC-024 / pinned I-CAN-hack+Bk2ol lineage",
+    fixture_transfer="shared-public-payload-reported",
+    notes="Historical field-supported bootstrap family; exact repository-fixture acceptance is not pinned.",
   ),
   "8965B4233100": BootstrapTargetEvidence(
     software_id="8965B4233100",
     grade="external-source",
-    source="pinned I-CAN-hack/Willem family (SECOC-024)",
-    fixture_transfer="shared-public-ram-payload-reported",
-    exact_fixture_sha256=frozenset({RAM_DUMP_FIXTURE_SHA256}),
-    notes="Historical field-supported RAM key-table extractor target.",
+    source="SECOC-024 / pinned I-CAN-hack+Bk2ol lineage",
+    fixture_transfer="shared-public-payload-reported",
+    notes="Historical field-supported bootstrap family; exact repository-fixture acceptance is not pinned.",
   ),
   "8965B4509100": BootstrapTargetEvidence(
     software_id="8965B4509100",
     grade="external-source",
-    source="pinned I-CAN-hack/Willem family (SECOC-024)",
-    fixture_transfer="shared-public-ram-payload-reported",
-    exact_fixture_sha256=frozenset({RAM_DUMP_FIXTURE_SHA256}),
-    notes="Historical field-supported Sienna RAM key-table extractor target.",
+    source="SECOC-024 / pinned I-CAN-hack+Bk2ol lineage",
+    fixture_transfer="shared-public-payload-reported",
+    notes="Historical field-supported bootstrap family; exact repository-fixture acceptance is not pinned.",
   ),
   "8965B4514000": BootstrapTargetEvidence(
     software_id="8965B4514000",
     grade="external-source",
-    source="Vance/Bk2ol public DataFlash/bootstrap family (SECOC-024/030/031/063)",
-    fixture_transfer="shared-public-payload-family-reported",
-    notes=("Partner DataFlash execution is externally reported, but retained public artifacts do not "
-           "identify which exact 4 KiB ciphertext executed; require an explicitly target-accepted fixture."),
+    source="SECOC-024 / pinned I-CAN-hack+Bk2ol lineage",
+    fixture_transfer="shared-public-payload-reported",
+    notes=("Partner execution is externally reported, but retained public artifacts do not identify which exact "
+           "4 KiB ciphertext executed; require an explicitly target-accepted fixture."),
   ),
   "8965F3401200": BootstrapTargetEvidence(
     software_id="8965F3401200",

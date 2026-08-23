@@ -25,7 +25,7 @@ class TestEphemeralRuntimePackage(unittest.TestCase):
     self.assertFalse(result["bridge_execution_exposed"])
     self.assertEqual(result["canary_size"], 332)
     self.assertEqual(result["canary_sha256"], "81176c6e1c33451cfa63bd3b4a0e07b8b0fb952c70b3d67442f1a294ed6b651e")
-    self.assertEqual(result["target_manifest_sha256"], "562393d0e40ba8dce158131860e2a2f3f97022cf480ee841247adacfa981b134")
+    self.assertEqual(result["target_manifest_sha256"], "e0fddd8204ec9ec34b6cdf88d3b34f24097cef9609d7471f50c181b8ef626395")
 
   def test_wrong_f181_is_rejected(self):
     with self.assertRaisesRegex(runtime.EphemeralRuntimeError, "does not contain target F181"):
@@ -76,6 +76,49 @@ class TestEphemeralRuntimePackage(unittest.TestCase):
     self.assertEqual(runtime.RAW_SUBSTITUTION_VERIFIED_CODEFLASH, {
       "21140bbd65e530a9e518a3e84e20e5d85679675bc09cc724cb177bb7c76bafde"
     })
+
+  def test_boot_seed_delay_is_only_paid_when_nrc37_is_returned(self):
+    class RequiredDelay(Exception):
+      error_code = 0x37
+
+    class FakeBoot:
+      def __init__(self):
+        self.calls = 0
+
+      def security_access(self, access_type, *, data_record):
+        self.calls += 1
+        self.assertions = (access_type, data_record)
+        if self.calls == 1:
+          raise RequiredDelay
+        return b"seed"
+
+    boot = FakeBoot()
+    slept = []
+    result = runtime._request_boot_seed_with_required_delay(boot, 1, sleep_fn=slept.append)
+    self.assertEqual(result, b"seed")
+    self.assertEqual(boot.calls, 2)
+    self.assertEqual(slept, [runtime.BOOT_SA_REQUIRED_DELAY_SECONDS])
+    self.assertEqual(boot.assertions, (1, runtime.SECURITY_ACCESS_DATA_RECORD))
+
+  def test_boot_seed_normal_path_does_not_sleep_and_other_nrc_propagates(self):
+    class FakeBoot:
+      def security_access(self, access_type, *, data_record):
+        return b"seed"
+
+    slept = []
+    self.assertEqual(runtime._request_boot_seed_with_required_delay(FakeBoot(), 1, sleep_fn=slept.append), b"seed")
+    self.assertEqual(slept, [])
+
+    class WrongFailure(Exception):
+      error_code = 0x35
+
+    class FailingBoot:
+      def security_access(self, access_type, *, data_record):
+        raise WrongFailure
+
+    with self.assertRaises(WrongFailure):
+      runtime._request_boot_seed_with_required_delay(FailingBoot(), 1, sleep_fn=slept.append)
+    self.assertEqual(slept, [])
 
   def test_import_persists_only_valid_package_and_optional_fixture_is_hash_bound(self):
     with tempfile.TemporaryDirectory() as td:

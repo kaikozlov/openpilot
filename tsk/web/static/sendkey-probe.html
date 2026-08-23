@@ -23,7 +23,7 @@
       <section class="probe-heading">
         <p class="probe-breadcrumb">Research · Memory & security</p>
         <h1 class="probe-title">Application 0x03/0x04 comparison</h1>
-        <p class="probe-description">Compare a target against the firmware-recovered 8965B4512000 application SecurityAccess derivation. Cross-calibration SEND_KEY is opt-in because a wrong key is counted.</p>
+        <p class="probe-description">Compare a target against the firmware-recovered 8965B4512000 application SecurityAccess derivation. Before spending any cross-calibration SEND_KEY attempt, use Application memory disclosure: exact tracked Sienna/H/F targets can recover the application root read-only via KEYLESS-006.</p>
         <div class="probe-badges"><span class="probe-badge blue">NOT READY</span><span class="probe-badge red">COUNTED ATTEMPT</span><span class="probe-badge amber">EXPERIMENTAL</span></div>
       </section>
 
@@ -33,10 +33,10 @@
             <div class="probe-card-body">
               <p class="probe-card-kicker">Operation</p>
               <h2 class="probe-card-title">Application SecurityAccess</h2>
-              <p class="probe-card-copy">This uses the 8965B4512000 application 0x03/0x04 secret, not the f05f… bootloader 0x01/0x02 secret. The target is identified before any key is sent.</p>
+              <p class="probe-card-copy">This uses the 8965B4512000 application 0x03/0x04 secret, not the f05f… bootloader 0x01/0x02 secret. The target is identified before any key is sent. For 8965B4512000, 8965H1202000, and 8965F1208000, the read-memory page can first recover and verify this root without SEND_KEY.</p>
               <ul class="probe-meta-list"><li class="probe-meta-row"><span class="probe-meta-label">Vehicle state</span><span class="probe-meta-value">Not Ready to Drive</span></li><li class="probe-meta-row"><span class="probe-meta-label">Security level</span><span class="probe-meta-value">0x03/0x04</span></li><li class="probe-meta-row"><span class="probe-meta-label">Wrong SEND_KEY</span><span class="probe-meta-value">Counted attempt</span></li></ul>
               <div class="probe-subtle-divider"></div>
-              <div class="probe-actions"><div class="probe-note danger"><strong>Cross-calibration attempts require explicit arming.</strong> Leave this unchecked to identify the target and stop before SEND_KEY on any other calibration.</div><label class="probe-option danger" for="crossArm"><input type="checkbox" id="crossArm"><span>Arm one counted cross-calibration 0x03/0x04 comparison.</span></label><button class="run-btn danger" id="runBtn" type="button">Run application comparison</button></div>
+              <div class="probe-actions"><div class="probe-note danger"><strong>Prefer read-only credential recovery first.</strong> On the three exact KEYLESS-006 targets, run <a href="/read-mem.html">Application memory disclosure</a> and verify the recovered root before considering SEND_KEY. Leave this unchecked to identify any other calibration and stop before the counted key attempt.</div><label class="probe-option danger" for="crossArm"><input type="checkbox" id="crossArm"><span>Arm one counted cross-calibration 0x03/0x04 comparison.</span></label><button class="run-btn danger" id="runBtn" type="button">Run application comparison</button></div>
             </div>
           </section>
 

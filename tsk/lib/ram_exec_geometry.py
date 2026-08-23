@@ -115,11 +115,12 @@ class PayloadGeometryContract:
       )
 
 
-# Cross-vehicle community evidence establishes this exact bootloader download/verify/callback
-# geometry on multiple B4/F3/F4 EPS calibrations. These are exact software IDs, never a prefix
-# rule. Exact encrypted-fixture acceptance is a separate gate in bootstrap_profile.py.
+# Cross-vehicle evidence establishes this exact bootloader download/verify/callback geometry on
+# multiple B4/F3/F4 EPS calibrations and, now, direct owner-side H/F range-payload acquisitions.
+# These are exact software IDs, never a prefix rule. Exact encrypted-fixture acceptance remains a
+# separate gate in bootstrap_profile.py.
 COMMUNITY_B4_F3F4_RAM_EXEC = RamExecGeometry(
-  name="community-B4-F3-F4-authenticated-ram-exec",
+  name="cross-variant-authenticated-ram-exec",
   load_addr=0xFEBF0000,
   size=0x1000,
   callback_addr=0xFEBF0000,
@@ -131,8 +132,11 @@ COMMUNITY_B4_F3F4_RAM_EXEC = RamExecGeometry(
     "8965F3401200",
     "8965F4207000",
     "8965F4201000",
+    "8965H1202000",
+    "8965F1208000",
   }),
-  evidence="SECOC-024/028/063 external-source cross-vehicle authenticated-RAM bootstrap geometry",
+  evidence=("SECOC-024/028/063 external-source B4/F3/F4 geometry plus KEYLESS-018/VAR-003/039 "
+            "observed H/F authenticated-RAM range-payload execution"),
 )
 
 # Backwards-compatible name retained for callers/tests that refer specifically to the older

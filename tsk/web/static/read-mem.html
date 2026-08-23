@@ -23,7 +23,7 @@
       <section class="probe-heading">
         <p class="probe-breadcrumb">Research · Memory & security</p>
         <h1 class="probe-title">Application memory disclosure</h1>
-        <p class="probe-description">Probe both the firmware-recovered Toyota/Denso memory-ID form of UDS 0x23 and the ordinary ISO-style form. The analyzed 8965B4512000 accepts ALFID 0x15: memory ID 1 for LocalRAM, memory ID 2 for DataFlash.</p>
+        <p class="probe-description">Probe both the firmware-recovered Toyota/Denso memory-ID form of UDS 0x23 and the ordinary ISO-style form. On exact tracked F181s this also reads the KEYLESS-006 application SecurityAccess root mirror before SecurityAccess; no key is guessed or sent.</p>
         <div class="probe-badges"><span class="probe-badge blue">NOT READY</span><span class="probe-badge green">READ ONLY</span><span class="probe-badge green">NO SECURITY KEY</span></div>
       </section>
 
@@ -40,7 +40,7 @@
                 <li class="probe-meta-row"><span class="probe-meta-label">Writes</span><span class="probe-meta-value">None</span></li>
               </ul>
               <div class="probe-subtle-divider"></div>
-              <p class="probe-card-copy">The Sienna-specific targets include readable DataFlash, the bootloader DID-0201 buffer at <code>FEBF2D08</code>, and d/q observation bytes. The historical object-15/key location is intentionally probed too, but it is inside a verified exclusion on 8965B4512000.</p>
+              <p class="probe-card-copy">The Sienna-specific targets include readable DataFlash, the bootloader DID-0201 buffer at <code>FEBF2D08</code>, and d/q observation bytes. Exact <code>8965B4512000</code>, <code>8965H1202000</code>, and <code>8965F1208000</code> identities also select their firmware-verified LocalRAM application-SA mirror. Unknown F181s never inherit a mirror address by prefix or family.</p>
               <div class="probe-actions"><button class="run-btn primary" id="runBtn" type="button">Run read-memory probe</button></div>
             </div>
           </section>
@@ -90,7 +90,19 @@
         termWrite("Application SID 0x23 characterization", "ok");
         termWrite("F181: " + (s.f181 || "?") + (s.f181_hex ? "  [" + s.f181_hex + "]" : ""));
         termWrite("Route: " + (s.semantic_path || "?") + " · bus " + (s.eps_bus ?? "?"));
-        termWrite("");
+        const appSa = s.application_sa_recovery || {};
+        if (appSa.supported) {
+          termWrite(`KEYLESS-006 app-SA mirror: ${appSa.address || "?"} · ${appSa.read_ok ? "read" : "not read"}`, appSa.read_ok ? "ok" : "warn");
+          if (appSa.read_ok) {
+            termWrite("    recovered: " + (appSa.recovered_root || ""), appSa.matches_expected ? "ok" : "warn");
+            termWrite("    pinned match: " + (appSa.matches_expected ? "yes" : "NO — stop before SEND_KEY"), appSa.matches_expected ? "ok" : "warn");
+          }
+          termWrite("    read-only application credential recovery; boot 0x01/0x02 remains independent", "dim");
+          termWrite("");
+        } else {
+          termWrite("KEYLESS-006 app-SA mirror: no exact-F181 recovery address; no mirror read attempted", "dim");
+          termWrite("");
+        }
         for (const r of (s.reads || [])) {
           const mark = r.ok ? "✓" : "✗";
           const memory = r.memory_id === null || r.memory_id === undefined ? "no memory ID" : "memory ID " + r.memory_id;

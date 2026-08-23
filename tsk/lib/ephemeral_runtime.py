@@ -437,6 +437,26 @@ def _raw_substitution_plan(base: int, canary: bytes, callback_cell: int) -> list
   return chunks
 
 
+BOOT_SA_REQUIRED_DELAY_SECONDS = 10.25
+
+
+def _request_boot_seed_with_required_delay(boot, request_seed_access_type, *, sleep_fn=time.sleep):
+  """Request the boot SA seed, respecting the verified NRC 0x37 delay exactly when present.
+
+  SEC-BOOT-010 proves the delay is a volatile ~10 s TAUJ1 timer after the second bad
+  SEND_KEY, not persistent/NVRAM lockout. Normal programming handoff clears it, so never
+  impose this delay pre-emptively. If an already-armed target returns NRC 0x37, wait once
+  and retry the same read-only REQUEST_SEED. Any other failure propagates unchanged.
+  """
+  try:
+    return boot.security_access(request_seed_access_type, data_record=SECURITY_ACCESS_DATA_RECORD)
+  except Exception as e:
+    if getattr(e, "error_code", None) != 0x37:
+      raise
+  sleep_fn(BOOT_SA_REQUIRED_DELAY_SECONDS)
+  return boot.security_access(request_seed_access_type, data_record=SECURITY_ACCESS_DATA_RECORD)
+
+
 def run_inert_canary(*, expected_f181: str, bench_isolated: bool,
                      progress_cb=None, validate_reset: bool = True) -> dict:
   """Execute only the audited inert canary, then prove heartbeat and reset-to-stock.
@@ -491,7 +511,7 @@ def run_inert_canary(*, expected_f181: str, bench_isolated: bool,
   boot.diagnostic_session_control(SESSION_TYPE.EXTENDED_DIAGNOSTIC)
   boot.diagnostic_session_control(SESSION_TYPE.PROGRAMMING)
 
-  seed = boot.security_access(ACCESS_TYPE.REQUEST_SEED, data_record=SECURITY_ACCESS_DATA_RECORD)
+  seed = _request_boot_seed_with_required_delay(boot, ACCESS_TYPE.REQUEST_SEED)
   key = AES.new(BOOT_SA_SECRET, AES.MODE_ECB).decrypt(SECURITY_ACCESS_DATA_RECORD)
   key = AES.new(key, AES.MODE_ECB).encrypt(seed)
   boot.security_access(ACCESS_TYPE.SEND_KEY, key)

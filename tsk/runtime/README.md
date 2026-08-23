@@ -7,10 +7,11 @@ unvalidated on isolated hardware.
 
 Current built-in package provenance:
 
-- source repository commit: `c0e8175` (`tooling: generalize ephemeral runtime targets`)
+- target manifest / audit provenance: `b1baa93` (`feat: add RAM command5 signing proxy`)
+- inert canary binary remains the audited build from the earlier `c0e8175` runtime baseline
 - target: `8965B4512000`
 - CodeFlash SHA-256: `21140bbd65e530a9e518a3e84e20e5d85679675bc09cc724cb177bb7c76bafde`
-- target manifest SHA-256: `562393d0e40ba8dce158131860e2a2f3f97022cf480ee841247adacfa981b134`
+- target manifest SHA-256: `e0fddd8204ec9ec34b6cdf88d3b34f24097cef9609d7471f50c181b8ef626395`
 - inert canary SHA-256: `81176c6e1c33451cfa63bd3b4a0e07b8b0fb952c70b3d67442f1a294ed6b651e`
 - inert canary size: 332 bytes
 

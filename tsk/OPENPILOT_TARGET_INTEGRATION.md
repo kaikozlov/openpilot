@@ -63,15 +63,17 @@ TSK therefore separates three contracts:
    geometry.
 
 The first contract is already cross-vehicle. `tsk/lib/bootstrap_profile.py` records
-exact-F181, evidence-graded rows for `8965B4209000`, `8965B4233100`, `8965B4509100`,
-`8965B4512000`, `8965B4514000`, `8965F3401200`, `8965F4207000`, and `8965F4201000`.
-There is no family-prefix fallback. The externally observed newer-Toyota `FEBE0000`
+exact-F181, evidence-graded rows for `8965B4512000`, the observed Corolla targets
+`8965H1202000`/`8965F1208000`, and the external-source B4/F3/F4 family targets
+`8965B4209000`, `8965B4233100`, `8965B4509100`, `8965B4514000`, `8965F3401200`,
+`8965F4207000`, and `8965F4201000`. There is no family-prefix fallback. The externally observed newer-Toyota `FEBE0000`
 shellcode VMA remains only a linker observation and cannot satisfy any of these gates.
 
-Fixture identity is narrower. The public `d972...` RAM extractor is evidenced on the
-legacy B4 targets and locally verified on `B4512000`; the committed DataFlash `d489...`
-and local auto-reset `bf624...` packages are currently exact-gated to `B4512000` in TSK.
-A shared `FEBF0000` window does not authorize those ciphertexts on another calibration.
+Fixture identity is narrower. The exact repository `d972...` RAM ciphertext, the committed
+DataFlash `d489...`, and the local auto-reset `bf624...` package are currently exact-gated
+to `B4512000` in TSK. Historical B4 family evidence remains recorded, but does not by itself
+prove byte-for-byte acceptance of this repository fixture. A shared `FEBF0000` window does
+not authorize those ciphertexts on another calibration.
 
 Application-retained runtime evidence is narrower again. The built-in inert scheduler
 package is bound to `B4512000` CodeFlash SHA
@@ -102,8 +104,11 @@ active because the current resident bridge does not cover protected ACC `0x183`.
 
 TSK currently ships and executes only the audited **inert canary**. It does not ship the
 704-byte steering bridge, expose a bridge-deployment endpoint, or set the bridge parameters.
-Those remain future steps after heartbeat/reset-to-stock and subsequent isolated-bench
-steering validation succeed.
+The tracked Corolla H/F generation is also a negative applicability result: its EPS receive
+census has no classic secured `0x2E4`/`0x131` steering profiles, so the Sienna bridge cannot
+be projected onto those targets. Those remain future steps only for an exact target whose
+own steering ingress is resolved, after heartbeat/reset-to-stock and isolated-bench steering
+validation succeed.
 
 ## Manifest required before implementation
 

@@ -39,7 +39,7 @@ class TestDumpDiagnosticRiskBoundary(unittest.TestCase):
   def _run_unknown(self, *, armed: bool = False):
     panda = Mock()
     panda.get_version.return_value = b"test"
-    app_uds = self._app_uds(b"\x018965F1208000\x00\x00\x00\x00")
+    app_uds = self._app_uds(b"\x018965F1208999\x00\x00\x00\x00")
     boot_uds = self._boot_uds()
 
     with patch("tsk.lib.dump_diag.is_agnos", return_value=True), \
@@ -85,7 +85,7 @@ class TestDumpDiagnosticRiskBoundary(unittest.TestCase):
   def test_armed_cross_calibration_key_rejection_is_an_observation_not_a_tool_failure(self):
     panda = Mock()
     panda.get_version.return_value = b"test"
-    app_uds = self._app_uds(b"\x018965F1208000\x00\x00\x00\x00")
+    app_uds = self._app_uds(b"\x018965F1208999\x00\x00\x00\x00")
     boot_uds = self._boot_uds()
     boot_uds.security_access.side_effect = [
       b"\x11" * 16,

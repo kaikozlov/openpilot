@@ -107,9 +107,13 @@ OBD routing (`param=0`) is an explicit fallback.
 Once a stateful operation starts, the selected physical route is preserved. A later
 rediscovery does not silently change ELM parameters. This is important on Toyota-B:
 changing only `UdsClient.bus` while leaving ELM327 at implicit parameter 0 does **not**
-reproduce a physical CAN0/CAN1 repin. The current high-confidence software-equivalence
-candidate for that repin is normal-harness `param=1` with logical bus 1/FDCAN2; vehicle
-PROGRAMMING confirmation remains required before calling that correspondence universal.
+reproduce a physical CAN0/CAN1 repin. The direct stock-wire diagnostic route is
+normal-harness `param=1` with logical bus 1/FDCAN2. Span's exact `8965F1208000` specimen
+has now dynamically confirmed that route through PROGRAMMING, seed request, accepted boot
+SecurityAccess key, and complete CodeFlash/DataFlash/local/global-RAM acquisition. That
+confirms the route for that specimen; it is not evidence that every Toyota-B target maps
+or transitions identically, and it still does not reproduce the CAN0/CAN2 intercept-relay
+topology of a physical repin.
 
 ## Programming handoff semantics
 
@@ -157,9 +161,11 @@ is still **no prefix rule**. Cross-vehicle evidence now covers the shared
 | exact F181 | boot geometry | evidence grade |
 |---|---|---|
 | `8965B4512000` | `FEBF0000 + 0x1000`, callback `FEBF0000` | local firmware-static + generated-artifact verified |
-| `8965B4209000` | same | external-source / field-supported public RAM extractor |
-| `8965B4233100` | same | external-source / field-supported public RAM extractor |
-| `8965B4509100` | same | external-source / field-supported public RAM extractor |
+| `8965H1202000` | same bootstrap architecture | observed owner-side target-built range-payload execution + recovered CodeFlash |
+| `8965F1208000` | same bootstrap architecture | observed Span target-built range-payload execution + recovered CodeFlash |
+| `8965B4209000` | same | external-source / field-supported bootstrap family |
+| `8965B4233100` | same | external-source / field-supported bootstrap family |
+| `8965B4509100` | same | external-source / field-supported bootstrap family |
 | `8965B4514000` | same bootstrap family | external-source partner payload/DataFlash workflow |
 | `8965F3401200` | same bootstrap structure | external-source blurbdust patcher, dual CPU |
 | `8965F4207000` | same bootstrap structure | external-source blurbdust patcher |
@@ -176,13 +182,14 @@ the selected payload SHA independently before any production DataFlash WDBI/down
 
 | fixture | SHA-256 | exact-F181 evidence used by TSK |
 |---|---|---|
-| public RAM key-table payload | `d972d4bf432685217591768600a9abd7820d35b04a72270edc87074365356be2` | `B4209000`, `B4233100`, `B4509100`, and locally verified `B4512000` |
+| public RAM key-table payload | `d972d4bf432685217591768600a9abd7820d35b04a72270edc87074365356be2` | exact repository fixture pinned only on `B4512000`; other family rows require target-specific fixture evidence |
 | standard 32 KiB DataFlash payload | `d48988366b5e6d2ddd7438caca5e6f6f02daba9b650263c323a2ffd770a06e34` | locally verified `B4512000` |
 | auto-reset DataFlash derivative | `bf62449f85648ea24708961749bf53f75f36083c01bcf54114d567da0e178725` | locally rebuilt/verified `B4512000` gate |
 
-For `B4514000` and the F3/F4 targets, the bootstrap family is evidenced but TSK does not
-invent an exact local fixture mapping. A target-accepted fixture must be supplied with an
-explicit SHA/evidence record, and the target's own `0x10F0` remains the live discriminator.
+For every other bootstrap-family row — including the observed `H1202000`/`F1208000`
+Corollas and the historical B4/F3/F4 targets — TSK does not invent an exact local fixture
+mapping. A target-accepted fixture must be supplied with an explicit SHA/evidence record,
+and the target's own `0x10F0` remains the live discriminator.
 
 The production DataFlash dumper therefore resolves **both** boot geometry and selected
 fixture identity before PROGRAMMING, SecurityAccess, DID writes, RequestDownload, or
@@ -190,10 +197,12 @@ payload transfer. The instrumented diagnostic may still observe PROGRAMMING, boo
 identity, and `REQUEST_SEED`; even after a family-supported SecurityAccess result it stops
 before WDBI/download when the exact DataFlash ciphertext is not evidenced.
 
-The legacy RAM key-table extractor remains narrower than the bootstrap family. It uses the
-public `d972...` fixture and the old CPU-visible `FEBE6E34` key-table layout, so it accepts
-only `8965B4209000`, `8965B4233100`, and `8965B4509100`. `8965B4512000` shares the boot
-geometry but does not maintain that legacy key table.
+The legacy RAM key-table extractor remains narrower than the bootstrap family because its
+CPU-visible `FEBE6E34` key-table layout applies only to older B4 evidence. The current
+production gate is stricter: the repository `d972...` ciphertext is exact-fixture-pinned
+only for `8965B4512000`, whose application does not maintain that legacy key table. The
+older extractor therefore fails closed until a target-accepted payload fixture is supplied
+rather than projecting one Sienna ciphertext across the B4 family.
 
 ### 3. SHA-bound application-retained ephemeral runtime
 
@@ -208,7 +217,7 @@ The built-in package currently covers only `8965B4512000`:
 
 ```text
 CodeFlash SHA-256  21140bbd65e530a9e518a3e84e20e5d85679675bc09cc724cb177bb7c76bafde
-manifest SHA-256   562393d0e40ba8dce158131860e2a2f3f97022cf480ee841247adacfa981b134
+manifest SHA-256   e0fddd8204ec9ec34b6cdf88d3b34f24097cef9609d7471f50c181b8ef626395
 retained R/W/X     FEBF0000..FEBF0307  (0x308 bytes)
 callback cell      FEBF0FD0
 heartbeat          FEBFFBF0
@@ -248,16 +257,31 @@ independent SecurityAccess implementations on `8965B4512000`:
 | bootloader | `27 01` / `27 02` | `f05f36b7d78c03e24ab4faef2a57d044` |
 | application | `27 03` / `27 04` | `893e08418c741ffa2a9c044bffa55813` |
 
+The recovered boot failure policy is bounded and volatile: the first bad `27 02` returns
+NRC `0x35`; the second bad key returns `0x36` and starts an approximately 10-second RAM-only
+delay; a `27 01` seed request during that window returns `0x37`. No NVRAM/permanent boot
+SecurityAccess lockout is recovered. Runtime tooling therefore waits/retries only when
+`0x37` is actually returned rather than imposing an unconditional delay.
+
 Both use the same two-stage AES construction with a tester-controlled 16-byte data record,
 but they are different security domains. The historical Corolla `sendkey_probe` used the
 bootloader `01/02` secret against an application `03/04` challenge; its resulting NRC
 `0x35` therefore did not establish that Corolla rejected the corresponding Sienna
 application secret.
 
-The current Application SecurityAccess page uses the recovered `8965B4512000`
-application `03/04` secret. Because a wrong SEND_KEY is a counted attempt, the tool reads
-F181 first and **will not send a cross-calibration key unless the operator explicitly arms
-one attempt**.
+The application root is no longer secret on the three tracked images. KEYLESS-006 proves
+that normal startup mirrors the 16-byte root into pre-auth readable LocalRAM: `FEBF7BE0`
+on `8965B4512000`, and `FEBF7B80` on `8965H1202000` / `8965F1208000`. The Application
+memory disclosure page now identifies exact F181 first and, only for those three targets,
+reads that mirror with extended-session SID `0x23` / ALFID `0x15` / memory ID 1. It sends
+no SecurityAccess key or write and verifies the recovered bytes against the firmware-pinned
+`893e08418c741ffa2a9c044bffa55813` root. This does **not** disclose or bypass the
+independent bootloader `01/02` root.
+
+The Application SecurityAccess comparison page therefore remains a deliberately separate
+counted operation. It still reads F181 first and **will not send a cross-calibration key
+unless the operator explicitly arms one attempt**; on an exact KEYLESS-006 target, use the
+read-only recovery path first instead of guessing the application credential.
 
 ## Key trust boundary
 
@@ -406,8 +430,10 @@ roles before openpilot integration is enabled.
 
 Receiver freshness is also now bounded more tightly. The analyzed application clears its
 SecOC receive windows at initialization and accepts any authenticated forward sync
-trip/reset jump without a maximum delta; failed MAC verification does not advance
-freshness and no per-source failure lockout is recovered. That creates reset-window,
+trip/reset jump without a maximum delta. Failed MAC verification does not advance
+freshness. The recovered retry budget is **per queued PDU**: one queued message can be
+re-verified only a bounded number of times, but distinct newly queued bad frames are not
+subject to a recovered persistent/per-source throttle. That creates reset-window,
 future-sync, and theoretical 28-bit online-guess avenues, but their practical timing,
 throughput, suppression, and recovery behavior are still dynamic. TSK does not inject
 replay/future-sync/tag-guess trials automatically; those remain isolated-bench experiments.

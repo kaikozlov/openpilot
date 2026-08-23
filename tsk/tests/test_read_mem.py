@@ -4,10 +4,14 @@ from types import SimpleNamespace
 
 from tsk.lib.read_mem import (
   ACTUATION_OBSERVATION,
+  APPLICATION_SA_MIRRORS,
+  APPLICATION_SA_ROOT_EXPECTED,
   BOOT_PAYLOAD_KEY_RESIDUE,
   DATAFLASH_ID,
   KEY_ADDR,
   RAM_ID,
+  application_sa_mirror_for_f181,
+  application_sa_recovery_plan,
   memory_id_request_data,
   read_memory_with_id,
   sienna_policy,
@@ -53,6 +57,31 @@ class TestReadMemoryProbe(unittest.TestCase):
     self.assertEqual(sienna_policy(RAM_ID, BOOT_PAYLOAD_KEY_RESIDUE, 16), "firmware-readable")
     self.assertEqual(sienna_policy(RAM_ID, ACTUATION_OBSERVATION, 4), "firmware-readable")
     self.assertEqual(sienna_policy(RAM_ID, 0xFEBE37FC, 8), "firmware-excluded")
+
+  def test_application_sa_recovery_is_exact_f181_gated(self):
+    self.assertEqual(application_sa_mirror_for_f181("8965B4512000"), 0xFEBF7BE0)
+    self.assertEqual(application_sa_mirror_for_f181(b"\x018965H1202000\x00"), 0xFEBF7B80)
+    self.assertEqual(application_sa_mirror_for_f181("8965F1208000"), 0xFEBF7B80)
+    self.assertIsNone(application_sa_mirror_for_f181("8965F1208999"))
+    self.assertEqual(set(APPLICATION_SA_MIRRORS), {"8965B4512000", "8965H1202000", "8965F1208000"})
+
+  def test_application_sa_plan_is_read_only_memory_id_geometry(self):
+    plan = application_sa_recovery_plan("8965B4512000")
+    self.assertTrue(plan["supported"])
+    self.assertEqual(plan["address"], "0xfebf7be0")
+    self.assertEqual(plan["memory_id"], RAM_ID)
+    self.assertEqual(plan["size"], 16)
+    self.assertEqual(plan["expected_root"], APPLICATION_SA_ROOT_EXPECTED.hex())
+    self.assertEqual(
+      memory_id_request_data(plan["memory_id"], int(plan["address"], 16), plan["size"]),
+      bytes.fromhex("1501febf7be010"),
+    )
+
+    unknown = application_sa_recovery_plan("8965Z9999999")
+    self.assertFalse(unknown["supported"])
+    self.assertEqual(unknown["address"], "")
+    self.assertIsNone(unknown["memory_id"])
+    self.assertEqual(unknown["expected_root"], "")
 
   def test_exact_request_uses_raw_uds_service_and_requires_exact_length(self):
     service = SimpleNamespace(READ_MEMORY_BY_ADDRESS=0x23)

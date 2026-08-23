@@ -71,7 +71,7 @@ class TestServer(unittest.TestCase):
     self.assertEqual(projected(base)["recovery"]["stage"], "identify")
 
     mapped = {**base, "identity": {
-      "status": "mapped", "identity": [{"name": "app_sw_id", "hex": "31", "ascii": "8965F1208000"}],
+      "status": "mapped", "identity": [{"name": "app_sw_id", "hex": "31", "ascii": "8965F1208999"}],
       "eps_bus": 1, "eps_rx_bus": 1, "eps_tx": "0x7a1", "eps_rx": "0x7a9",
       "elm327_param": 1, "semantic_path": "normal-harness",
     }}
@@ -95,14 +95,20 @@ class TestServer(unittest.TestCase):
     }}
     known_projection = projected(known)
     self.assertTrue(known_projection["vehicle"]["known_transfer"])
-    self.assertEqual(known_projection["recovery"]["stage"], "dataflash")
+    self.assertEqual(known_projection["recovery"]["stage"], "bootstrap_fixture")
+    self.assertEqual(known_projection["recovery"]["next_action"]["action"], "research")
 
     blocked = {**captured, "programming": {"status": "blocked", "message": "handoff blocked"}}
     blocked_projection = projected(blocked)
     self.assertEqual(blocked_projection["recovery"]["stage"], "programming")
     self.assertEqual(blocked_projection["recovery"]["next_action"]["action"], "research")
 
-    dumped = {**known, "dataflash": {
+    exact_known = {**captured, "identity": {
+      **mapped["identity"],
+      "identity": [{"name": "app_sw_id", "hex": "31", "ascii": "8965B4512000"}],
+    }}
+    self.assertEqual(projected(exact_known)["recovery"]["stage"], "dataflash")
+    dumped = {**exact_known, "dataflash": {
       "status": "complete", "ready": True, "bytes": 32768, "total": 32768,
     }}
     self.assertEqual(projected(dumped)["recovery"]["stage"], "verify")
