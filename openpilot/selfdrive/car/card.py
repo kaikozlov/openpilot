@@ -150,10 +150,17 @@ class Car:
       bridge_requested = self.params.get_bool("ToyotaEphemeralSecOCBridge")
       bridge_f181_raw = self.params.get("ToyotaEphemeralSecOCBridgeF181")
       bridge_f181 = bridge_f181_raw.decode(errors="ignore").strip() if bridge_f181_raw is not None else ""
+      # This parameter is an exact calibration binding, never a prefix/family selector.
+      # Toyota EPS F181 software IDs tracked here are 13 ASCII alphanumerics beginning
+      # with 8965 (for example 8965B4512000). Reject short prefixes before searching
+      # the raw firmware-version response bytes.
+      bridge_f181_valid = len(bridge_f181) == 13 and bridge_f181.startswith("8965") and bridge_f181.isalnum()
       eps_versions = [bytes(fw.fwVersion) for fw in self.CP.carFw if fw.ecu == structs.CarParams.Ecu.eps]
-      bridge_target_matches = bool(bridge_f181 and any(bridge_f181.encode() in fw for fw in eps_versions))
+      bridge_target_matches = bool(bridge_f181_valid and any(bridge_f181.encode() in fw for fw in eps_versions))
       if bridge_requested and not key_loaded:
-        if not bridge_target_matches:
+        if not bridge_f181_valid:
+          cloudlog.warning("Ignoring Toyota ephemeral SecOC bridge: validated F181 must be one exact 13-character 8965... software ID")
+        elif not bridge_target_matches:
           cloudlog.warning("Ignoring Toyota ephemeral SecOC bridge: validated F181 does not match current EPS")
         elif self.CP.openpilotLongitudinalControl:
           cloudlog.warning("Ignoring Toyota ephemeral SecOC bridge: resident bridge does not cover secured ACC 0x183")

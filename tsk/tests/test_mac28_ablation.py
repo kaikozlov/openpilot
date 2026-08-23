@@ -10,6 +10,8 @@ TOYOTA_SAFETY = ROOT / "opendbc_repo" / "opendbc" / "safety" / "modes" / "toyota
 TOYOTA_CONTROLLER = ROOT / "opendbc_repo" / "opendbc" / "car" / "toyota" / "carcontroller.py"
 CARD = ROOT / "openpilot" / "selfdrive" / "car" / "card.py"
 PARAM_KEYS = ROOT / "openpilot" / "common" / "params_keys.h"
+TSK_SERVER = ROOT / "tsk" / "web" / "server.py"
+TSK_RUNTIME = ROOT / "tsk" / "lib" / "ephemeral_runtime.py"
 
 
 class TestEphemeralSecocBridgeIntegration(unittest.TestCase):
@@ -67,12 +69,25 @@ class TestEphemeralSecocBridgeIntegration(unittest.TestCase):
     source = CARD.read_text(encoding="utf-8")
     self.assertIn('bridge_requested = self.params.get_bool("ToyotaEphemeralSecOCBridge")', source)
     self.assertIn('bridge_f181_raw = self.params.get("ToyotaEphemeralSecOCBridgeF181")', source)
+    self.assertIn('len(bridge_f181) == 13', source)
+    self.assertIn('bridge_f181.startswith("8965")', source)
+    self.assertIn('bridge_f181.isalnum()', source)
     self.assertIn("fw.ecu == structs.CarParams.Ecu.eps", source)
-    self.assertIn("bridge_target_matches", source)
+    self.assertIn("bridge_f181_valid and any(bridge_f181.encode() in fw for fw in eps_versions)", source)
     self.assertIn("if bridge_requested and not key_loaded", source)
     self.assertIn("elif self.CP.openpilotLongitudinalControl", source)
     self.assertIn("self.CI.CC.ephemeral_secoc_bridge = True", source)
     self.assertIn("self.CP.secOcKeyAvailable = True", source)
+
+  def test_tsk_does_not_arm_or_deploy_the_resident_bridge(self):
+    operational_source = "\n".join((
+      TSK_SERVER.read_text(encoding="utf-8"),
+      TSK_RUNTIME.read_text(encoding="utf-8"),
+    ))
+    self.assertNotIn("ToyotaEphemeralSecOCBridge", operational_source)
+    self.assertNotIn("ToyotaEphemeralSecOCBridgeF181", operational_source)
+    self.assertNotIn("ephemeral_secoc_runtime.bin", operational_source)
+    self.assertNotIn("bridge-deployment", operational_source)
 
 
 if __name__ == "__main__":
