@@ -13,7 +13,7 @@ contains the Corolla TSS3/openpilot prior-art audit plus the 2023 public-route a
 whole-vehicle routes are kept as separate specimens unless an exact F181 join exists.
 
 The checked-out opendbc fork now includes read-only Corolla TSS3 integration at
-`200dfa78` (`toyota: add read-only Corolla TSS3 integration`). That implementation is an
+`ec04f07a` (`toyota: decode Corolla TSS3 driver torque`). That implementation is an
 evidence-acquisition checkpoint, not a production steering authorization.
 
 The status vocabulary below is deliberate: **implemented** means the code path is present;
@@ -42,8 +42,8 @@ has not been recovered yet.
 | 704-byte Sienna steering bridge | **prepared-but-hardware-gated** | openpilot/opendbc contains dormant exact-F181/lateral-only transport support; TSK ships no bridge binary/deployment endpoint and does not arm its params until canary, scheduler, queue-capture, COM-delivery, and steering proofs pass |
 | XCP F0/EC/E4 write/pivot paths | **prepared-but-hardware-gated** | kept RE-only; field tooling intentionally contains no source-memory writer/page-copy/pivot command builder |
 | persistent Gate-2 patching | **intentionally-not-applicable** to the production path | patch/restore evidence remains RE-side; the product direction prefers ephemeral/reset-to-stock behavior |
-| newer-Toyota Corolla TSS3 platform/DBC/CarState | **implemented-read-only** | opendbc `200dfa78` adds `TOYOTA_COROLLA_TSS3`, a dedicated CAN-FD PT DBC, the observed Span bus-1 fingerprint, runtime bus0-vs-bus1 state-topology selection, and an evidence-bounded CarState. It is `dashcamOnly` with Panda `noOutput`; the Toyota controller hard-returns zero CAN messages. |
-| newer-Toyota production lateral controller/safety | **not-yet-implementable** | exact H/F firmware closes the B6 EPS receiver contract, but sender cadence/full payload, SecOC freshness/source ownership, stock-source suppression, driver-torque/readiness/fault semantics and production limits still require a firmware-identified relay-correct stock-LTA capture and upstream sender closure. |
+| newer-Toyota Corolla TSS3 platform/DBC/CarState | **implemented-read-only** | opendbc `ec04f07a` provides `TOYOTA_COROLLA_TSS3`, the dedicated CAN-FD PT DBC, the observed Span bus-1 fingerprint, runtime bus0-vs-bus1 state-topology selection, and live physical `0x030` driver torque in its evidence-bounded CarState. It is `dashcamOnly` with Panda `noOutput`; the Toyota controller hard-returns zero CAN messages. |
+| newer-Toyota production lateral controller/safety | **not-yet-implementable** | exact H/F firmware closes the B6 EPS receiver contract, but sender cadence/full payload, SecOC freshness/source ownership, stock-source suppression, a validated physical driver-override threshold, Ready/fault transition mapping, Q-current response limits and production limits still require a firmware-identified relay-correct stock-LTA capture and upstream sender closure. |
 
 This table is the durable repo-to-repo audit checkpoint. A later session should change a row
 only when new firmware/dynamic evidence changes the boundary; it should not rediscover these
@@ -60,10 +60,12 @@ The initial platform deliberately separates **observability** from **control**:
   B6 receiver fields. B6 is present for inspection/round-trip tests only; no sender path is
   enabled.
 - CarState promotes `0x025` steering angle/rate, `0x0AA` wheel speed, `0x101` brake and
-  `0x116` gas. `0x127` promotes only the dynamically observed raw `3=D`; other gears remain
-  `unknown`. `0x176` remains inspectable in the DBC but cruise is held neutral until an
-  active transition is captured. Legacy `0x260/0x262` steering torque/fault semantics are
-  not transplanted.
+  `0x116` gas. It now also promotes exact physical **Steering Wheel Torque** from live
+  `0x030`: signed B8 at 0.1 N.m plus signed B17[3:0] at 0.01 N.m. The associated
+  `EPS_FAULT_INHIBIT` and `DRIVER_TORQUE_INVALID` raw gates are decoded; invalid torque
+  is suppressed, but no legacy raw-domain override threshold, DID-Ready mapping, or
+  temporary/permanent `0x262` fault class is transplanted. `0x127` still promotes only
+  observed raw `3=D`, and `0x176` cruise remains neutral pending an active transition.
 - The provisional 147-message CAN fingerprint comes from Span's 2026-07-29 moving rlog.
   That source has MOCK `carParams` and no F181, so it is a whole-vehicle topology fingerprint,
   not an exact `8965F1208000` firmware join. No guessed `FW_VERSIONS` row is added.
@@ -77,7 +79,8 @@ The initial platform deliberately separates **observability** from **control**:
 
 The complete Span rlog was replayed through this parser after implementation: all 5,900
 post-startup samples remained `canValid`, speed reached ~6.58 m/s, brake/gas toggled, the
-steering range matched the independent RE artifact, and gear remained D. This validates the
+steering range matched the independent RE artifact, gear remained D, and the live `0x030`
+physical driver-torque signal varied across the drive. This validates the
 read-only parser against the available dynamic evidence without promoting missing semantics.
 
 ## Why this gate exists
@@ -267,7 +270,8 @@ add the remaining evidence-backed pieces:
   captured target;
 - complete B6 sender payload/cadence plus SecOC freshness/key/source ownership;
 - relay-correct stock producer location and suppression behavior;
-- generation-native driver-torque, EPS response/readiness/fault semantics and validated
+- a validated physical driver-override threshold for the now-decoded `0x030` torque,
+  plus EPS Q-current response limits, Ready/fault transition mapping, and validated
   actuator limits for Panda safety;
 - a production TSS3 Toyota safety model/parameter rather than `noOutput`;
 - controller packing/signing only after the sender contract is complete;
