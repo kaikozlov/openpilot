@@ -372,8 +372,8 @@ def diagnose(progress_cb=None, *, allow_cross_calibration_send_key: bool = False
       status="observed",
       message=(
         "Bootloader SecurityAccess/bootstrap compatibility was characterized, but the committed DataFlash "
-        "ciphertext is not evidenced byte-for-byte for this F181. No WDBI, RequestDownload, TransferData, "
-        "0x10F0 start, or payload trigger was sent."
+        + "ciphertext is not evidenced byte-for-byte for this F181. No WDBI, RequestDownload, TransferData, "
+        + "0x10F0 start, or payload trigger was sent."
       ),
     )
     record("exact payload fixture gate", True, "not target-evidenced; payload phase stopped", time.monotonic())

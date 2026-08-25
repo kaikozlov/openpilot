@@ -16,8 +16,6 @@ from tsk.web.server import (
   ready_diff_state,
   ready_lock,
   ready_state,
-  ephemeral_lock,
-  ephemeral_state,
   resolve_asset,
   start_ready_diff_job,
   start_ready_job,

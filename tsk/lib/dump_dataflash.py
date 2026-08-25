@@ -249,7 +249,7 @@ def dump(progress_cb=None, *, auto_reset: bool = False,
   except BootstrapProfileError as e:
     raise RetryError(
       "Refusing DataFlash payload before PROGRAMMING: authenticated RAM-exec geometry may be "
-      "compatible, but exact encrypted-fixture acceptance is a separate gate. " + str(e)
+      + "compatible, but exact encrypted-fixture acceptance is a separate gate. " + str(e)
     ) from e
 
   # Application -> bootloader is an asynchronous reset handoff. Preserve the exact
