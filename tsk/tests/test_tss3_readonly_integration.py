@@ -43,7 +43,7 @@ class TestTSS3ReadOnlyIntegration(unittest.TestCase):
     eps = parser.vl["TSS3_EPS_TELEMETRY"]
 
     self.assertAlmostEqual(eps["STEERING_WHEEL_TORQUE_COARSE"] + eps["STEERING_WHEEL_TORQUE_FINE"], 1.06, places=6)
-    self.assertEqual(eps["EPS_FAULT_INHIBIT"], 0)
+    self.assertEqual(eps["STEERING_FAULT_INHIBIT_STATUS"], 0)
     self.assertEqual(eps["DRIVER_TORQUE_INVALID"], 0)
 
   def test_controller_never_emits_tss3_can(self):

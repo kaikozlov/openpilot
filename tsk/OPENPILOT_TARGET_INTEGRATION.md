@@ -13,7 +13,7 @@ contains the Corolla TSS3/openpilot prior-art audit plus the 2023 public-route a
 whole-vehicle routes are kept as separate specimens unless an exact F181 join exists.
 
 The checked-out opendbc fork now includes read-only Corolla TSS3 integration at
-`ec04f07a` (`toyota: decode Corolla TSS3 driver torque`). That implementation is an
+`6b124c54` (`toyota: bound TSS3 steering status semantics`). That implementation is an
 evidence-acquisition checkpoint, not a production steering authorization.
 
 The status vocabulary below is deliberate: **implemented** means the code path is present;
@@ -42,7 +42,7 @@ has not been recovered yet.
 | 704-byte Sienna steering bridge | **prepared-but-hardware-gated** | openpilot/opendbc contains dormant exact-F181/lateral-only transport support; TSK ships no bridge binary/deployment endpoint and does not arm its params until canary, scheduler, queue-capture, COM-delivery, and steering proofs pass |
 | XCP F0/EC/E4 write/pivot paths | **prepared-but-hardware-gated** | kept RE-only; field tooling intentionally contains no source-memory writer/page-copy/pivot command builder |
 | persistent Gate-2 patching | **intentionally-not-applicable** to the production path | patch/restore evidence remains RE-side; the product direction prefers ephemeral/reset-to-stock behavior |
-| newer-Toyota Corolla TSS3 platform/DBC/CarState | **implemented-read-only** | opendbc `ec04f07a` provides `TOYOTA_COROLLA_TSS3`, the dedicated CAN-FD PT DBC, the observed Span bus-1 fingerprint, runtime bus0-vs-bus1 state-topology selection, and live physical `0x030` driver torque in its evidence-bounded CarState. It is `dashcamOnly` with Panda `noOutput`; the Toyota controller hard-returns zero CAN messages. |
+| newer-Toyota Corolla TSS3 platform/DBC/CarState | **implemented-read-only** | opendbc `6b124c54` provides `TOYOTA_COROLLA_TSS3`, the dedicated CAN-FD PT DBC, the observed Span bus-1 fingerprint, runtime bus0-vs-bus1 state-topology selection, and live physical `0x030` driver torque in its evidence-bounded CarState. It is `dashcamOnly` with Panda `noOutput`; the Toyota controller hard-returns zero CAN messages. |
 | newer-Toyota production lateral controller/safety | **not-yet-implementable** | exact H/F firmware closes the B6 EPS receiver contract, but sender cadence/full payload, SecOC freshness/source ownership, stock-source suppression, a validated physical driver-override threshold, Ready/fault transition mapping, Q-current response limits and production limits still require a firmware-identified relay-correct stock-LTA capture and upstream sender closure. |
 
 This table is the durable repo-to-repo audit checkpoint. A later session should change a row
@@ -62,7 +62,9 @@ The initial platform deliberately separates **observability** from **control**:
 - CarState promotes `0x025` steering angle/rate, `0x0AA` wheel speed, `0x101` brake and
   `0x116` gas. It now also promotes exact physical **Steering Wheel Torque** from live
   `0x030`: signed B8 at 0.1 N.m plus signed B17[3:0] at 0.01 N.m. The associated
-  `EPS_FAULT_INHIBIT` and `DRIVER_TORQUE_INVALID` raw gates are decoded; invalid torque
+  `STEERING_FAULT_INHIBIT_STATUS` and `DRIVER_TORQUE_INVALID` raw gates are decoded.
+  The former is a selected steering fault/inhibit status aggregate, not an exhaustive
+  EPS-fault state; invalid torque
   is suppressed, but no legacy raw-domain override threshold, DID-Ready mapping, or
   temporary/permanent `0x262` fault class is transplanted. `0x127` still promotes only
   observed raw `3=D`, and `0x176` cruise remains neutral pending an active transition.
