@@ -19,14 +19,15 @@ class TestBootstrapProfile(unittest.TestCase):
     expected = {
       "8965B4209000", "8965B4233100", "8965B4509100", "8965B4512000",
       "8965B4514000", "8965F3401200", "8965F4207000", "8965F4201000",
-      "8965H1202000", "8965F1208000",
+      "8965H1202000", "8965F1208000", "8965F3307000",
     }
     self.assertEqual(set(BOOTSTRAP_TARGETS), expected)
     self.assertEqual(BOOTSTRAP_TARGETS["8965B4512000"].grade, "verified")
     self.assertEqual(BOOTSTRAP_TARGETS["8965H1202000"].grade, "observed")
     self.assertEqual(BOOTSTRAP_TARGETS["8965F1208000"].grade, "observed")
+    self.assertEqual(BOOTSTRAP_TARGETS["8965F3307000"].grade, "verified")
     self.assertTrue(all(row.grade == "external-source" for key, row in BOOTSTRAP_TARGETS.items()
-                        if key not in {"8965B4512000", "8965H1202000", "8965F1208000"}))
+                        if key not in {"8965B4512000", "8965H1202000", "8965F1208000", "8965F3307000"}))
 
   def test_prefix_similarity_never_creates_bootstrap_compatibility(self):
     self.assertIsNone(known_bootstrap_target("8965B4599999"))
@@ -43,12 +44,20 @@ class TestBootstrapProfile(unittest.TestCase):
       with self.assertRaisesRegex(BootstrapProfileError, "not evidenced byte-for-byte"):
         require_evidenced_fixture(f181, RAM_DUMP_FIXTURE_SHA256)
 
-  def test_dataflash_and_autoreset_fixtures_are_locally_pinned_only_on_4512000(self):
-    for sha in (DATAFLASH_FIXTURE_SHA256, AUTORESET_DATAFLASH_FIXTURE_SHA256):
-      self.assertTrue(fixture_is_evidenced("8965B4512000", sha))
-      for f181 in ("8965B4209000", "8965B4233100", "8965B4509100", "8965B4514000",
-                   "8965F3401200", "8965F4207000", "8965F4201000", "8965H1202000", "8965F1208000"):
-        self.assertFalse(fixture_is_evidenced(f181, sha), f181)
+  def test_dataflash_fixture_is_evidenced_on_4512000_and_exact_camry_only(self):
+    self.assertTrue(fixture_is_evidenced("8965B4512000", DATAFLASH_FIXTURE_SHA256))
+    self.assertTrue(fixture_is_evidenced("8965F3307000", DATAFLASH_FIXTURE_SHA256))
+    self.assertEqual(require_evidenced_fixture("8965F3307000", DATAFLASH_FIXTURE_SHA256).software_id,
+                     "8965F3307000")
+    for f181 in ("8965B4209000", "8965B4233100", "8965B4509100", "8965B4514000",
+                 "8965F3401200", "8965F4207000", "8965F4201000", "8965H1202000", "8965F1208000"):
+      self.assertFalse(fixture_is_evidenced(f181, DATAFLASH_FIXTURE_SHA256), f181)
+
+  def test_autoreset_fixture_remains_4512000_only(self):
+    self.assertTrue(fixture_is_evidenced("8965B4512000", AUTORESET_DATAFLASH_FIXTURE_SHA256))
+    for f181 in ("8965F3307000", "8965B4209000", "8965B4233100", "8965B4509100", "8965B4514000",
+                 "8965F3401200", "8965F4207000", "8965F4201000", "8965H1202000", "8965F1208000"):
+      self.assertFalse(fixture_is_evidenced(f181, AUTORESET_DATAFLASH_FIXTURE_SHA256), f181)
 
   def test_family_compatibility_does_not_imply_fixture_acceptance(self):
     for f181 in ("8965B4209000", "8965B4233100", "8965B4509100", "8965B4514000",

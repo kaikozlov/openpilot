@@ -12,7 +12,7 @@ class TestDataFlashGeometryGate(unittest.TestCase):
   def test_unknown_f181_fails_before_programming_handoff(self):
     route = {"tx": 0x7A1, "rx": 0x7A9, "tx_bus": 1, "rx_bus": 1, "elm327_param": 1, "semantic_path": "normal-harness"}
     app_uds = Mock()
-    app_uds.read_data_by_identifier.return_value = b"\x018965F1208000\x00\x00\x00\x00"
+    app_uds.read_data_by_identifier.return_value = b"\x018965F9999999\x00\x00\x00\x00"
 
     with patch("tsk.lib.dump_dataflash.is_agnos", return_value=True), \
          patch("tsk.lib.dump_dataflash.subprocess.run"), \
@@ -57,6 +57,43 @@ class TestDataFlashGeometryGate(unittest.TestCase):
       with self.assertRaisesRegex(RetryError, "Can't enter programming bootloader"):
         dump()
       handoff.assert_called_once()
+
+  def test_camry_two_record_f181_standard_fixture_reaches_programming_handoff(self):
+    route = {"tx": 0x7A1, "rx": 0x7A9, "tx_bus": 1, "rx_bus": 1, "elm327_param": 1, "semantic_path": "normal-harness"}
+    app_uds = Mock()
+    app_uds.read_data_by_identifier.return_value = (
+      b"\x02" + b"8965F3307000\x00\x00\x00\x00" + b"8A3113303100\x00\x00\x00\x00"
+    )
+
+    with patch("tsk.lib.dump_dataflash.is_agnos", return_value=True), \
+         patch("tsk.lib.dump_dataflash.subprocess.run"), \
+         patch("tsk.lib.dump_dataflash.time.sleep"), \
+         patch("tsk.lib.dump_dataflash.TSKExtractor._connect_panda", return_value=Mock()), \
+         patch("tsk.lib.dump_dataflash.discover_eps_route_with_routing", return_value=route), \
+         patch("tsk.lib.dump_dataflash.uds_client", return_value=app_uds), \
+         patch("tsk.lib.dump_dataflash.enter_programming_bootloader",
+               side_effect=ProgrammingHandoffError("stop after fixture gates")) as handoff:
+      with self.assertRaisesRegex(RetryError, "Can't enter programming bootloader"):
+        dump()
+      handoff.assert_called_once()
+
+  def test_camry_autoreset_fixture_remains_blocked_before_programming(self):
+    route = {"tx": 0x7A1, "rx": 0x7A9, "tx_bus": 1, "rx_bus": 1, "elm327_param": 1, "semantic_path": "normal-harness"}
+    app_uds = Mock()
+    app_uds.read_data_by_identifier.return_value = (
+      b"\x02" + b"8965F3307000\x00\x00\x00\x00" + b"8A3113303100\x00\x00\x00\x00"
+    )
+
+    with patch("tsk.lib.dump_dataflash.is_agnos", return_value=True), \
+         patch("tsk.lib.dump_dataflash.subprocess.run"), \
+         patch("tsk.lib.dump_dataflash.time.sleep"), \
+         patch("tsk.lib.dump_dataflash.TSKExtractor._connect_panda", return_value=Mock()), \
+         patch("tsk.lib.dump_dataflash.discover_eps_route_with_routing", return_value=route), \
+         patch("tsk.lib.dump_dataflash.uds_client", return_value=app_uds), \
+         patch("tsk.lib.dump_dataflash.enter_programming_bootloader") as handoff:
+      with self.assertRaisesRegex(RetryError, "exact encrypted-fixture acceptance"):
+        dump(auto_reset=True)
+      handoff.assert_not_called()
 
 
 class TestDataFlashFinalize(unittest.TestCase):

@@ -163,6 +163,7 @@ is still **no prefix rule**. Cross-vehicle evidence now covers the shared
 | `8965B4512000` | `FEBF0000 + 0x1000`, callback `FEBF0000` | local firmware-static + generated-artifact verified |
 | `8965H1202000` | same bootstrap architecture | observed owner-side target-built range-payload execution + recovered CodeFlash |
 | `8965F1208000` | same bootstrap architecture | observed Span target-built range-payload execution + recovered CodeFlash |
+| `8965F3307000` | `FEBF0000 + 0x1000`, callback `FEBF0000` | maintainer 2026 Camry: live SecurityAccess/download/`0x10F0`/`0xFF00`/range-payload execution + exact CodeFlash gate verification |
 | `8965B4209000` | same | external-source / field-supported bootstrap family |
 | `8965B4233100` | same | external-source / field-supported bootstrap family |
 | `8965B4509100` | same | external-source / field-supported bootstrap family |
@@ -183,13 +184,16 @@ the selected payload SHA independently before any production DataFlash WDBI/down
 | fixture | SHA-256 | exact-F181 evidence used by TSK |
 |---|---|---|
 | public RAM key-table payload | `d972d4bf432685217591768600a9abd7820d35b04a72270edc87074365356be2` | exact repository fixture pinned only on `B4512000`; other family rows require target-specific fixture evidence |
-| standard 32 KiB DataFlash payload | `d48988366b5e6d2ddd7438caca5e6f6f02daba9b650263c323a2ffd770a06e34` | locally verified `B4512000` |
-| auto-reset DataFlash derivative | `bf62449f85648ea24708961749bf53f75f36083c01bcf54114d567da0e178725` | locally rebuilt/verified `B4512000` gate |
+| standard 32 KiB DataFlash payload | `d48988366b5e6d2ddd7438caca5e6f6f02daba9b650263c323a2ffd770a06e34` | locally verified `B4512000`; exact `F3307000` Camry gate/root/geometry plus live authenticated range-payload execution |
+| auto-reset DataFlash derivative | `bf62449f85648ea24708961749bf53f75f36083c01bcf54114d567da0e178725` | locally rebuilt/verified `B4512000` gate only; still blocked on `F3307000` |
 
 For every other bootstrap-family row — including the observed `H1202000`/`F1208000`
 Corollas and the historical B4/F3/F4 targets — TSK does not invent an exact local fixture
 mapping. A target-accepted fixture must be supplied with an explicit SHA/evidence record,
-and the target's own `0x10F0` remains the live discriminator.
+and the target's own `0x10F0` remains the live discriminator. `F3307000` is the deliberate
+exception for the standard DataFlash fixture because its exact CodeFlash reproduces the
+payload-build root and byte-identical download/decrypt/CRC-CMAC/callback gate, after the
+same car had already executed an authenticated 4 KiB range payload through that geometry.
 
 The production DataFlash dumper therefore resolves **both** boot geometry and selected
 fixture identity before PROGRAMMING, SecurityAccess, DID writes, RequestDownload, or

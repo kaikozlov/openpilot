@@ -20,6 +20,7 @@ intentionally not accepted by the resolver.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import re
 import struct
 
 
@@ -156,7 +157,25 @@ ANALYZED_8965B4512000_RAM_EXEC = RamExecGeometry(
   evidence="firmware-verified 8965B4512000 RequestDownload/0x10F0/callback geometry",
 )
 
-KNOWN_RAM_EXEC_GEOMETRIES = (COMMUNITY_B4_F3F4_RAM_EXEC, ANALYZED_8965B4512000_RAM_EXEC)
+# The maintainer's 2026 Camry 8965F3307000 independently proves the same geometry twice:
+# owner-side acquisition accepted SecurityAccess, FEBF0000/0x1000 RequestDownload, 0x10F0,
+# 0xFF00, and an authenticated 4 KiB range payload; the recovered exact CodeFlash then
+# confirmed the same download/routine tables, payload crypto path, and callback slot.
+ANALYZED_8965F3307000_RAM_EXEC = RamExecGeometry(
+  name="8965F3307000-authenticated-ram-exec",
+  load_addr=0xFEBF0000,
+  size=0x1000,
+  callback_addr=0xFEBF0000,
+  target_f181=frozenset({"8965F3307000"}),
+  evidence=("maintainer 2026 Camry field acquisition plus exact 8965F3307000 CodeFlash: " +
+            "SecurityAccess/RequestDownload/0x10F0/0xFF00/range-payload execution and matching boot tables"),
+)
+
+KNOWN_RAM_EXEC_GEOMETRIES = (
+  COMMUNITY_B4_F3F4_RAM_EXEC,
+  ANALYZED_8965B4512000_RAM_EXEC,
+  ANALYZED_8965F3307000_RAM_EXEC,
+)
 
 # External yc/newer-Toyota evidence observed code linked/deployed at FEBE0000. It does not
 # establish the authenticated bootloader RequestDownload window or callback package, so it
@@ -179,20 +198,42 @@ COMMITTED_PAYLOAD_CONTRACT = PayloadGeometryContract(
 
 
 def normalize_f181(value: bytes | bytearray | str) -> str:
-  """Normalize UDS F181 payloads and dashboard strings to an exact application ID."""
+  """Normalize UDS F181 payloads/dashboard strings to the primary exact software ID.
+
+  Toyota/Denso F181 appears both as the older one-record shape
+  ``01 || record[16]`` and as newer count-prefixed multi-record responses such as the
+  Camry's ``02 || 8965F3307000[16] || 8A3113303100[16]``. TSK's bootstrap tables are
+  keyed by the primary 8965... application record, never by the concatenated display.
+  """
   if isinstance(value, str):
-    text = value.strip(".\x00 \t\r\n")
+    text = value.strip("\x00 \t\r\n")
+    # Identity-map display strings replace the binary count and NUL padding with dots.
+    # Prefer an exact 12-character 8965... record when one is present.
+    match = re.search(r"8965[A-Za-z0-9]{8}", text)
+    if match:
+      return match.group(0)
+    text = text.strip(".")
     if text.startswith("\x01"):
       text = text[1:]
-    # Dashboard strings can contain a leading display dot for the binary format byte.
     if text.startswith("."):
       text = text[1:]
     return text.strip(".\x00 ")
 
-  raw = bytes(value).rstrip(b"\x00")
+  raw = bytes(value)
+  if raw and 1 <= raw[0] <= 8 and len(raw) >= 17:
+    record_count = int(raw[0])
+    if len(raw) >= 1 + 16 * record_count:
+      primary = raw[1:17].rstrip(b"\x00")
+      text = primary.decode("ascii", errors="ignore").strip(".\x00 ")
+      if text:
+        return text
+
+  raw = raw.rstrip(b"\x00")
   if raw.startswith(b"\x01"):
     raw = raw[1:]
-  return raw.decode("ascii", errors="ignore").strip(".\x00 ")
+  text = raw.decode("ascii", errors="ignore").strip(".\x00 ")
+  match = re.search(r"8965[A-Za-z0-9]{8}", text)
+  return match.group(0) if match else text
 
 
 def known_ram_exec_geometry(f181: bytes | bytearray | str) -> RamExecGeometry | None:

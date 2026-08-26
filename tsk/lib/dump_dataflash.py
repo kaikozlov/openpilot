@@ -226,7 +226,7 @@ def dump(progress_cb=None, *, auto_reset: bool = False,
   if route is None:
     raise RetryError("EPS did not answer under normal-harness or OBD routing")
   if route["tx"] != ADDR or route["rx"] != ADDR + 8 or route["tx_bus"] != route["rx_bus"]:
-    raise RetryError(f"Responder does not match the Sienna payload route: {route_fields(route)}")
+    raise RetryError(f"Responder does not match the evidenced EPS payload route: {route_fields(route)}")
 
   # Resolve the complete authenticated RAM-exec geometry from the application identity
   # before any PROGRAMMING request, SecurityAccess key, DID write, or download is sent.

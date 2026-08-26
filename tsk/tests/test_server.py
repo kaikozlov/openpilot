@@ -6,12 +6,14 @@ import time
 import unittest
 from unittest.mock import patch
 
+from tsk.lib.bootstrap_profile import AUTORESET_DATAFLASH_FIXTURE_SHA256, DATAFLASH_FIXTURE_SHA256
 from tsk.web.server import (
   TSKWebHandler,
   TSKWebServer,
   dashboard_payload,
   expected_vehicle_state,
   operation_states_snapshot,
+  ram_exec_geometry_status,
   ready_diff_lock,
   ready_diff_state,
   ready_lock,
@@ -179,6 +181,23 @@ class TestServer(unittest.TestCase):
     self.assertNotIn("/api/ephemeral-bridge", page)
     index = resolve_asset("/index.html").read_text(encoding="utf-8")
     self.assertIn('href="/ephemeral-runtime.html"', index)
+
+  def test_camry_two_record_identity_enables_standard_dataflash_gate_only(self):
+    identity = [{
+      "name": "app_sw_id",
+      "hex": "023839363546333330373030300000000038413331313333303331303000000000",
+      "ascii": ".8965F3307000....8A3113303100....",
+    }]
+    standard = ram_exec_geometry_status(identity, fixture_sha256=DATAFLASH_FIXTURE_SHA256)
+    self.assertTrue(standard["ready"])
+    self.assertEqual(standard["f181"], "8965F3307000....8A3113303100")
+    self.assertEqual(standard["geometry"]["load_addr"], "0xFEBF0000")
+    self.assertTrue(standard["dataflash_fixture_ready"])
+    self.assertEqual(standard["bootstrap"]["f181"], "8965F3307000")
+
+    autoreset = ram_exec_geometry_status(identity, fixture_sha256=AUTORESET_DATAFLASH_FIXTURE_SHA256)
+    self.assertTrue(autoreset["ready"])
+    self.assertFalse(autoreset["dataflash_fixture_ready"])
 
   def test_dataflash_endpoint_requires_verified_ram_exec_geometry(self):
     server = TSKWebServer(("127.0.0.1", 0), TSKWebHandler)

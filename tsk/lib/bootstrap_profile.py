@@ -43,8 +43,9 @@ class BootstrapTargetEvidence:
     return data
 
 
-# Source of truth for this transfer table:
-# ghidra_rh850_analysis/data/variant_bootstrap_profiles.json.  The rows deliberately
+# Baseline transfer evidence is mirrored from
+# ghidra_rh850_analysis/data/variant_bootstrap_profiles.json. Exact maintainer-target rows
+# may additionally bind newer retained field/CodeFlash evidence explicitly below. The rows
 # preserve bootstrap-family evidence separately from exact encrypted-fixture evidence.
 BOOTSTRAP_TARGETS = {
   "8965B4512000": BootstrapTargetEvidence(
@@ -78,6 +79,18 @@ BOOTSTRAP_TARGETS = {
            "CodeFlash/DataFlash/extended-CodeFlash/GlobalRAM/LocalRAM. The image independently preserves the " +
            "H-family payload-build and boot-SA roots and boot flow; exact acceptance of the repository Sienna " +
            "ram_dump_payload.bin is not claimed."),
+  ),
+  "8965F3307000": BootstrapTargetEvidence(
+    software_id="8965F3307000",
+    grade="verified",
+    source=("maintainer 2026 Camry field acquisition + exact 8965F3307000 CodeFlash " +
+            "under ghidra_rh850_analysis/community/kai/camry-2026"),
+    fixture_transfer="exact-standard-dataflash-fixture-verified",
+    exact_fixture_sha256=frozenset({DATAFLASH_FIXTURE_SHA256}),
+    notes=("The exact Camry accepted boot SecurityAccess, FEBF0000/0x1000 RequestDownload, 0x10F0, 0xFF00, " +
+           "and a 4 KiB range payload. Its recovered CodeFlash has the same payload-build root and byte-identical " +
+           "download/decrypt/CRC-CMAC/callback gate as 8965B4512000, so the standard d489... DataFlash fixture is " +
+           "cryptographically target-evidenced. The optional auto-reset derivative remains unapproved on this F181."),
   ),
   "8965B4209000": BootstrapTargetEvidence(
     software_id="8965B4209000",

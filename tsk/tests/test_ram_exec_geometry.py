@@ -3,6 +3,7 @@ import unittest
 
 from tsk.lib.ram_exec_geometry import (
   ANALYZED_8965B4512000_RAM_EXEC,
+  ANALYZED_8965F3307000_RAM_EXEC,
   COMMITTED_PAYLOAD_CONTRACT,
   COMMUNITY_B4_F3F4_RAM_EXEC,
   LEGACY_8965B4_RAM_EXEC,
@@ -39,6 +40,14 @@ class TestRamExecGeometry(unittest.TestCase):
     geometry = resolve_ram_exec_geometry(b"\x018965B4512000\x00")
     self.assertEqual(geometry, ANALYZED_8965B4512000_RAM_EXEC)
     self.assertNotIn("8965B4512000", LEGACY_8965B4_RAM_EXEC.target_f181)
+
+  def test_camry_two_record_f181_resolves_exact_verified_geometry(self):
+    raw = b"\x02" + b"8965F3307000\x00\x00\x00\x00" + b"8A3113303100\x00\x00\x00\x00"
+    self.assertEqual(normalize_f181(raw), "8965F3307000")
+    geometry = resolve_ram_exec_geometry(raw)
+    self.assertEqual(geometry, ANALYZED_8965F3307000_RAM_EXEC)
+    self.assertEqual((geometry.load_addr, geometry.size, geometry.callback_addr),
+                     (0xFEBF0000, 0x1000, 0xFEBF0000))
 
   def test_prefix_match_never_promotes_unknown_calibration(self):
     self.assertIsNone(known_ram_exec_geometry("8965B4599999"))
@@ -127,6 +136,8 @@ class TestRamExecGeometry(unittest.TestCase):
   def test_f181_normalization_is_exact_not_prefix_based(self):
     self.assertEqual(normalize_f181(b"\x018965B4509100\x00\x00\x00\x00"), "8965B4509100")
     self.assertEqual(normalize_f181(".8965B4512000...."), "8965B4512000")
+    self.assertEqual(normalize_f181(".8965F3307000....8A3113303100...."), "8965F3307000")
+    self.assertEqual(normalize_f181("8965B4599999"), "8965B4599999")
 
 
 if __name__ == "__main__":
