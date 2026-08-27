@@ -26,6 +26,7 @@ EXECUTE_ROUTINE = 0xFF00
 RAM_DUMP_FIXTURE_SHA256 = "d972d4bf432685217591768600a9abd7820d35b04a72270edc87074365356be2"
 DATAFLASH_FIXTURE_SHA256 = "d48988366b5e6d2ddd7438caca5e6f6f02daba9b650263c323a2ffd770a06e34"
 AUTORESET_DATAFLASH_FIXTURE_SHA256 = "bf62449f85648ea24708961749bf53f75f36083c01bcf54114d567da0e178725"
+CODEFLASH_FIXTURE_SHA256 = "860f8a3418d23ccfd0861a97efdb9e1d23a8854c3a629b8d7b6821eb93d0b588"
 
 
 @dataclass(frozen=True)
@@ -85,10 +86,10 @@ BOOTSTRAP_TARGETS = {
     grade="verified",
     source=("maintainer 2026 Camry field acquisition + exact 8965F3307000 CodeFlash " +
             "under ghidra_rh850_analysis/community/kai/camry-2026"),
-    fixture_transfer="exact-standard-dataflash-fixture-verified",
-    exact_fixture_sha256=frozenset({DATAFLASH_FIXTURE_SHA256}),
+    fixture_transfer="exact-dataflash-and-codeflash-fixtures-verified",
+    exact_fixture_sha256=frozenset({DATAFLASH_FIXTURE_SHA256, CODEFLASH_FIXTURE_SHA256}),
     notes=("The exact Camry accepted boot SecurityAccess, FEBF0000/0x1000 RequestDownload, 0x10F0, 0xFF00, " +
-           "and a 4 KiB range payload. Its recovered CodeFlash has the same payload-build root and byte-identical " +
+           "and the exact 4 KiB 0..2 MiB CodeFlash range payload. Its recovered CodeFlash has the same payload-build root and byte-identical " +
            "download/decrypt/CRC-CMAC/callback gate as 8965B4512000, so the standard d489... DataFlash fixture is " +
            "cryptographically target-evidenced. The optional auto-reset derivative remains unapproved on this F181."),
   ),

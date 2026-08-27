@@ -16,9 +16,11 @@ class TestEvidenceBundle(unittest.TestCase):
       payload = base / "payload.bin"
       df_payload = base / "dataflash.bin"
       autoreset_payload = base / "dataflash-autoreset.bin"
+      codeflash_payload = base / "codeflash.bin"
       payload.write_bytes(b"payload")
       df_payload.write_bytes(b"dataflash")
       autoreset_payload.write_bytes(b"dataflash-autoreset")
+      codeflash_payload.write_bytes(b"codeflash")
       raw = root / "uds-sweep" / "ready_capture.ndjson"
       raw.parent.mkdir(parents=True)
       raw.write_text('{"event":"can","addr":291}\n', encoding="utf-8")
@@ -35,6 +37,7 @@ class TestEvidenceBundle(unittest.TestCase):
           PAYLOAD_PATH=str(payload),
           DATAFLASH_PAYLOAD_PATH=str(df_payload),
           DATAFLASH_AUTORESET_PAYLOAD_PATH=str(autoreset_payload),
+          CODEFLASH_PAYLOAD_PATH=str(codeflash_payload),
           OPENPILOT_DIR=str(base)):
         evidence.record_operation("/api/ident-map", client="127.0.0.1")
         bundle = evidence.create_evidence_bundle({"identity": {"status": "mapped"}})
@@ -51,6 +54,7 @@ class TestEvidenceBundle(unittest.TestCase):
       self.assertEqual(manifest["payloads"][0]["sha256"], evidence.hashlib.sha256(b"payload").hexdigest())
       self.assertEqual(manifest["payloads"][2]["sha256"],
                        evidence.hashlib.sha256(b"dataflash-autoreset").hexdigest())
+      self.assertEqual(manifest["payloads"][3]["sha256"], evidence.hashlib.sha256(b"codeflash").hexdigest())
       operations = (root / "operations.ndjson").read_text()
       self.assertIn("/api/ident-map", operations)
       self.assertIn("evidence_bundle_requested", operations)

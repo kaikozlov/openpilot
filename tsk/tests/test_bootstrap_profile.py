@@ -2,6 +2,7 @@ import unittest
 
 from tsk.lib.bootstrap_profile import (
   AUTORESET_DATAFLASH_FIXTURE_SHA256,
+  CODEFLASH_FIXTURE_SHA256,
   BOOTSTRAP_TARGETS,
   BootstrapProfileError,
   DATAFLASH_FIXTURE_SHA256,
@@ -52,6 +53,11 @@ class TestBootstrapProfile(unittest.TestCase):
     for f181 in ("8965B4209000", "8965B4233100", "8965B4509100", "8965B4514000",
                  "8965F3401200", "8965F4207000", "8965F4201000", "8965H1202000", "8965F1208000"):
       self.assertFalse(fixture_is_evidenced(f181, DATAFLASH_FIXTURE_SHA256), f181)
+
+  def test_codeflash_range_fixture_is_evidenced_only_on_exact_camry(self):
+    self.assertTrue(fixture_is_evidenced("8965F3307000", CODEFLASH_FIXTURE_SHA256))
+    for f181 in ("8965B4512000", "8965F3401200", "8965H1202000", "8965F1208000"):
+      self.assertFalse(fixture_is_evidenced(f181, CODEFLASH_FIXTURE_SHA256), f181)
 
   def test_autoreset_fixture_remains_4512000_only(self):
     self.assertTrue(fixture_is_evidenced("8965B4512000", AUTORESET_DATAFLASH_FIXTURE_SHA256))

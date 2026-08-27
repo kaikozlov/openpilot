@@ -4,6 +4,14 @@
 
 ---
 
+> **2026-08-26 current-target note:** this file remains the historical Corolla/Span field
+> chronology. The maintainer 2026 Camry/F33 work has moved well beyond this checkpoint and
+> is tracked in [`CAMRY_2026_FINDINGS.md`](CAMRY_2026_FINDINGS.md). In particular, exact
+> `8965F3307000` CodeFlash, the protected B6 steering receiver, full P/R/N/D/B + Ready
+> state joins, the passive opendbc target, and the current volatile application-runtime
+> signer boundary are now target-native evidence; do not infer Camry status from the older
+> Corolla conclusions below.
+
 ## 0. About this document
 
 ### 0.1 Audience and purpose

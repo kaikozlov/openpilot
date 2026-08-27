@@ -7,6 +7,11 @@ may probe an unknown target, but stateful transfer paths retain explicit calibra
 boundaries and recovered keys are not trusted until they authenticate captured vehicle
 traffic.
 
+For the exact maintainer 2026 Camry/F33 checkpoint, including ECU identities, full
+P/R/N/D/B + Ready joins, the completed CodeFlash acquisition, target-native B6/SecOC
+receiver, passive opendbc port, key-recovery negative and current RAM-only signer boundary,
+see [`CAMRY_2026_FINDINGS.md`](CAMRY_2026_FINDINGS.md).
+
 ## Install and preflight
 
 Install the public `kai` branch with:
@@ -186,6 +191,7 @@ the selected payload SHA independently before any production DataFlash WDBI/down
 | public RAM key-table payload | `d972d4bf432685217591768600a9abd7820d35b04a72270edc87074365356be2` | exact repository fixture pinned only on `B4512000`; other family rows require target-specific fixture evidence |
 | standard 32 KiB DataFlash payload | `d48988366b5e6d2ddd7438caca5e6f6f02daba9b650263c323a2ffd770a06e34` | locally verified `B4512000`; exact `F3307000` Camry gate/root/geometry plus live authenticated range-payload execution |
 | auto-reset DataFlash derivative | `bf62449f85648ea24708961749bf53f75f36083c01bcf54114d567da0e178725` | locally rebuilt/verified `B4512000` gate only; still blocked on `F3307000` |
+| Camry 0..2 MiB CodeFlash range reader | `860f8a3418d23ccfd0861a97efdb9e1d23a8854c3a629b8d7b6821eb93d0b588` | exact `F3307000` field acceptance; successful 524288/524288-word acquisition |
 
 For every other bootstrap-family row — including the observed `H1202000`/`F1208000`
 Corollas and the historical B4/F3/F4 targets — TSK does not invent an exact local fixture
@@ -200,6 +206,14 @@ fixture identity before PROGRAMMING, SecurityAccess, DID writes, RequestDownload
 payload transfer. The instrumented diagnostic may still observe PROGRAMMING, bootloader
 identity, and `REQUEST_SEED`; even after a family-supported SecurityAccess result it stops
 before WDBI/download when the exact DataFlash ciphertext is not evidenced.
+
+The exact Camry CodeFlash collector is a separate retained acquisition tool, not a generic
+family operation. `tsk/tools/dump_codeflash.py` requires exact
+`8965F3307000 / 8A3113303100`, exact `(bus1,param1,0x7A1->0x7A9)`, source-real
+`0x51E Ready=0`, the exact `860f...` payload, and the verified old-stack bootstrap before
+PROGRAMMING. It persists a one-byte-per-word coverage bitmap, detects conflicting overlap,
+can resume a partial pass, tolerates recoverable Panda SPI NACKs, and verifies the known
+2 MiB raw / 1 MiB normalized hashes on completion.
 
 The legacy RAM key-table extractor remains narrower than the bootstrap family because its
 CPU-visible `FEBE6E34` key-table layout applies only to older B4 evidence. The current
@@ -217,7 +231,7 @@ scheduler/SecOC/COM anchors **and** SHA-bound retained application R/W/X geometr
 validates that manifest together with the audited inert canary in
 `tsk/lib/ephemeral_runtime.py`.
 
-The built-in package currently covers only `8965B4512000`:
+The built-in **scheduler-canary package** currently covers only `8965B4512000`:
 
 ```text
 CodeFlash SHA-256  21140bbd65e530a9e518a3e84e20e5d85679675bc09cc724cb177bb7c76bafde
@@ -234,6 +248,14 @@ read-only regression evidence. Both resolve the foreign image semantics but repo
 `semantic-resolved-steering-unsupported`, three SecOC records with classic `0x2E4/0x131`
 missing, and unresolved image-bound retained-RWX geometry. They are displayed as evidence
 on the runtime page but **cannot** satisfy the executable package gate.
+
+Exact F33 is different again. Field startup proves the low `FEBF0000` boot staging pocket
+is overwritten by the stock application, while `FEBFF9F0..FEBFFBFB` is a 524-byte
+executable tail that survives startup byte-for-byte. Exact application XCP code admits
+writes across `FEBF7C00..FEBFFBFF`, but the observed normal `(bus1,param1)` CONNECT timed
+out and no reversible application-context control-transfer object into that tail has been
+recovered. TSK therefore records F33 placement evidence without presenting it as a deployable
+runtime package.
 
 The host-side bootstrap constructor now models both recovered Denso protocol axes used by
 the RE live installer: old/new routine magic (`45 00` / `45 01`) and CPU0/CPU1 memory-ID
@@ -478,8 +500,9 @@ replay/future-sync/tag-guess trials automatically; those remain isolated-bench e
    application-retention claims.
 7. **Exact payload fixture** — prove the specific encrypted 4 KiB ciphertext selected for
    this operation. Shared `FEBF0000` geometry alone does not authorize a DataFlash payload.
-8. **Optional ephemeral-runtime research** — for the callback-free route, acquire the exact
-   1 MiB CodeFlash offline, run the semantic resolver, import its SHA-bound target manifest,
+8. **Optional exact CodeFlash / ephemeral-runtime research** — on exact F3307000, the
+   retained NRTD collector can reacquire the known 2 MiB transport range and normalized
+   1 MiB image. For a callback-free route, run the semantic resolver and import its SHA-bound target manifest,
    and execute only the inert canary on an isolated bench. A foreign target additionally
    needs its own post-auth substitution evidence. Do not deploy the steering bridge yet.
 9. **Cryptographic key recovery** — when a readable key route exists, verify the candidate
@@ -541,7 +564,8 @@ deletion. The bundle endpoint is:
 ```
 
 The `.tar.gz` contains `session-manifest.json`, operation history, raw NDJSON captures,
-UDS transcripts, DataFlash binaries, payload hashes, SHA-bound ephemeral-runtime package/
+UDS transcripts, DataFlash binaries, exact-target CodeFlash binaries/coverage metadata,
+payload hashes, SHA-bound ephemeral-runtime package/
 validation artifacts, job states, route metadata, programming-handoff health telemetry,
 and device logs. The manifest records the openpilot
 branch/commit and a hash prefix rather than the plaintext dongle ID.

@@ -48,6 +48,24 @@ def _fingerprint_block(fingerprint_source: str, platform_name: str) -> str | Non
   return None if match is None else match.group("body")
 
 
+def _tss3_exact_fw_block(values_source: str, platform_name: str) -> str | None:
+  pattern = re.compile(
+    rf"(?ms)^TSS3_EXACT_FW_VERSIONS\s*=\s*\{{.*?^  CAR\.{re.escape(platform_name)}\s*:\s*\{{(?P<body>.*?)" +
+    r"(?=^  CAR\.[A-Z][A-Z0-9_]+\s*:\s*\{|^\}|\Z)"
+  )
+  match = pattern.search(values_source)
+  return None if match is None else match.group("body")
+
+
+def _default_tss3_dbc(values_source: str) -> str | None:
+  match = re.search(
+    r"(?ms)^class ToyotaTSS3PlatformConfig\(PlatformConfig\):.*?" +
+    r"dbc_dict\s*:\s*dict\s*=.*?Bus\.pt\s*:\s*['\"]([^'\"]+)['\"]",
+    values_source,
+  )
+  return None if match is None else match.group(1)
+
+
 def _default_secoc_dbc(values_source: str) -> str | None:
   match = re.search(
     r"(?ms)^class ToyotaSecOCPlatformConfig\(PlatformConfig\):.*?" +
@@ -162,20 +180,23 @@ def audit_opendbc_implementation(identity: dict, integration: dict,
         f"CAR.{platform_name} exists in Toyota values.py" if block_info else f"CAR.{platform_name} is absent")
 
   config_class, block = block_info if block_info else ("", "")
-  secoc_platform = config_class == "ToyotaSecOCPlatformConfig" or "ToyotaFlags.SECOC" in block
+  tss3_platform = config_class == "ToyotaTSS3PlatformConfig"
+  secoc_platform = config_class in {"ToyotaSecOCPlatformConfig", "ToyotaTSS3PlatformConfig"} or "ToyotaFlags.SECOC" in block
   check("platform_secoc_enabled", secoc_platform,
         f"config={config_class or 'missing'}; target must carry Toyota SecOC flag")
 
   effective_dbc = _explicit_dbc(block)
   if effective_dbc is None and config_class == "ToyotaSecOCPlatformConfig":
     effective_dbc = _default_secoc_dbc(values_source)
+  if effective_dbc is None and tss3_platform:
+    effective_dbc = _default_tss3_dbc(values_source)
   check("dbc_pt_matches", bool(requested_dbc) and requested_dbc == effective_dbc,
         f"reviewed={requested_dbc or 'empty'} source={effective_dbc or 'unresolved'}")
   dbc_source = _dbc_generator_source(root, effective_dbc or "")
   check("dbc_source_present", dbc_source is not None,
         str(dbc_source) if dbc_source else f"generator source for {effective_dbc or 'unresolved'} not found")
 
-  angle_source = "ToyotaFlags.ANGLE_CONTROL" in block
+  angle_source = tss3_platform or "ToyotaFlags.ANGLE_CONTROL" in block
   expected_angle = steer_control_type == "angle"
   valid_steer_mode = steer_control_type in ("torque", "angle")
   check("steer_control_type_valid", valid_steer_mode, steer_control_type or "empty")
@@ -210,15 +231,25 @@ def audit_opendbc_implementation(identity: dict, integration: dict,
       computed_safety |= safety_flags.get("ALT_BRAKE", 0)
   else:
     computed_safety = None
-  check("safety_param_matches", requested_safety is not None and requested_safety == computed_safety,
-        f"reviewed={fields.get('safety_flags', '')!r} source-derived={computed_safety!r}")
+
+  tss3_no_output = bool(tss3_platform and "ToyotaFlags.TSS3" in interface_source and "SafetyModel.noOutput" in interface_source)
+  production_output_enabled = not tss3_no_output
+  check("production_output_enabled", production_output_enabled,
+        "Toyota production safety/output path enabled" if production_output_enabled else
+        "TSS3 research platform is intentionally SafetyModel.noOutput")
+  check("safety_param_matches", production_output_enabled and requested_safety is not None and requested_safety == computed_safety,
+        (f"reviewed={fields.get('safety_flags', '')!r} source-derived={computed_safety!r}" if production_output_enabled else
+         "no production safetyParam exists while TSS3 remains noOutput"))
 
   fingerprint_block = _fingerprint_block(fingerprints_source, platform_name) if valid_platform_name else None
-  check("fingerprint_platform_present", fingerprint_block is not None,
-        f"FW_VERSIONS contains CAR.{platform_name}" if fingerprint_block else "platform absent from FW_VERSIONS")
-  exact_eps = bool(app_sw_id and fingerprint_block and app_sw_id in fingerprint_block and "Ecu.eps" in fingerprint_block)
+  tss3_exact_block = _tss3_exact_fw_block(values_source, platform_name) if valid_platform_name else None
+  identity_block = fingerprint_block or tss3_exact_block
+  identity_source = "FW_VERSIONS" if fingerprint_block is not None else ("TSS3_EXACT_FW_VERSIONS" if tss3_exact_block is not None else "none")
+  check("fingerprint_platform_present", identity_block is not None,
+        f"{identity_source} contains CAR.{platform_name}" if identity_block else "platform absent from firmware identity maps")
+  exact_eps = bool(app_sw_id and identity_block and app_sw_id in identity_block and "Ecu.eps" in identity_block)
   check("exact_eps_f181_present", exact_eps,
-        f"EPS F181 {app_sw_id or 'empty'} is {'present' if exact_eps else 'absent'} in platform firmware versions")
+        f"EPS F181 {app_sw_id or 'empty'} is {'present' if exact_eps else 'absent'} in {identity_source}")
 
   interface_contract = all(token in interface_source for token in (
     "EPS_SCALE[candidate]", "ToyotaSafetyFlags.SECOC", "ToyotaSafetyFlags.LTA",

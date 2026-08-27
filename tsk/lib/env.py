@@ -13,11 +13,13 @@ OPENPILOT_DIR = f"{COMMA_DATA_DIR}/openpilot"
 PAYLOAD_PATH = str(Path(__file__).parent / "payload.bin")
 DATAFLASH_PAYLOAD_PATH = str(Path(__file__).parent / "payload_dataflash_ff200000_ff208000.bin")
 DATAFLASH_AUTORESET_PAYLOAD_PATH = str(Path(__file__).parent / "payload_dataflash_ff200000_ff208000_autoreset.bin")
+CODEFLASH_PAYLOAD_PATH = str(Path(__file__).parent / "payload_codeflash_00000000_00200000.bin")
 
 # CAN messages and DataFlash dumps live under /cache so they survive reboot but
 # clear on AGNOS update. Off-device they go under ~/comma_data for dry-run testing.
 CACHE_DIR = "/cache" if is_agnos() else f"{COMMA_DATA_DIR}/cache"
 DATAFLASH_DIR = f"{CACHE_DIR}/tsk/dataflash"
+CODEFLASH_DIR = f"{CACHE_DIR}/tsk/codeflash"
 CAN_MESSAGES_DIR = f"{CACHE_DIR}/tsk/can-messages"
 CAN_ORACLE_PATH = f"{CAN_MESSAGES_DIR}/can_oracle.ndjson"
 
