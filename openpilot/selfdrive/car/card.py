@@ -20,6 +20,7 @@ from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
+from openpilot.selfdrive.car.toyota_tss3_dev import parse_toyota_tss3_development_config
 
 REPLAY = "REPLAY" in os.environ
 
@@ -38,6 +39,41 @@ def obd_callback(params: Params) -> ObdCallback:
       params.get_bool("ObdMultiplexingChanged", block=True)
       cloudlog.warning("OBD multiplexing set successfully")
   return set_obd_multiplexing
+
+
+def configure_toyota_tss3_development_lateral(params: Params, is_release: bool, CI: CarInterfaceBase) -> bool:
+  """Apply a fail-closed exact-F33 development config from persistent params.
+
+  This is intentionally outside normal vehicle detection. Merely setting the
+  enable bit is insufficient: the JSON must contain live-captured template/
+  cadence plus explicit completed Gate-2 and relay-authority attestations, and
+  the Toyota interface independently binds the current EPS F181/topology.
+  """
+  if not params.get_bool("ToyotaTSS3DevLateral"):
+    return False
+  if is_release:
+    cloudlog.warning("Ignoring Toyota TSS3 development lateral on a release branch")
+    return False
+  if not hasattr(CI, "configure_tss3_gate2_development_lateral"):
+    cloudlog.warning("Ignoring Toyota TSS3 development lateral on a non-Toyota interface")
+    return False
+
+  raw = params.get("ToyotaTSS3DevLateralConfig")
+  try:
+    cfg = parse_toyota_tss3_development_config(raw)
+    CI.configure_tss3_gate2_development_lateral(
+      expected_f181=cfg.f181,
+      b6_template=cfg.b6_template,
+      cadence_frames=cfg.cadence_frames,
+      gate2_bypass_validated=cfg.gate2_bypass_validated,
+      exclusive_b6_authority_validated=cfg.exclusive_b6_authority_validated,
+    )
+  except (KeyError, TypeError, ValueError) as e:
+    cloudlog.warning(f"Ignoring Toyota TSS3 development lateral: {e}")
+    return False
+
+  cloudlog.warning("Enabled exact-F33 Gate-2 development lateral; production TSS3 output remains unsupported")
+  return True
 
 
 def can_comm_callbacks(logcan: messaging.SubSocket, sendcan: messaging.PubSocket) -> tuple[CanRecvCallable, CanSendCallable]:
@@ -109,6 +145,7 @@ class Car:
       self.RI = RI
 
     self.CP.alternativeExperience = 0
+    self.tss3_development_lateral = configure_toyota_tss3_development_lateral(self.params, is_release, self.CI)
     openpilot_enabled_toggle = self.params.get_bool("OpenpilotEnabledToggle")
     controller_available = self.CI.CC is not None and openpilot_enabled_toggle and not self.CP.dashcamOnly
     self.CP.passive = not controller_available or self.CP.dashcamOnly
