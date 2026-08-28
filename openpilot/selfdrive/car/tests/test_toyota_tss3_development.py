@@ -30,6 +30,7 @@ class TestToyotaTSS3DevelopmentConfig(unittest.TestCase):
       self.VALID | {"b6_template_hex": "00" * 27},
       self.VALID | {"f181": "8965F3307001"},
       self.VALID | {"cadence_frames": 0},
+      self.VALID | {"cadence_frames": 4},
       self.VALID | {"gate2_bypass_validated": False},
       self.VALID | {"exclusive_b6_authority_validated": False},
     ]

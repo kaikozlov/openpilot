@@ -21,8 +21,8 @@ def parse_toyota_tss3_development_config(raw: bytes | None) -> ToyotaTSS3Develop
     raise ValueError("b6_template_hex must encode exactly 28 bytes")
 
   cadence_frames = int(cfg["cadence_frames"])
-  if not 1 <= cadence_frames <= 100:
-    raise ValueError("cadence_frames must be 1..100 control frames")
+  if not 1 <= cadence_frames <= 3:
+    raise ValueError("cadence_frames must be 1..3 control frames (<=30 ms)")
 
   f181 = str(cfg["f181"])
   if f181 != "8965F3307000":
