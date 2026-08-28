@@ -50,6 +50,31 @@ class TestOfflineCli(unittest.TestCase):
     self.assertIn("utility-family", output)
     self.assertIn("0xD4", output)
 
+  def test_offline_catalog_browsing_json_is_consistent(self):
+    import json
+
+    cases = [
+      (["ecu", "list", "--json"], "ecus"),
+      (["ecu", "frc", "--json"], "ecu"),
+      (["ecu", "frc", "functions", "--limit", "2", "--json"], "functions"),
+      (["ecu", "frc", "plugins", "--limit", "2", "--json"], "plugins"),
+      (["ecu", "frc", "data", "LTA Control", "--json"], "signals"),
+      (["ecu", "frc", "dtcs", "U0131", "--json"], "dtcs"),
+      (["did", "list", "frc", "LTA Control", "--json"], "signals"),
+      (["dtc", "catalog", "frc", "U0131", "--json"], "dtcs"),
+    ]
+    for argv, key in cases:
+      with self.subTest(argv=argv):
+        rc, output = run_cli(argv)
+        self.assertEqual(rc, 0, output)
+        self.assertIn(key, json.loads(output))
+
+    rc, output = run_cli(["dtc", "decode", "0xAF", "--json"])
+    self.assertEqual(rc, 0, output)
+    status = json.loads(output)
+    self.assertEqual(status["status"], 0xAF)
+    self.assertTrue(status["is_fault_status"])
+
   def test_active_test_list_and_plan_json_expose_runtime_boundary(self):
     import json
 

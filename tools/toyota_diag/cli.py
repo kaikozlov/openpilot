@@ -159,6 +159,13 @@ def cmd_vehicle_detect(args, profile: Profile) -> int:
   return 0 if matches else 1
 
 
+def _ecu_document(ecu) -> dict[str, Any]:
+  return {
+    "key": ecu.key, "name": ecu.name, "address": ecu.address,
+    "category_id": ecu.category_id, "functional_response": ecu.functional_response,
+  }
+
+
 def cmd_ecu_functions(args, profile: Profile) -> int:
   try:
     ecu = profile.lookup_ecu(args.ecu)
@@ -166,8 +173,14 @@ def cmd_ecu_functions(args, profile: Profile) -> int:
     raise SystemExit(str(e)) from e
   rows = profile.functions(ecu)
   if not rows:
-    print("registry has no compiled function hierarchy for this ECU")
+    if getattr(args, "json", False):
+      print(json.dumps({"ecu": _ecu_document(ecu), "functions": [], "total": 0}, sort_keys=True))
+    else:
+      print("registry has no compiled function hierarchy for this ECU")
     return 1
+  if getattr(args, "json", False):
+    print(json.dumps({"ecu": _ecu_document(ecu), "functions": rows[:args.limit], "total": len(rows)}, sort_keys=True))
+    return 0
   for row in rows[:args.limit]:
     ident = row.get("id") or row.get("function_id") or "?"
     details = row.get("detail_ids")
@@ -191,8 +204,14 @@ def cmd_ecu_plugins(args, profile: Profile) -> int:
     raise SystemExit(str(e)) from e
   rows = profile.roles(ecu)
   if not rows:
-    print("registry has no compiled plugin/role bindings for this ECU")
+    if getattr(args, "json", False):
+      print(json.dumps({"ecu": _ecu_document(ecu), "plugins": [], "total": 0}, sort_keys=True))
+    else:
+      print("registry has no compiled plugin/role bindings for this ECU")
     return 1
+  if getattr(args, "json", False):
+    print(json.dumps({"ecu": _ecu_document(ecu), "plugins": rows[:args.limit], "total": len(rows)}, sort_keys=True))
+    return 0
   for row in rows[:args.limit]:
     role = row.get("role") or row.get("id") or 0
     dll = row.get("dll") or row.get("plugin") or row.get("name") or "(unknown DLL)"
@@ -219,6 +238,12 @@ def cmd_ecu_active_tests(args, profile: Profile) -> int:
 
 
 def cmd_ecu_list(args, profile: Profile) -> int:
+  if getattr(args, "json", False):
+    print(json.dumps({
+      "profile": profile.name, "vehicle": profile.vehicle, "panda_bus": profile.bus,
+      "ecus": [_ecu_document(ecu) for ecu in profile.ecus],
+    }, sort_keys=True))
+    return 0
   print(f"{profile.vehicle}  profile={profile.name}  Panda bus={profile.bus}")
   for ecu in profile.ecus:
     category = f"cat {ecu.category_id}" if ecu.category_id is not None else "cat ?"
@@ -232,6 +257,20 @@ def cmd_ecu_info(args, profile: Profile) -> int:
     ecu = profile.lookup_ecu(args.ecu)
   except registry.RegistryError as e:
     raise SystemExit(str(e)) from e
+  category = profile.category(ecu)
+  identity = profile.observed_identity(ecu)
+  counts = discovery.summary_counts(profile, ecu) if category is not None else None
+  if getattr(args, "json", False):
+    document = {
+      "profile": profile.name, "vehicle": profile.vehicle, "panda_bus": profile.bus,
+      "ecu": _ecu_document(ecu), "counts": counts, "observed_identity": identity,
+      "gts_category": category.get("category") if category is not None else None,
+      "mutation_guard": ({
+        "did": profile.guard.did, "contains_ascii": profile.guard.contains_ascii,
+      } if ecu.key == profile.guard.ecu_key else None),
+    }
+    print(json.dumps(document, sort_keys=True))
+    return 0
   print(f"key:       {ecu.key}")
   print(f"name:      {ecu.name}")
   print(f"address:   {ecu.address:#05x}")
@@ -239,17 +278,14 @@ def cmd_ecu_info(args, profile: Profile) -> int:
   print(f"category:  {ecu.category_id if ecu.category_id is not None else '(unresolved)'}")
   if ecu.functional_response is not None:
     print(f"OBD rx:    {ecu.functional_response:#05x}")
-  category = profile.category(ecu)
   if category is not None:
     meta = category["category"]
-    counts = discovery.summary_counts(profile, ecu)
     print(f"GTS DB:    {meta['database']} ({meta['name']})")
     print(f"Data List: {counts['dids']} DID(s), {counts['signals']} signal(s)")
     print(f"DTCs:      {counts['dtcs']}")
     print(f"Active Tests: {counts['active_tests']} candidate(s)")
     if counts["functions"] or counts["roles"]:
       print(f"Functions: {counts['functions']}  Plugins: {counts['roles']}  Concrete utilities: {counts['utilities']}")
-  identity = profile.observed_identity(ecu)
   if identity is not None:
     print(f"observed:  {identity['observation']}")
     print(f"F181:      {', '.join(identity['f181_software_ids'])}")
@@ -270,6 +306,12 @@ def cmd_did_list(args, profile: Profile) -> int:
     raise SystemExit(str(e)) from e
   rows = [(int(key, 16), row) for key, signals in profile.dids(ecu).items() for row in signals]
   rows = _filter_rows(rows, args.query)
+  if getattr(args, "json", False):
+    print(json.dumps({
+      "ecu": _ecu_document(ecu), "total": len(rows),
+      "signals": [{"did": did, **row} for did, row in rows[:args.limit]],
+    }, sort_keys=True))
+    return 0
   for did, row in rows[:args.limit]:
     print(f"0x{did:04X}  {_format_signal(row)}")
   if len(rows) > args.limit:
@@ -284,6 +326,12 @@ def cmd_dtc_catalog(args, profile: Profile) -> int:
     raise SystemExit(str(e)) from e
   rows = [(int(key, 16), row) for key, items in profile.dtcs(ecu).items() for row in items]
   rows = _filter_rows(rows, args.query)
+  if getattr(args, "json", False):
+    print(json.dumps({
+      "ecu": _ecu_document(ecu), "total": len(rows),
+      "dtcs": [{"raw": raw, **row} for raw, row in rows[:args.limit]],
+    }, sort_keys=True))
+    return 0
   for raw, row in rows[:args.limit]:
     failure = f" — {row['failure']}" if row.get("failure") else ""
     print(f"{row.get('code') or f'0x{raw:06X}'}  {row.get('description') or ''}{failure}")
@@ -298,6 +346,12 @@ def cmd_dtc_decode(args, profile: Profile) -> int:
     raise SystemExit("status must be one byte")
   bits = registry.decode_status_bits(status)
   classifying = [name for bit, name in registry.DTC_STATUS_BITS if status & bit & profile.fault_status_mask]
+  if getattr(args, "json", False):
+    print(json.dumps({
+      "status": status, "status_bits": bits, "fault_status_mask": profile.fault_status_mask,
+      "fault_status_bits": classifying, "is_fault_status": bool(status & profile.fault_status_mask),
+    }, sort_keys=True))
+    return 0
   print(f"status {status:#04x}: {' '.join(bits) if bits else '(no bits set)'}")
   print(f"fault mask {profile.fault_status_mask:#04x}: {' '.join(classifying) if classifying else '(none)'}")
   return 0
@@ -1078,30 +1132,37 @@ def build_parser() -> argparse.ArgumentParser:
   ecu = commands.add_parser("ecu", help="browse one ECU or list known ECUs")
   ecu_sub = ecu.add_subparsers(required=True)
   p = ecu_sub.add_parser("list")
+  p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_ecu_list)
   p = ecu_sub.add_parser("info")
   p.add_argument("ecu")
+  p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_ecu_info)
   p = ecu_sub.add_parser("functions")
   p.add_argument("ecu")
   p.add_argument("--limit", type=int, default=100)
+  p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_ecu_functions)
   p = ecu_sub.add_parser("plugins", help="show recovered GTS role → plugin bindings")
   p.add_argument("ecu")
   p.add_argument("--limit", type=int, default=100)
+  p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_ecu_plugins)
   p = ecu_sub.add_parser("data")
   p.add_argument("ecu")
   p.add_argument("query", nargs="?")
   p.add_argument("--limit", type=int, default=100)
+  p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_ecu_data)
   p = ecu_sub.add_parser("dtcs")
   p.add_argument("ecu")
   p.add_argument("query", nargs="?")
   p.add_argument("--limit", type=int, default=100)
+  p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_ecu_dtcs)
   p = ecu_sub.add_parser("active-tests")
   p.add_argument("ecu")
+  p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_ecu_active_tests)
 
   did = commands.add_parser("did")
@@ -1110,6 +1171,7 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("ecu")
   p.add_argument("query", nargs="?")
   p.add_argument("--limit", type=int, default=100)
+  p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_did_list)
   p = did_sub.add_parser("decode")
   p.add_argument("ecu")
@@ -1136,9 +1198,11 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("ecu")
   p.add_argument("query", nargs="?")
   p.add_argument("--limit", type=int, default=100)
+  p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_dtc_catalog)
   p = dtc_sub.add_parser("decode")
   p.add_argument("status")
+  p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_dtc_decode)
   p = dtc_sub.add_parser("scan")
   p.add_argument("--all", action="store_true")
