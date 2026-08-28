@@ -152,6 +152,23 @@ class TestLiveCli(unittest.TestCase):
     self.assertIn("decode unavailable: bits 0..15 exceed 1-byte DID payload", output)
     self.assertIn("Steering Angle", output)
 
+  def test_dtc_scan_json_preserves_status_and_gts_description(self):
+    import json
+    scripted = support.ScriptedUds()
+    scripted.dtc[0x7D2] = support.dtc_payload((bytes.fromhex("C13187"), 0x28))
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["dtc", "scan", "--json"])
+    self.assertEqual(rc, 1, output)
+    document = json.loads(output)
+    self.assertEqual((document["responding_ecus"], document["fault_status_records"]), (1, 1))
+    row = document["ecus"][0]
+    self.assertEqual((row["key"], row["address"]), ("hybrid", 0x7D2))
+    dtc_row = row["dtcs"][0]
+    self.assertEqual((dtc_row["code"], dtc_row["status"], dtc_row["fault_status"]), ("U013187", 0x28, True))
+    self.assertIn("CONFIRMED_DTC", dtc_row["status_bits"])
+    self.assertEqual(dtc_row["descriptions"][0]["failure"], "Missing Message")
+
   def test_dtc_clear_preserves_exact_route_and_verifies(self):
     scripted = self.scripted_clear()
     panda = self.mode04_panda()

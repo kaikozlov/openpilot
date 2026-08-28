@@ -223,15 +223,46 @@ def cmd_dtc_scan(args, profile: Profile) -> int:
   transport = _live_transport()
   panda = transport.connect(profile)
   client_factory = transport.uds_client_factory(panda, profile)
-  responding, faults = dtc.scan(client_factory, _scan_set(profile, args.ecu), profile.fault_status_mask, show_all=args.all)
-  print(f"responding ECUs: {len(responding)}; fault-status records: {len(faults)}")
-  for address, code, _ in faults:
-    try:
-      ecu = profile.lookup_ecu(address)
-    except registry.RegistryError:
-      continue
-    for info in profile.describe_dtc(ecu, code):
-      print(f"  {ecu.name} {code}: {info.get('description') or ''} — {info.get('failure') or ''}")
+  quiet = (lambda _: None) if args.json else print
+  responding, faults = dtc.scan(
+    client_factory, _scan_set(profile, args.ecu), profile.fault_status_mask,
+    show_all=args.all, echo=quiet,
+  )
+  if args.json:
+    ecus = []
+    for address, records in responding.items():
+      try:
+        ecu = profile.lookup_ecu(address)
+        ecu_key, ecu_name = ecu.key, ecu.name
+      except registry.RegistryError:
+        ecu_key, ecu_name = None, profile.name_for(address)
+      items = []
+      for code, status in records:
+        descriptions = profile.describe_dtc(address, code)
+        items.append({
+          "code": code,
+          "status": status,
+          "status_bits": registry.decode_status_bits(status),
+          "fault_status": bool(status & profile.fault_status_mask),
+          "descriptions": descriptions,
+        })
+      ecus.append({"key": ecu_key, "name": ecu_name, "address": address, "dtcs": items})
+    print(json.dumps({
+      "profile": profile.name,
+      "fault_status_mask": profile.fault_status_mask,
+      "responding_ecus": len(responding),
+      "fault_status_records": len(faults),
+      "ecus": ecus,
+    }, sort_keys=True))
+  else:
+    print(f"responding ECUs: {len(responding)}; fault-status records: {len(faults)}")
+    for address, code, _ in faults:
+      try:
+        ecu = profile.lookup_ecu(address)
+      except registry.RegistryError:
+        continue
+      for info in profile.describe_dtc(ecu, code):
+        print(f"  {ecu.name} {code}: {info.get('description') or ''} — {info.get('failure') or ''}")
   return 1 if faults else 0
 
 
@@ -506,6 +537,7 @@ def build_parser() -> argparse.ArgumentParser:
   p = dtc_sub.add_parser("scan")
   p.add_argument("--all", action="store_true")
   p.add_argument("--ecu", action="append")
+  p.add_argument("--json", action="store_true", help="emit one machine-readable DTC snapshot")
   p.set_defaults(func=cmd_dtc_scan)
   p = dtc_sub.add_parser("clear")
   p.set_defaults(func=cmd_dtc_clear)

@@ -20,6 +20,7 @@ Live commands have two transport modes. If `pandad` is stopped, the CLI takes di
 ./tools/toyota can sniff 0xB6 --duration 10
 ./tools/toyota can sniff 0x30 0x412 --duration 0 --json > can.jsonl
 ./tools/toyota dtc scan
+./tools/toyota dtc scan --json > dtc-snapshot.json
 ./tools/toyota did read eps 0x1037
 ./tools/toyota did watch frc 0x1601 0x1501 0x1681 0x1903 --interval 0.25
 ./tools/toyota did watch frc 0x1601 0x1501 --json > frc-monitor.jsonl
