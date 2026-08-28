@@ -13,7 +13,7 @@
         <div class="topbar-inner">
           <div class="brand">
             <h1 class="brand-title">TSK</h1>
-            <span class="brand-subtitle">Toyota SecOC recovery</span>
+            <span class="brand-subtitle">Toyota EPS integration</span>
           </div>
 
           <nav class="nav" aria-label="Primary navigation">
@@ -21,7 +21,7 @@
               <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                 <path d="M4 13.5 12 6l8 7.5"/><path d="M6.5 11.5V20h11v-8.5"/><path d="M9.5 20v-5h5v5"/>
               </svg>
-              Recovery
+              Overview
             </button>
             <button class="nav-item" type="button" data-view="research">
               <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -55,9 +55,9 @@
           <section class="view" id="view-recovery" data-view-panel="recovery">
             <div class="page-heading">
               <div>
-                <p class="eyebrow">SecOC key recovery</p>
-                <h2 class="page-title">Recovery</h2>
-                <p class="page-description">Follow the current vehicle state and evidence, one action at a time. Advanced diagnostics stay out of the way unless the normal path is blocked.</p>
+                <p class="eyebrow">Evidence-bound target status</p>
+                <h2 class="page-title">Overview</h2>
+                <p class="page-description">Current target checkpoint, safest next action, and every gate still blocking production output.</p>
               </div>
               <div class="status-chip" id="keyChip"><span class="dot"></span><span>Loading key status…</span></div>
             </div>
@@ -65,7 +65,7 @@
             <div class="vehicle-strip" id="vehicleStrip">
               <div class="vehicle-primary">
                 <div class="vehicle-name" id="vehicleName">EPS not identified</div>
-                <div class="vehicle-detail" id="vehicleDetail">Run the low-consequence identity observation pass before recovery.</div>
+                <div class="vehicle-detail" id="vehicleDetail">Run the low-consequence identity observation pass before selecting a target path.</div>
               </div>
               <div class="route-pills" id="routePills"></div>
             </div>
@@ -73,8 +73,8 @@
             <div class="dashboard-grid">
               <div class="stack">
                 <section class="card next-card" id="nextCard">
-                  <p class="next-kicker">Next step</p>
-                  <h3 class="next-title" id="nextTitle">Loading recovery state…</h3>
+                  <p class="next-kicker">Next action</p>
+                  <h3 class="next-title" id="nextTitle">Loading target state…</h3>
                   <p class="next-description" id="nextDescription"></p>
                   <div class="next-meta" id="nextMeta"></div>
                   <div class="action-row" id="nextActions"></div>
@@ -83,8 +83,8 @@
                 <section class="card">
                   <div class="card-header">
                     <div>
-                      <h3 class="card-title">Recovery progress</h3>
-                      <p class="card-subtitle">The normal path stays intentionally short.</p>
+                      <h3 class="card-title" id="workflowCardTitle">Target progress</h3>
+                      <p class="card-subtitle" id="workflowCardSubtitle">Evidence gates remain explicit.</p>
                     </div>
                   </div>
                   <div class="workflow" id="workflow"></div>
@@ -102,11 +102,22 @@
               </div>
 
               <div class="stack">
+                <section class="card target-checkpoint" id="targetCheckpointCard" hidden>
+                  <div class="card-header">
+                    <div>
+                      <h3 class="card-title">Exact F33 checkpoint</h3>
+                      <p class="card-subtitle">Static closure and production architecture.</p>
+                    </div>
+                    <span class="pill blue">8965F3307000</span>
+                  </div>
+                  <div class="checkpoint-list" id="targetCheckpoint"></div>
+                </section>
+
                 <section class="card">
                   <div class="card-header">
                     <div>
                       <h3 class="card-title">Vehicle & route</h3>
-                      <p class="card-subtitle">What the active recovery path is actually talking to.</p>
+                      <p class="card-subtitle">The exact ECU identity and physical diagnostic path.</p>
                     </div>
                   </div>
                   <div class="metric-list" id="vehicleMetrics"></div>
@@ -115,8 +126,8 @@
                 <section class="card">
                   <div class="card-header">
                     <div>
-                      <h3 class="card-title">Recovery evidence</h3>
-                      <p class="card-subtitle">Neutral means not collected; red is reserved for a real failure.</p>
+                      <h3 class="card-title" id="evidenceCardTitle">Target evidence</h3>
+                      <p class="card-subtitle" id="evidenceCardSubtitle">Neutral means not collected; red is reserved for a real failure.</p>
                     </div>
                   </div>
                   <div id="evidenceSummary"></div>

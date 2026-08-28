@@ -10,7 +10,7 @@
   <body class="probe-body">
     <header class="probe-topbar">
       <div class="probe-topbar-inner">
-        <a class="probe-back" href="/#recovery"><span class="probe-back-arrow">←</span><span>Recovery</span></a>
+        <a class="probe-back" href="/#recovery"><span class="probe-back-arrow">←</span><span>Overview</span></a>
         <div class="probe-context" aria-label="Current vehicle context">
           <span class="probe-context-item" id="probeVehicle">Loading vehicle…</span>
           <span class="probe-context-sep"></span>
@@ -21,9 +21,9 @@
 
     <main class="probe-page">
       <section class="probe-heading">
-        <p class="probe-breadcrumb">Recovery · CAN evidence</p>
-        <h1 class="probe-title">Capture CAN evidence</h1>
-        <p class="probe-description">Collect the READY-state SecOC traffic used to cryptographically validate any recovered key candidate.</p>
+        <p class="probe-breadcrumb">Overview · CAN evidence</p>
+        <h1 class="probe-title">Capture target CAN evidence</h1>
+        <p class="probe-description">Retain a full READY-state traffic window. For exact F33 this is target-native B6, freshness, and status evidence—not a CPU-visible key-recovery step.</p>
         <div class="probe-badges"><span class="probe-badge blue">READY</span><span class="probe-badge green">PASSIVE</span></div>
       </section>
 
@@ -33,8 +33,8 @@
             <div class="probe-card-body">
               <p class="probe-card-kicker">Operation</p>
               <h2 class="probe-card-title">60-second CAN capture</h2>
-              <p class="probe-card-copy">Captures every received CAN payload. Known SecOC IDs are annotations only; capture itself remains unfiltered.</p>
-              <ul class="probe-meta-list"><li class="probe-meta-row"><span class="probe-meta-label">Vehicle state</span><span class="probe-meta-value">READY</span></li><li class="probe-meta-row"><span class="probe-meta-label">Bus impact</span><span class="probe-meta-value">Passive receive only</span></li><li class="probe-meta-row"><span class="probe-meta-label">Stops when</span><span class="probe-meta-value">Oracle targets are satisfied</span></li></ul>
+              <p class="probe-card-copy">Captures every received CAN payload without filtering. Exact F33 review follows 0x0B6/PDU44 application bytes, sequence/freshness, and 0x351/0x394/0x4A3 status transitions; known SecOC IDs remain annotations only.</p>
+              <ul class="probe-meta-list"><li class="probe-meta-row"><span class="probe-meta-label">Vehicle state</span><span class="probe-meta-value">READY</span></li><li class="probe-meta-row"><span class="probe-meta-label">Bus impact</span><span class="probe-meta-value">Passive receive only</span></li><li class="probe-meta-row"><span class="probe-meta-label">Stops after</span><span class="probe-meta-value">Full 60-second window</span></li></ul>
               <div class="probe-subtle-divider"></div>
               <div class="probe-actions"><button class="run-btn primary" id="runBtn" type="button">Start CAN capture</button></div>
             </div>
@@ -53,7 +53,7 @@
         <section class="probe-card probe-terminal-card">
           <div class="probe-terminal-head">
             <span class="probe-terminal-title">Live output</span>
-            <span class="probe-terminal-hint">Live capture progress and oracle counts</span>
+            <span class="probe-terminal-hint">Elapsed window and annotated frame counts</span>
           </div>
           <div class="terminal" id="terminal" role="log" aria-live="polite"></div>
 
@@ -85,11 +85,11 @@ const terminal = document.getElementById("terminal");
 
       function progressLine(s) {
         const sec = s.seconds || 0;
-        const ratio = Math.min((s.sync_count || 0) / 50, (s.protected_count || 0) / 30);
+        const ratio = Math.min(sec / 60, 1);
         const filled = Math.max(0, Math.min(20, Math.round(ratio * 20)));
         const bar = "█".repeat(filled) + "░".repeat(20 - filled);
-        return `  [${bar}] ${Math.round(sec)}s   `
-          + `sync ${s.sync_count}/50  protected ${s.protected_count}/30`;
+        return `  [${bar}] ${Math.round(sec)}s / 60s   `
+          + `annotated sync ${s.sync_count || 0} · protected ${s.protected_count || 0}`;
       }
 
       function writeOutcome(s) {
@@ -137,7 +137,7 @@ const terminal = document.getElementById("terminal");
           }
         }
 
-        termWrite("Capturing every CAN payload for up to 60 seconds; prior SecOC IDs are annotations only.");
+        termWrite("Capturing every CAN payload for the full 60-second window; frame-count thresholds do not stop collection early.");
         let lastSec = -1;
         while (true) {
           await sleep(500);

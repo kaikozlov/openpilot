@@ -4,6 +4,7 @@ const state = {
   dashboard: null,
   health: null,
   busy: false,
+  dashboardFingerprint: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -23,8 +24,14 @@ const els = {
   nextMeta: $("nextMeta"),
   nextActions: $("nextActions"),
   workflow: $("workflow"),
+  workflowCardTitle: $("workflowCardTitle"),
+  workflowCardSubtitle: $("workflowCardSubtitle"),
   vehicleMetrics: $("vehicleMetrics"),
   evidenceSummary: $("evidenceSummary"),
+  evidenceCardTitle: $("evidenceCardTitle"),
+  evidenceCardSubtitle: $("evidenceCardSubtitle"),
+  targetCheckpointCard: $("targetCheckpointCard"),
+  targetCheckpoint: $("targetCheckpoint"),
   failureCard: $("failureCard"),
   failureList: $("failureList"),
   systemConnectionChip: $("systemConnectionChip"),
@@ -143,16 +150,22 @@ function routeText(route) {
 }
 
 function renderKey(dashboard) {
+  const exactF33 = dashboard.target?.kind === "camry_f33";
   const installed = Boolean(dashboard.key?.installed);
   const recovered = Boolean(dashboard.recovered_key?.recovered);
   const key = dashboard.key?.key || "";
   const fingerprint = dashboard.recovered_key?.key_sha256_prefix || "";
 
-  els.sidebarKeyDot.className = `dot ${installed ? "green" : recovered ? "blue" : ""}`.trim();
-  els.sidebarKeyText.textContent = installed ? "Key installed" : recovered ? "Key recovered" : "Key: none";
-
-  const label = installed ? "Operational key installed" : recovered ? "Key recovered — not installed" : "No recovered key";
-  els.keyChip.replaceChildren(dot(installed ? "green" : recovered ? "blue" : ""), node("span", "", label));
+  if (exactF33) {
+    els.sidebarKeyDot.className = "dot amber";
+    els.sidebarKeyText.textContent = "Output disabled";
+    els.keyChip.replaceChildren(dot("amber"), node("span", "", "noOutput · zero CAN"));
+  } else {
+    els.sidebarKeyDot.className = `dot ${installed ? "green" : recovered ? "blue" : ""}`.trim();
+    els.sidebarKeyText.textContent = installed ? "Key installed" : recovered ? "Key recovered" : "Key: none";
+    const label = installed ? "Operational key installed" : recovered ? "Key recovered — not installed" : "No recovered key";
+    els.keyChip.replaceChildren(dot(installed ? "green" : recovered ? "blue" : ""), node("span", "", label));
+  }
   els.systemKeyValue.textContent = installed ? formatKey(key) : recovered ? `Recovered key · SHA-256 ${fingerprint}` : "No key installed";
   els.uninstallBtn.disabled = !installed || state.busy;
 }
@@ -160,8 +173,13 @@ function renderKey(dashboard) {
 function renderVehicle(dashboard) {
   const vehicle = dashboard.vehicle || {};
   const route = dashboard.route || {};
+  const exactF33 = dashboard.target?.kind === "camry_f33";
+  const targetStatus = dashboard.target?.status || {};
 
-  if (vehicle.identified) {
+  if (exactF33) {
+    els.vehicleName.textContent = "2026 Camry · EPS 8965F3307000";
+    els.vehicleDetail.textContent = `Exact F33 / ${targetStatus.secondary_software_id || "8A3113303100"} · passive integration checkpoint`;
+  } else if (vehicle.identified) {
     els.vehicleName.textContent = vehicle.app_sw_id || vehicle.spare_part_no || "Toyota EPS";
     const parts = [];
     if (vehicle.spare_part_no && vehicle.spare_part_no !== vehicle.app_sw_id) parts.push(`Spare part ${vehicle.spare_part_no}`);
@@ -169,10 +187,15 @@ function renderVehicle(dashboard) {
     els.vehicleDetail.textContent = parts.length ? parts.join(" · ") : "EPS identity confirmed";
   } else {
     els.vehicleName.textContent = "EPS not identified";
-    els.vehicleDetail.textContent = "Run the read-only identity pass before recovery.";
+    els.vehicleDetail.textContent = "Run the read-only identity pass before selecting a target path.";
   }
 
   els.routePills.replaceChildren();
+  if (exactF33) {
+    els.routePills.appendChild(pill("Exact F33", "blue"));
+    els.routePills.appendChild(pill("B6 · PDU44"));
+    els.routePills.appendChild(pill("Output disabled"));
+  }
   if (route.identified) {
     els.routePills.appendChild(pill(`${route.tx} → ${route.rx}`, "blue"));
     els.routePills.appendChild(pill(`CAN ${route.tx_bus}`));
@@ -180,11 +203,39 @@ function renderVehicle(dashboard) {
     if (route.elm327_param >= 0) els.routePills.appendChild(pill(`ELM ${route.elm327_param}`));
   }
 
-  els.vehicleMetrics.replaceChildren(
+  const metrics = [
     metric("EPS", vehicle.app_sw_id || "Not identified", true),
     metric("Diagnostic route", route.identified ? `${route.tx} → ${route.rx}` : "Not established", true),
     metric("Physical path", routeText(route)),
     metric("Panda", vehicle.panda || "Unknown", true),
+  ];
+  if (exactF33) metrics.splice(1, 0, metric("Platform", "TOYOTA_CAMRY_TSS3", true));
+  els.vehicleMetrics.replaceChildren(...metrics);
+}
+
+function checkpointItem(label, value, tone = "") {
+  const item = node("div", "checkpoint-item");
+  item.appendChild(node("div", "checkpoint-label", label));
+  item.appendChild(node("div", `checkpoint-value${tone ? ` ${tone}` : ""}`, value));
+  return item;
+}
+
+function renderTargetCheckpoint(dashboard) {
+  const exactF33 = dashboard.target?.kind === "camry_f33";
+  els.targetCheckpointCard.hidden = !exactF33;
+  if (!exactF33) return;
+
+  const status = dashboard.target.status || {};
+  const checkpoint = status.checkpoint || {};
+  const architecture = status.production_architecture || {};
+  const blockers = status.remaining_production_gates || [];
+  els.targetCheckpoint.replaceChildren(
+    checkpointItem("Static checkpoint", "B6 receiver + integration closed", "success"),
+    checkpointItem("CPU-visible recovery", checkpoint.cpu_visible_key_recovery || "negative"),
+    checkpointItem("Production architecture", architecture.runtime_model || "RAM-only / reset-to-stock", "primary"),
+    checkpointItem("Persistent flash", architecture.persistent_flash || "fallback-only"),
+    checkpointItem("Live blockers", `${blockers.length} production gates open`, "warning"),
+    checkpointItem("Output", checkpoint.output_detail || "noOutput · zero CAN", "danger"),
   );
 }
 
@@ -193,7 +244,7 @@ function renderNextAction(dashboard) {
   const complete = action.id === "complete";
   els.nextCard.classList.toggle("success", complete);
   els.nextCard.classList.toggle("warning", action.tone === "warning");
-  els.nextTitle.textContent = action.title || "Recovery state unavailable";
+  els.nextTitle.textContent = action.title || "Target state unavailable";
   els.nextDescription.textContent = action.description || "";
 
   els.nextMeta.replaceChildren();
@@ -227,6 +278,11 @@ function renderNextAction(dashboard) {
 
 function renderWorkflow(dashboard) {
   const steps = dashboard.recovery?.steps || [];
+  const exactF33 = dashboard.target?.kind === "camry_f33";
+  els.workflowCardTitle.textContent = exactF33 ? "Six remaining production gates" : "Recovery progress";
+  els.workflowCardSubtitle.textContent = exactF33
+    ? "Static receiver integration is closed; every live or architecture gate remains blocking."
+    : "The generic recovery path stays intentionally explicit.";
   els.workflow.replaceChildren();
 
   steps.forEach((step, index) => {
@@ -264,6 +320,37 @@ function evidenceBlock({ name, statusLabel, tone, detail, href }) {
 }
 
 function renderEvidence(dashboard) {
+  const exactF33 = dashboard.target?.kind === "camry_f33";
+  if (exactF33) {
+    const can = dashboard.can || {};
+    const discovery = can.profile_discovery || {};
+    const b6 = (discovery.streams || []).find((stream) => Number(stream.addr_int) === 0x0B6);
+    const canProgress = Number(can.seconds || 0) > 0 || Number(b6?.samples || 0) > 0;
+    const canReady = Boolean(can.ready || can.status === "complete");
+    const canLabel = can.status === "running" ? "Capturing full window"
+      : canReady ? "Window retained"
+        : can.status === "failed" ? "Failed" : canProgress ? "Incomplete" : "Not captured";
+    els.evidenceCardTitle.textContent = "F33 bring-up evidence";
+    els.evidenceCardSubtitle.textContent = "Target-native B6, freshness, and status evidence; not a key-recovery workflow.";
+    els.evidenceSummary.replaceChildren(
+      evidenceBlock({
+        name: "Live B6 / status capture",
+        statusLabel: canLabel,
+        tone: evidenceTone(can.status, canReady, canProgress),
+        detail: `${Number(b6?.samples || 0)} B6 frames · ${Math.round(Number(can.seconds || 0))}/60s · retain 28-byte application, sequence/freshness, and 0x351/0x394/0x4A3 transitions`,
+        href: "/can-collector.html",
+      }),
+      evidenceBlock({
+        name: "Static integration",
+        statusLabel: "Closed",
+        tone: "green",
+        detail: "Protected B6 receiver geometry and passive opendbc integration are closed. Production output remains SafetyModel.noOutput with zero controller CAN.",
+      }),
+    );
+    return;
+  }
+  els.evidenceCardTitle.textContent = "Recovery evidence";
+  els.evidenceCardSubtitle.textContent = "Neutral means not collected; red is reserved for a real failure.";
   const can = dashboard.can || {};
   const df = dashboard.dataflash || {};
   const canProgress = Number(can.sync_count || 0) + Number(can.protected_count || 0) > 0;
@@ -355,6 +442,7 @@ function renderSystem(dashboard) {
 function renderDashboard(dashboard) {
   state.dashboard = dashboard;
   renderKey(dashboard);
+  renderTargetCheckpoint(dashboard);
   renderVehicle(dashboard);
   renderNextAction(dashboard);
   renderWorkflow(dashboard);
@@ -378,6 +466,9 @@ async function refreshDashboard() {
   try {
     const { response, result } = await fetchJson("/api/dashboard");
     if (!response.ok) throw new Error(result.message || `HTTP ${response.status}`);
+    const fingerprint = JSON.stringify(result);
+    if (fingerprint === state.dashboardFingerprint) return;
+    state.dashboardFingerprint = fingerprint;
     renderDashboard(result);
   } catch (error) {
     els.connectionDot.className = "dot red";

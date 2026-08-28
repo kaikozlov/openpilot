@@ -20,12 +20,12 @@
   --red: #cf222e;
   --red-soft: #fff0f1;
   --gray-soft: #eef0f3;
-  --shadow: 0 1px 2px rgb(15 23 42 / 0.04), 0 8px 24px rgb(15 23 42 / 0.04);
-  --radius-sm: 10px;
-  --radius: 16px;
-  --radius-lg: 22px;
-  --content-max: 1180px;
-  --topbar-h: 56px;
+  --shadow: 0 1px 2px rgb(15 23 42 / 0.04), 0 5px 16px rgb(15 23 42 / 0.035);
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 18px;
+  --content-max: 1240px;
+  --topbar-h: 54px;
 }
 
 * {
@@ -85,10 +85,10 @@ a:focus-visible {
   width: min(100%, var(--content-max));
   height: 100%;
   margin: 0 auto;
-  padding: 0 30px;
+  padding: 0 24px;
   display: flex;
   align-items: center;
-  gap: 20px;
+  gap: 16px;
 }
 
 .brand {
@@ -183,7 +183,7 @@ a:focus-visible {
 .page {
   width: min(100%, var(--content-max));
   margin: 0 auto;
-  padding: 42px 38px 64px;
+  padding: 28px 30px 52px;
 }
 
 .view[hidden] {
@@ -191,11 +191,11 @@ a:focus-visible {
 }
 
 .page-heading {
-  margin-bottom: 28px;
+  margin-bottom: 18px;
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
-  gap: 20px;
+  gap: 18px;
 }
 
 .eyebrow {
@@ -209,18 +209,18 @@ a:focus-visible {
 
 .page-title {
   margin: 0;
-  font-size: clamp(30px, 3vw, 42px);
+  font-size: clamp(28px, 2.5vw, 36px);
   line-height: 1.05;
   letter-spacing: -0.035em;
   font-weight: 700;
 }
 
 .page-description {
-  max-width: 650px;
-  margin: 10px 0 0;
+  max-width: 720px;
+  margin: 7px 0 0;
   color: var(--text-secondary);
-  font-size: 15px;
-  line-height: 1.5;
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 .status-chip {
@@ -252,15 +252,15 @@ a:focus-visible {
 .dot.red { background: var(--red); }
 
 .vehicle-strip {
-  margin-bottom: 18px;
-  padding: 15px 17px;
+  margin-bottom: 14px;
+  padding: 12px 15px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: var(--shadow);
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 16px;
 }
 
 .vehicle-primary {
@@ -309,14 +309,14 @@ a:focus-visible {
 
 .dashboard-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.75fr);
+  grid-template-columns: minmax(0, 1.5fr) minmax(300px, 0.82fr);
   align-items: start;
-  gap: 18px;
+  gap: 14px;
 }
 
 .stack {
   display: grid;
-  gap: 18px;
+  gap: 14px;
 }
 
 .card {
@@ -333,7 +333,7 @@ a:focus-visible {
 .next-card {
   position: relative;
   overflow: hidden;
-  padding: 24px;
+  padding: 20px;
   border-color: #cbdcf7;
   background: linear-gradient(145deg, #f8fbff 0%, #ffffff 72%);
 }
@@ -349,9 +349,9 @@ a:focus-visible {
 }
 
 .next-kicker {
-  margin: 0 0 12px;
+  margin: 0 0 8px;
   color: var(--blue);
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.09em;
   text-transform: uppercase;
@@ -366,18 +366,18 @@ a:focus-visible {
 }
 
 .next-title {
-  max-width: 650px;
+  max-width: 700px;
   margin: 0;
-  font-size: clamp(22px, 2.2vw, 30px);
+  font-size: clamp(21px, 2vw, 27px);
   line-height: 1.12;
   letter-spacing: -0.025em;
 }
 
 .next-description {
-  max-width: 680px;
-  margin: 10px 0 20px;
+  max-width: 740px;
+  margin: 8px 0 14px;
   color: var(--text-secondary);
-  line-height: 1.55;
+  line-height: 1.5;
 }
 
 .next-meta {
@@ -440,43 +440,43 @@ a:focus-visible {
 }
 
 .card-header {
-  padding: 18px 20px 13px;
+  padding: 14px 16px 11px;
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: 12px;
 }
 
 .card-title {
   margin: 0;
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 700;
 }
 
 .card-subtitle {
-  margin: 4px 0 0;
+  margin: 3px 0 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.4;
 }
 
 .workflow {
-  padding: 8px 20px 12px;
+  padding: 5px 16px 8px;
 }
 
 .workflow-step {
   position: relative;
-  min-height: 66px;
-  padding: 14px 0 14px 38px;
+  min-height: 58px;
+  padding: 11px 0 11px 34px;
 }
 
 .workflow-step:not(:last-child)::after {
   content: "";
   position: absolute;
-  left: 13px;
-  top: 38px;
-  bottom: -13px;
+  left: 12px;
+  top: 34px;
+  bottom: -11px;
   width: 1px;
   background: var(--border-strong);
 }
@@ -484,16 +484,16 @@ a:focus-visible {
 .step-indicator {
   position: absolute;
   left: 0;
-  top: 14px;
-  width: 27px;
-  height: 27px;
+  top: 10px;
+  width: 25px;
+  height: 25px;
   border: 1.5px solid var(--border-strong);
   border-radius: 50%;
   background: var(--surface);
   color: var(--text-tertiary);
   display: grid;
   place-items: center;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 800;
 }
 
@@ -533,13 +533,13 @@ a:focus-visible {
 }
 
 .metric-row {
-  min-height: 52px;
-  padding: 12px 18px;
+  min-height: 46px;
+  padding: 10px 16px;
   border-top: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 14px;
 }
 
 .metric-row:first-child {
@@ -565,7 +565,7 @@ a:focus-visible {
 }
 
 .evidence-status {
-  padding: 18px 20px 14px;
+  padding: 14px 16px 12px;
 }
 
 .evidence-status + .evidence-status {
@@ -595,6 +595,40 @@ a:focus-visible {
   font-size: 12px;
   line-height: 1.45;
 }
+
+.checkpoint-list {
+  display: grid;
+}
+
+.checkpoint-item {
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: minmax(100px, 0.8fr) minmax(0, 1.2fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.checkpoint-item:first-child {
+  border-top: 0;
+}
+
+.checkpoint-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.checkpoint-value {
+  text-align: right;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.checkpoint-value.success { color: var(--green); }
+.checkpoint-value.primary { color: var(--blue); }
+.checkpoint-value.warning { color: var(--amber); }
+.checkpoint-value.danger { color: var(--red); }
 
 .failure-card {
   border-color: #f3c8cc;
@@ -1032,6 +1066,15 @@ a:focus-visible {
   .tool-grid,
   .system-grid {
     grid-template-columns: 1fr;
+  }
+
+  .checkpoint-item {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+
+  .checkpoint-value {
+    text-align: left;
   }
 
   .tool-card {

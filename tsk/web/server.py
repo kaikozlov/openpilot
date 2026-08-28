@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote, urlparse
 
 from tsk.lib.collect_can import collect as collect_can, count_oracle_frames, oracle_path as can_oracle_path, PROTECTED_TARGET, SYNC_TARGET
+from tsk.lib.camry_f33 import CAMRY_F33_PRIMARY_SW, public_camry_f33_status
 from tsk.lib.secoc_discovery import load_oracle_discovery
 from tsk.lib.secoc_profile import CURRENT_OPENPILOT_LATERAL_PROTECTED_ADDRS, CURRENT_OPENPILOT_LONGITUDINAL_PROTECTED_ADDRS
 from tsk.lib.dump_dataflash import (
@@ -707,6 +708,15 @@ def dashboard_payload() -> dict:
   programming_blocked = programming_status in ("failed", "rejected", "blocked", "unreachable")
   dataflash_ready = bool(dataflash.get("ready") or dataflash.get("status") == "partial")
 
+  exact_f33 = app_sw == CAMRY_F33_PRIMARY_SW
+  # The full evidence checkpoint carries tuple-keyed tables that are not JSON-safe;
+  # expose only the dashboard-relevant projection.
+  f33_status = (
+    {key: value for key, value in public_camry_f33_status().items()
+     if key in ("secondary_software_id", "checkpoint", "production_architecture",
+                "remaining_production_gates", "production_output_allowed")}
+    if exact_f33 else None
+  )
   route = {
     "tx": identity.get("eps_tx", ""),
     "rx": identity.get("eps_rx", ""),
@@ -856,6 +866,22 @@ def dashboard_payload() -> dict:
       "href": "/target-profile.html", "label": "Review target profile", "vehicle_state": "Any", "tone": "warning",
     }
 
+  if exact_f33:
+    stage = "f33_stock_b6_capture"
+    next_action = {
+      "id": stage,
+      "title": "Capture stock B6 off → active → off",
+      "description": (
+        "Use full 60-second windows to retain exact-F33 0x0B6/PDU44 traffic across stock LTA transitions. " +
+        "Close the 28-byte application template, sequence restart, freshness, and 0x351/0x394/0x4A3 status evidence; " +
+        "this is lateral bring-up evidence, not CPU-visible key recovery."
+      ),
+      "href": "/can-collector.html",
+      "label": "Capture F33 CAN evidence",
+      "vehicle_state": "READY · relay pass-through",
+      "tone": "primary",
+    }
+
   def step_state(done: bool, step_id: str) -> str:
     if done:
       return "complete"
@@ -863,41 +889,63 @@ def dashboard_payload() -> dict:
 
   profile_streams = can.get("profile_discovery", {}).get("streams", [])
   included_streams = [row for row in profile_streams if row.get("scan_included")]
-  steps = [
-    {"id": "identify", "title": "Identify EPS", "state": step_state(identity_ready, "identify"),
-     "detail": app_sw or "Read F181 and diagnostic route"},
-    {"id": "capture_can", "title": "Discover SecOC surface", "state": step_state(can_ready, "capture_can"),
-     "detail": (f"{can.get('sync_count', 0)} sync · {len(included_streams)} candidate stream(s)" if can_ready else
-                f"{can.get('sync_count', 0)} sync · capture incomplete")},
-    {"id": "programming", "title": "Confirm recovery route", "state": step_state(key_recovered or programming_ready, "programming"),
-     "detail": ("Key already recovered" if key_recovered else "Known transfer path" if known_transfer else
-                "Bootloader reappeared" if programming_status == "entered" else "Required if DataFlash recovery is needed")},
-    {"id": "ram_geometry", "title": "Verify boot RAM-exec geometry", "state": step_state(key_recovered or ram_geometry_ready, "ram_geometry"),
-     "detail": ("Key already recovered" if key_recovered else
-                f"{ram_geometry['geometry']['load_addr']} / {ram_geometry['geometry']['size']} evidenced for F181" if ram_geometry_ready else
-                "Authenticated RequestDownload/0x10F0/callback geometry not established")},
-    {"id": "bootstrap_fixture", "title": "Verify exact bootstrap fixture",
-     "state": step_state(key_recovered or dataflash_fixture_ready or legacy_ram_fixture_ready, "bootstrap_fixture"),
-     "detail": ("Key already recovered" if key_recovered else "DataFlash fixture target-evidenced" if dataflash_fixture_ready else
-                "RAM extractor fixture target-evidenced" if legacy_ram_fixture_ready else
-                "Bootstrap family known; exact ciphertext still required")},
-    {"id": "dataflash", "title": "Recover key material", "state": step_state(key_recovered or dataflash_ready, "dataflash"),
-     "detail": ("Key material recovered" if key_recovered else "Complete DataFlash dump" if dataflash.get("ready") else
-                "Usable partial dump" if dataflash.get("status") == "partial" else
-                "Blocked on boot RAM-exec geometry" if not ram_geometry_ready else
-                "Blocked on exact bootstrap fixture" if not (dataflash_fixture_ready or legacy_ram_fixture_ready) else "Waiting")},
-    {"id": "verify", "title": "Cryptographically recover key", "state": step_state(key_recovered, "verify"),
-     "detail": (f"Recovered key {recovered.get('key_sha256_prefix', '')}" if key_recovered else "No operational install at this step")},
-    {"id": "integration", "title": "Review target integration", "state": step_state(integration_ready, "integration"),
-     "detail": "Reviewed target-specific DBC/safety/control profile" if integration_ready else "Target-specific fields still required"},
-    {"id": "implementation", "title": "Audit opendbc implementation", "state": step_state(code_ready, "implementation"),
-     "detail": "Exact target/F181 and reviewed parameters agree with source" if code_ready else "No source-verified target implementation yet"},
-    {"id": "stationary", "title": "Stationary verification", "state": step_state(stationary_ready, "stationary"),
-     "detail": "Profile-bound acceptance passed" if stationary_ready else "Not yet proven on target"},
-    {"id": "install", "title": "Install operational key", "state": step_state(installed and operational_profile_ready, "install"),
-     "detail": "Installed after all gates" if installed and operational_profile_ready else
-               "Existing unverified install" if installed else "Blocked until all gates pass"},
-  ]
+  if exact_f33:
+    assert f33_status is not None
+    gate_titles = (
+      "Stock B6 capture",
+      "Relay authority",
+      "ICU-S generation",
+      "Override and current policy",
+      "Live status transitions",
+      "Volatile runtime pivot",
+    )
+    steps = [
+      {
+        "id": f"f33_gate_{index + 1}",
+        "title": title,
+        "state": "current" if index == 0 else "pending",
+        "detail": gate,
+      }
+      for index, (title, gate) in enumerate(zip(
+        gate_titles, f33_status["remaining_production_gates"], strict=True,
+      ))
+    ]
+  else:
+    steps = [
+      {"id": "identify", "title": "Identify EPS", "state": step_state(identity_ready, "identify"),
+       "detail": app_sw or "Read F181 and diagnostic route"},
+      {"id": "capture_can", "title": "Discover SecOC surface", "state": step_state(can_ready, "capture_can"),
+       "detail": (f"{can.get('sync_count', 0)} sync · {len(included_streams)} candidate stream(s)" if can_ready else
+                  f"{can.get('sync_count', 0)} sync · capture incomplete")},
+      {"id": "programming", "title": "Confirm recovery route", "state": step_state(key_recovered or programming_ready, "programming"),
+       "detail": ("Key already recovered" if key_recovered else "Known transfer path" if known_transfer else
+                  "Bootloader reappeared" if programming_status == "entered" else "Required if DataFlash recovery is needed")},
+      {"id": "ram_geometry", "title": "Verify boot RAM-exec geometry", "state": step_state(key_recovered or ram_geometry_ready, "ram_geometry"),
+       "detail": ("Key already recovered" if key_recovered else
+                  f"{ram_geometry['geometry']['load_addr']} / {ram_geometry['geometry']['size']} evidenced for F181" if ram_geometry_ready else
+                  "Authenticated RequestDownload/0x10F0/callback geometry not established")},
+      {"id": "bootstrap_fixture", "title": "Verify exact bootstrap fixture",
+       "state": step_state(key_recovered or dataflash_fixture_ready or legacy_ram_fixture_ready, "bootstrap_fixture"),
+       "detail": ("Key already recovered" if key_recovered else "DataFlash fixture target-evidenced" if dataflash_fixture_ready else
+                  "RAM extractor fixture target-evidenced" if legacy_ram_fixture_ready else
+                  "Bootstrap family known; exact ciphertext still required")},
+      {"id": "dataflash", "title": "Recover key material", "state": step_state(key_recovered or dataflash_ready, "dataflash"),
+       "detail": ("Key material recovered" if key_recovered else "Complete DataFlash dump" if dataflash.get("ready") else
+                  "Usable partial dump" if dataflash.get("status") == "partial" else
+                  "Blocked on boot RAM-exec geometry" if not ram_geometry_ready else
+                  "Blocked on exact bootstrap fixture" if not (dataflash_fixture_ready or legacy_ram_fixture_ready) else "Waiting")},
+      {"id": "verify", "title": "Cryptographically recover key", "state": step_state(key_recovered, "verify"),
+       "detail": (f"Recovered key {recovered.get('key_sha256_prefix', '')}" if key_recovered else "No operational install at this step")},
+      {"id": "integration", "title": "Review target integration", "state": step_state(integration_ready, "integration"),
+       "detail": "Reviewed target-specific DBC/safety/control profile" if integration_ready else "Target-specific fields still required"},
+      {"id": "implementation", "title": "Audit opendbc implementation", "state": step_state(code_ready, "implementation"),
+       "detail": "Exact target/F181 and reviewed parameters agree with source" if code_ready else "No source-verified target implementation yet"},
+      {"id": "stationary", "title": "Stationary verification", "state": step_state(stationary_ready, "stationary"),
+       "detail": "Profile-bound acceptance passed" if stationary_ready else "Not yet proven on target"},
+      {"id": "install", "title": "Install operational key", "state": step_state(installed and operational_profile_ready, "install"),
+       "detail": "Installed after all gates" if installed and operational_profile_ready else
+                 "Existing unverified install" if installed else "Blocked until all gates pass"},
+    ]
 
   failures = []
   for name, snapshot in (("CAN capture", can), ("DataFlash dump", dataflash), ("Programming handoff", programming)):
@@ -905,6 +953,12 @@ def dashboard_payload() -> dict:
       failures.append({"name": name, "status": snapshot.get("status"), "message": snapshot.get("message", "")})
 
   return {
+    "target": {
+      "kind": "camry_f33" if exact_f33 else "generic",
+      "exact": exact_f33,
+      "label": "2026 Camry / F33" if exact_f33 else (app_sw or "Unidentified Toyota EPS"),
+      "status": f33_status,
+    },
     "key": key,
     "recovered_key": recovered,
     "target_profile": profile,

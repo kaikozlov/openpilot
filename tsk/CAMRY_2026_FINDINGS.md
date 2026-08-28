@@ -127,10 +127,13 @@ The exact F33 generated-COM tables put the first five normal Tx PDUs at
 `0x030 / 0x351 / 0x394 / 0x4A3 / 0x4C8`. Target packers are `0x4CED0` for `0x351`,
 `0x4CE08` for `0x394`, and `0x4C000 -> 0x4C14E -> 0x4C7AA` for `0x4A3`.
 
-The corrected exact-F33 direct/fixed-GP torque-source census has **five** users, including
-telemetry producer `0x4C000`, while the bounded cooperative `C8xxx..D1xxx` control cone has
-zero such direct references. `0x4A3 B6:B7` must **not** be labeled DID `0x1151` Q-current:
-its source is `GP-0x50E8`; DID `0x1151` independently reads `GP-0x50F2`.
+The current exact-F33 canonical direct-reference census separates three distinct feedback
+sources. Driver torque has **9 direct references (7 reads + 2 writes)**. DID `0x1151`
+motor Q-current has **6 direct references (4 reads + 2 writes)**. The alternate-current
+source used by `0x4A3 B6:B7` has **4 direct references**. That `0x4A3` source remains
+`GP-0x50E8` and must **not** be labeled DID `0x1151`, which independently uses
+`GP-0x50F2`. The bounded cooperative `C8xxx..D1xxx` control cone still has zero direct
+driver-torque references.
 
 ### Feedback/status boundaries
 
@@ -187,12 +190,13 @@ Application UDS has no SID `0x3D` arbitrary WriteMemoryByAddress path. A 312-sit
 call audit and the recovered fixed-DMAC descriptors have not found a reversible
 application-context PC/callback pivot into the XCP-writable tail.
 
-Current production ranking is therefore:
+Current production ranking therefore makes the volatile architecture first-class:
 
-1. application XCP `DOWNLOAD` + a future concrete volatile callback/control-transfer pivot;
-2. RID `0x100F` as a useful command-5 permission/hardware oracle, not a signer API;
+1. **preferred production path:** RAM-only/reset-to-stock application runtime using XCP
+   `DOWNLOAD` plus a future concrete reversible volatile callback/control-transfer pivot;
+2. RID `0x100F` as a useful command-5 permission/hardware oracle, **not** a signer API;
 3. disruptive PROGRAMMING loader only for research/acquisition, not production startup;
-4. persistent flash hook only as fallback.
+4. persistent flash hook **fallback-only**, not the preferred production architecture.
 
 ## openpilot state
 

@@ -4,6 +4,7 @@ from tsk.lib.camry_f33 import (
   CAMRY_F33_APP_F181,
   CAMRY_F33_APPLICATION_RUNTIME,
   CAMRY_F33_B6,
+  CAMRY_F33_CHECKPOINT,
   CAMRY_F33_CODEFLASH,
   CAMRY_F33_CRUISE,
   CAMRY_F33_EPS_394_STATE_CANDIDATES,
@@ -11,6 +12,7 @@ from tsk.lib.camry_f33 import (
   CAMRY_F33_MODULES,
   CAMRY_F33_OPENDBC,
   CAMRY_F33_RAM_RECOVERY,
+  CAMRY_F33_PRODUCTION_ARCHITECTURE,
   CAMRY_F33_READY,
   CAMRY_F33_REMAINING_PRODUCTION_GATES,
   CAMRY_F33_TX_STATUS,
@@ -62,7 +64,11 @@ class TestCamryF33Evidence(unittest.TestCase):
     self.assertEqual(CAMRY_F33_TX_STATUS["packers"][0x351], 0x4CED0)
     self.assertEqual(CAMRY_F33_TX_STATUS["packers"][0x394], 0x4CE08)
     self.assertEqual(CAMRY_F33_TX_STATUS["packers"][0x4A3], (0x4C000, 0x4C14E, 0x4C7AA))
-    self.assertEqual(CAMRY_F33_TX_STATUS["torque_source_direct_fixed_gp_users"], 5)
+    self.assertEqual(CAMRY_F33_TX_STATUS["driver_torque_direct_references"],
+                     {"total": 9, "reads": 7, "writes": 2})
+    self.assertEqual(CAMRY_F33_TX_STATUS["motor_q_current_direct_references"],
+                     {"total": 6, "reads": 4, "writes": 2})
+    self.assertEqual(CAMRY_F33_TX_STATUS["can_4a3_alternate_current_source_direct_references"], 4)
     self.assertFalse(CAMRY_F33_TX_STATUS["can_4a3_b6_b7_is_did_1151_q_current"])
     self.assertNotEqual(CAMRY_F33_TX_STATUS["can_4a3_b6_b7_source_gp_offset"],
                         CAMRY_F33_TX_STATUS["did_1151_q_current_source_gp_offset"])
@@ -83,6 +89,12 @@ class TestCamryF33Evidence(unittest.TestCase):
     self.assertTrue(CAMRY_F33_APPLICATION_RUNTIME["rid_100f_reaches_command5"])
     self.assertFalse(CAMRY_F33_APPLICATION_RUNTIME["rid_100f_general_secoc_signer"])
     self.assertEqual(CAMRY_F33_APPLICATION_RUNTIME["application_control_transfer_into_tail"], "not-recovered")
+    self.assertEqual(CAMRY_F33_CHECKPOINT["cpu_visible_key_recovery"], "negative")
+    self.assertEqual(CAMRY_F33_CHECKPOINT["static_receiver_integration"], "closed")
+    self.assertEqual(CAMRY_F33_PRODUCTION_ARCHITECTURE["runtime_model"], "RAM-only / reset-to-stock")
+    self.assertEqual(CAMRY_F33_PRODUCTION_ARCHITECTURE["persistent_flash"], "fallback-only")
+    self.assertFalse(CAMRY_F33_PRODUCTION_ARCHITECTURE["ready"])
+    self.assertEqual([row["rank"] for row in CAMRY_F33_PRODUCTION_ARCHITECTURE["ranking"]], [1, 2, 3, 4])
 
   def test_passive_opendbc_and_production_boundary(self):
     self.assertEqual(CAMRY_F33_OPENDBC["opendbc_commit"], "0d5773bd393bbf3d4109728171d2390b60fcde16")

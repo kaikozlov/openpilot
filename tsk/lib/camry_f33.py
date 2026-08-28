@@ -159,7 +159,9 @@ CAMRY_F33_TX_STATUS = {
     0x394: 0x4CE08,
     0x4A3: (0x4C000, 0x4C14E, 0x4C7AA),
   },
-  "torque_source_direct_fixed_gp_users": 5,
+  "driver_torque_direct_references": {"total": 9, "reads": 7, "writes": 2},
+  "motor_q_current_direct_references": {"total": 6, "reads": 4, "writes": 2},
+  "can_4a3_alternate_current_source_direct_references": 4,
   "torque_telemetry_producer": 0x4C000,
   "cooperative_control_cone_direct_torque_refs": 0,
   "can_4a3_b6_b7_source_gp_offset": -0x50E8,
@@ -212,6 +214,46 @@ CAMRY_F33_APPLICATION_RUNTIME = {
   "fixed_dmac_endpoints_in_xcp_window": 0,
 }
 
+CAMRY_F33_CHECKPOINT = {
+  "target": "2026 Camry / F33",
+  "state": "passive-read-only",
+  "static_receiver_integration": "closed",
+  "cpu_visible_key_recovery": "negative",
+  "principal_blocker": "live and volatile-runtime architecture gates",
+  "output": "disabled",
+  "output_detail": "SafetyModel.noOutput; controller emits zero CAN",
+}
+
+CAMRY_F33_PRODUCTION_ARCHITECTURE = {
+  "status": "preferred-volatile-application-runtime",
+  "ready": False,
+  "runtime_model": "RAM-only / reset-to-stock",
+  "preferred_path": "application XCP DOWNLOAD plus a reversible volatile control-transfer pivot",
+  "persistent_flash": "fallback-only",
+  "ranking": (
+    {
+      "rank": 1,
+      "path": "application XCP DOWNLOAD plus a reversible volatile control-transfer pivot",
+      "status": "preferred-blocked",
+    },
+    {
+      "rank": 2,
+      "path": "RID 0x100F command-5 permission and hardware oracle",
+      "status": "oracle-only-not-general-signer",
+    },
+    {
+      "rank": 3,
+      "path": "PROGRAMMING loader",
+      "status": "research-and-acquisition-only",
+    },
+    {
+      "rank": 4,
+      "path": "persistent flash hook",
+      "status": "fallback-only",
+    },
+  ),
+}
+
 CAMRY_F33_OPENDBC = {
   "passive_port_baseline_root_commit": "d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04",
   "opendbc_commit": "0d5773bd393bbf3d4109728171d2390b60fcde16",
@@ -249,6 +291,8 @@ def public_camry_f33_status() -> dict:
     "ram_recovery": CAMRY_F33_RAM_RECOVERY,
     "eps_394_state_candidates": CAMRY_F33_EPS_394_STATE_CANDIDATES,
     "application_runtime": CAMRY_F33_APPLICATION_RUNTIME,
+    "checkpoint": CAMRY_F33_CHECKPOINT,
+    "production_architecture": CAMRY_F33_PRODUCTION_ARCHITECTURE,
     "opendbc": CAMRY_F33_OPENDBC,
     "production_output_allowed": False,
     "remaining_production_gates": CAMRY_F33_REMAINING_PRODUCTION_GATES,

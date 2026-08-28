@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from tsk.lib.bootstrap_profile import AUTORESET_DATAFLASH_FIXTURE_SHA256, DATAFLASH_FIXTURE_SHA256
+from tsk.lib.camry_f33 import CAMRY_F33_REMAINING_PRODUCTION_GATES
 from tsk.web.server import (
   TSKWebHandler,
   TSKWebServer,
@@ -38,6 +39,8 @@ class TestServer(unittest.TestCase):
     self.assertIn("/api/evidence-bundle", links)
     self.assertIsNotNone(resolve_asset("/css/app.css"))
     self.assertIsNotNone(resolve_asset("/js/dashboard.js"))
+    self.assertIn('data-view="recovery"', index)
+    self.assertIn("Overview", index)
     self.assertIsNotNone(resolve_asset("/js/api.js"))
     self.assertIn('src="/js/dashboard.js"', index)
 
@@ -133,6 +136,29 @@ class TestServer(unittest.TestCase):
 
     # A pre-existing key from an older build is not evidence that today's gates passed.
     self.assertNotEqual(projected(dumped, installed=True)["recovery"]["stage"], "complete")
+
+    exact_f33 = {**base, "identity": {
+      **mapped["identity"],
+      "identity": [{"name": "app_sw_id", "hex": "31", "ascii": "8965F3307000"}],
+    }}
+    f33_projection = projected(exact_f33)
+    self.assertEqual(f33_projection["target"]["kind"], "camry_f33")
+    self.assertEqual(f33_projection["recovery"]["stage"], "f33_stock_b6_capture")
+    self.assertEqual(f33_projection["recovery"]["next_action"]["href"], "/can-collector.html")
+    self.assertIn("lateral bring-up evidence", f33_projection["recovery"]["next_action"]["description"])
+    self.assertNotIn("DataFlash", f33_projection["recovery"]["next_action"]["description"])
+    self.assertEqual(len(f33_projection["recovery"]["steps"]), 6)
+    self.assertEqual(
+      tuple(step["detail"] for step in f33_projection["recovery"]["steps"]),
+      CAMRY_F33_REMAINING_PRODUCTION_GATES,
+    )
+    self.assertFalse(f33_projection["target"]["status"]["production_output_allowed"])
+
+  def test_can_collector_copy_states_full_window_stop(self):
+    html = resolve_asset("/can-collector.html").read_text(encoding="utf-8")
+    self.assertIn("Full 60-second window", html)
+    self.assertNotIn("Oracle targets are satisfied", html)
+    self.assertIn("full 60-second window", html)
 
   def test_probe_pages_share_shell_and_active_pages_require_explicit_run(self):
     probe_pages = (
