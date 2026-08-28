@@ -24,15 +24,17 @@ SENDCAN_WARMUP = 0.15
 
 
 def pandad_running() -> bool:
-  try:
-    check_output(["pidof", "pandad"])
-    return True
-  except CalledProcessError as e:
-    if e.returncode == 1:
-      return False
-    raise
-  except FileNotFoundError as e:
-    raise SystemExit("cannot verify Panda ownership: pidof unavailable") from e
+  for command in (["pidof", "pandad"], ["pgrep", "-x", "pandad"]):
+    try:
+      check_output(command)
+      return True
+    except CalledProcessError as e:
+      if e.returncode == 1:
+        return False
+      raise
+    except FileNotFoundError:
+      continue
+  raise SystemExit("cannot verify Panda ownership: neither pidof nor pgrep is available")
 
 
 def managed_diagnostic_ready(panda_states: Any, profile: Profile) -> bool:
@@ -43,6 +45,16 @@ def managed_diagnostic_ready(panda_states: Any, profile: Profile) -> bool:
   return (state.safetyModel == CarParams.SafetyModel.elm327 and
           state.safetyParam == ELM327_PARAM_NORMAL and
           not state.controlsAllowed)
+
+
+def _wait_panda_states(messaging_module, timeout: float = MANAGED_READY_TIMEOUT):
+  sm = messaging_module.SubMaster(["pandaStates"])
+  deadline = time.monotonic() + timeout
+  states = sm["pandaStates"]
+  while not len(states) and time.monotonic() < deadline:
+    sm.update(100)
+    states = sm["pandaStates"]
+  return sm, states
 
 
 def _managed_refusal(panda_states: Any, profile: Profile) -> str:
@@ -74,13 +86,7 @@ class ManagedPandaAdapter:
     self.can_serializer = can_serializer
     self.can_sock = messaging_module.sub_sock("can", conflate=False, timeout=100)
     self.sendcan = messaging_module.pub_sock("sendcan")
-    self.sm = messaging_module.SubMaster(["pandaStates"])
-
-    deadline = time.monotonic() + MANAGED_READY_TIMEOUT
-    states = self.sm["pandaStates"]
-    while not len(states) and time.monotonic() < deadline:
-      self.sm.update(100)
-      states = self.sm["pandaStates"]
+    self.sm, _ = _wait_panda_states(messaging_module)
     self._assert_ready()
 
     # ZMQ slow-joiner guard; openpilot's own VIN/FW path relies on the same
@@ -108,6 +114,28 @@ class ManagedPandaAdapter:
   def can_clear(self, flags: int) -> None:
     del flags
     self.messaging.drain_sock(self.can_sock, wait_for_one=False)
+
+
+def status(profile: Profile, *, messaging_module=None) -> dict[str, Any]:
+  """Describe the transport a live command could use without transmitting anything."""
+  if not pandad_running():
+    return {
+      "pandad_running": False,
+      "mode": "direct-panda",
+      "ready": True,
+      "detail": "pandad stopped; next live command will claim Panda directly (hardware not probed)",
+    }
+
+  if messaging_module is None:
+    import openpilot.cereal.messaging as messaging_module
+  _, states = _wait_panda_states(messaging_module)
+  ready = managed_diagnostic_ready(states, profile)
+  return {
+    "pandad_running": True,
+    "mode": "managed-sendcan" if ready else "blocked",
+    "ready": ready,
+    "detail": "pandad already owns Panda in validated diagnostic-safe ELM327/param1 state" if ready else _managed_refusal(states, profile),
+  }
 
 
 def connect(profile: Profile):

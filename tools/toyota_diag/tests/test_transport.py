@@ -115,6 +115,23 @@ class TestTransport(unittest.TestCase):
       self.assertIs(transport.connect(self.profile), sentinel)
     managed.assert_called_once_with(self.profile)
 
+  def test_status_is_nontransmitting_and_explains_direct_managed_and_blocked(self):
+    with mock.patch("tools.toyota_diag.transport.pandad_running", return_value=False):
+      direct = transport.status(self.profile)
+    self.assertEqual((direct["mode"], direct["ready"]), ("direct-panda", True))
+
+    managed_messaging = _FakeMessaging([self.state()])
+    with mock.patch("tools.toyota_diag.transport.pandad_running", return_value=True):
+      managed = transport.status(self.profile, messaging_module=managed_messaging)
+    self.assertEqual((managed["mode"], managed["ready"]), ("managed-sendcan", True))
+    self.assertEqual(managed_messaging.pub.sent, [])
+
+    blocked_messaging = _FakeMessaging([self.state(safety=CarParams.SafetyModel.noOutput)])
+    with mock.patch("tools.toyota_diag.transport.pandad_running", return_value=True):
+      blocked = transport.status(self.profile, messaging_module=blocked_messaging)
+    self.assertEqual((blocked["mode"], blocked["ready"]), ("blocked", False))
+    self.assertIn("stop openpilot/manager", blocked["detail"])
+
 
 if __name__ == "__main__":
   unittest.main()

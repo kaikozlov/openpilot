@@ -153,6 +153,19 @@ def cmd_active_test_plan(args, profile: Profile) -> int:
   return 0
 
 
+def cmd_transport_status(args, profile: Profile) -> int:
+  live = _live_transport()
+  state = live.status(profile)
+  if args.json:
+    print(json.dumps(state, sort_keys=True))
+  else:
+    print(f"pandad: {'running' if state['pandad_running'] else 'stopped'}")
+    print(f"mode:   {state['mode']}")
+    print(f"ready:  {'yes' if state['ready'] else 'no'}")
+    print(f"detail: {state['detail']}")
+  return 0 if state["ready"] else 1
+
+
 # Live -----------------------------------------------------------------------
 def _scan_set(profile: Profile, refs: list[str] | None) -> list[tuple[int, str]]:
   if not refs:
@@ -387,6 +400,12 @@ def build_parser() -> argparse.ArgumentParser:
     help="derived registry JSON (default: bundled Camry F33 profile)",
   )
   commands = parser.add_subparsers(dest="command", required=True)
+
+  transport_parser = commands.add_parser("transport")
+  transport_sub = transport_parser.add_subparsers(required=True)
+  p = transport_sub.add_parser("status")
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_transport_status)
 
   ecu = commands.add_parser("ecu")
   ecu_sub = ecu.add_subparsers(required=True)

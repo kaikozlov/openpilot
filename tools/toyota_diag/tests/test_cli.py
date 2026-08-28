@@ -16,6 +16,13 @@ def run_cli(argv):
 
 
 class TestOfflineCli(unittest.TestCase):
+  def test_transport_status_is_machine_readable(self):
+    state = {"pandad_running": True, "mode": "managed-sendcan", "ready": True, "detail": "ready"}
+    with mock.patch("tools.toyota_diag.transport.status", return_value=state):
+      rc, output = run_cli(["transport", "status", "--json"])
+    self.assertEqual(rc, 0)
+    self.assertEqual(__import__("json").loads(output), state)
+
   def test_offline_catalog_and_plans_do_not_import_panda(self):
     with mock.patch.dict(sys.modules, {"panda": None}):
       cases = [
