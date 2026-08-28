@@ -11,6 +11,7 @@ from tsk.lib.camry_f33 import CAMRY_F33_REMAINING_PRODUCTION_GATES
 from tsk.web.server import (
   JOBS,
   TSKWebHandler,
+  _run_xcp_job,
   TSKWebServer,
   dashboard_payload,
   expected_vehicle_state,
@@ -447,6 +448,23 @@ class TestServer(unittest.TestCase):
     self.assertFalse(snapshot["ephemeral_canary"]["bridge_execution_exposed"])
     self.assertEqual(snapshot["ready_passive"]["mode"], "passive")
     self.assertEqual(snapshot["ready_active_diff"]["mode"], "active_diff")
+
+  def test_xcp_job_preserves_daq_and_cleanup_errors(self):
+    job = JOBS["xcp_observer"]
+    self.assertTrue(job.reset_if_idle())
+    with patch(
+      "tsk.web.server.probe_xcp",
+      return_value={
+        "status": "observed",
+        "daq_error": "DAQ configuration failed",
+        "cleanup_error": "STOP_DAQ cleanup failed",
+      },
+    ):
+      _run_xcp_job("actuation-discriminator")
+    state = job.snapshot()
+    self.assertEqual(state["daq_error"], "DAQ configuration failed")
+    self.assertEqual(state["cleanup_error"], "STOP_DAQ cleanup failed")
+    self.assertTrue(job.reset_if_idle())
 
   def test_split_ready_jobs_have_independent_dry_run_results(self):
     self.assertTrue(JOBS["ready_passive"].start())

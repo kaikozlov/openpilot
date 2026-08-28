@@ -1882,6 +1882,8 @@ def _run_xcp_job(profile: str) -> None:
     wall_clock_rate_claimed=bool(result.get("wall_clock_rate_claimed", False)),
     control_timing=result.get("control_timing", {"requests": [], "rtt_statistics": None}),
     capture_window=result.get("capture_window", {}),
+    daq_error=result.get("daq_error", ""),
+    cleanup_error=result.get("cleanup_error", ""),
     message=result.get("message", ""),
     **_route_metadata(result),
   )
