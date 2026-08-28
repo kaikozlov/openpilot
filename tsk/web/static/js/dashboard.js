@@ -159,7 +159,7 @@ function renderKey(dashboard) {
   if (exactF33) {
     els.sidebarKeyDot.className = "dot amber";
     els.sidebarKeyText.textContent = "Output disabled";
-    els.keyChip.replaceChildren(dot("amber"), node("span", "", "noOutput · zero CAN"));
+    els.keyChip.replaceChildren(dot("amber"), node("span", "", "Production output disabled"));
   } else {
     els.sidebarKeyDot.className = `dot ${installed ? "green" : recovered ? "blue" : ""}`.trim();
     els.sidebarKeyText.textContent = installed ? "Key installed" : recovered ? "Key recovered" : "Key: none";
@@ -228,14 +228,16 @@ function renderTargetCheckpoint(dashboard) {
   const status = dashboard.target.status || {};
   const checkpoint = status.checkpoint || {};
   const architecture = status.production_architecture || {};
+  const development = status.development_lateral || {};
   const blockers = status.remaining_production_gates || [];
   els.targetCheckpoint.replaceChildren(
     checkpointItem("Static checkpoint", "B6 receiver + integration closed", "success"),
     checkpointItem("CPU-visible recovery", checkpoint.cpu_visible_key_recovery || "negative"),
     checkpointItem("Production architecture", architecture.runtime_model || "RAM-only / reset-to-stock", "primary"),
     checkpointItem("Persistent flash", architecture.persistent_flash || "fallback-only"),
+    checkpointItem("Development path", development.available ? "Staged · non-release · live-gated" : "Not staged", "warning"),
     checkpointItem("Live blockers", `${blockers.length} production gates open`, "warning"),
-    checkpointItem("Output", checkpoint.output_detail || "noOutput · zero CAN", "danger"),
+    checkpointItem("Output", checkpoint.output_detail || "Production output disabled", "danger"),
   );
 }
 
@@ -344,7 +346,7 @@ function renderEvidence(dashboard) {
         name: "Static integration",
         statusLabel: "Closed",
         tone: "green",
-        detail: "Protected B6 receiver geometry and passive opendbc integration are closed. Production output remains SafetyModel.noOutput with zero controller CAN.",
+        detail: "Protected B6 receiver geometry is closed. Default operation remains noOutput/zero CAN; the exact-F33 development sender is opt-in, non-release, live-gated, and not production support.",
       }),
     );
     return;

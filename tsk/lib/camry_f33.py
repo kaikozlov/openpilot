@@ -216,12 +216,28 @@ CAMRY_F33_APPLICATION_RUNTIME = {
 
 CAMRY_F33_CHECKPOINT = {
   "target": "2026 Camry / F33",
-  "state": "passive-read-only",
+  "state": "production-disabled-development-staged",
   "static_receiver_integration": "closed",
   "cpu_visible_key_recovery": "negative",
   "principal_blocker": "live and volatile-runtime architecture gates",
-  "output": "disabled",
-  "output_detail": "SafetyModel.noOutput; controller emits zero CAN",
+  "output": "production-disabled",
+  "output_detail": "Default: SafetyModel.noOutput / zero CAN. Production TSS3 output unsupported.",
+}
+
+CAMRY_F33_DEVELOPMENT_LATERAL = {
+  "available": True,
+  "default_enabled": False,
+  "release_allowed": False,
+  "root_commit": "15f3550365e2eee54ca5645ae9c24d9d41ae4f31",
+  "opendbc_commit": "dde0fcf0fbaf875750c54a072b0dcb3857f8829b",
+  "exact_f181_only": CAMRY_F33_PRIMARY_SW,
+  "relay_correct_bus0_required": True,
+  "stock_validated_template_bytes": 28,
+  "cadence_frames": (1, 3),
+  "gate2_bypass_validation_required": True,
+  "exclusive_b6_authority_required": True,
+  "mac": "intentionally-invalid-development-only",
+  "production_supported": False,
 }
 
 CAMRY_F33_PRODUCTION_ARCHITECTURE = {
@@ -256,11 +272,14 @@ CAMRY_F33_PRODUCTION_ARCHITECTURE = {
 
 CAMRY_F33_OPENDBC = {
   "passive_port_baseline_root_commit": "d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04",
-  "opendbc_commit": "0d5773bd393bbf3d4109728171d2390b60fcde16",
+  "development_gate_root_commit": "15f3550365e2eee54ca5645ae9c24d9d41ae4f31",
+  "opendbc_commit": "dde0fcf0fbaf875750c54a072b0dcb3857f8829b",
   "platform": "TOYOTA_CAMRY_TSS3",
-  "mode": "passive",
-  "safety": "noOutput",
+  "mode": "noOutput-default; exact-F33 gated-development",
+  "safety": "noOutput-default; debug TSS3_DEV_LATERAL opt-in",
   "controller_can_output": False,
+  "development_sender_available": True,
+  "production_output_supported": False,
   "exact_f181_binding": True,
 }
 
@@ -292,6 +311,7 @@ def public_camry_f33_status() -> dict:
     "eps_394_state_candidates": CAMRY_F33_EPS_394_STATE_CANDIDATES,
     "application_runtime": CAMRY_F33_APPLICATION_RUNTIME,
     "checkpoint": CAMRY_F33_CHECKPOINT,
+    "development_lateral": CAMRY_F33_DEVELOPMENT_LATERAL,
     "production_architecture": CAMRY_F33_PRODUCTION_ARCHITECTURE,
     "opendbc": CAMRY_F33_OPENDBC,
     "production_output_allowed": False,

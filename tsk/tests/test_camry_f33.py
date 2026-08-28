@@ -7,6 +7,7 @@ from tsk.lib.camry_f33 import (
   CAMRY_F33_CHECKPOINT,
   CAMRY_F33_CODEFLASH,
   CAMRY_F33_CRUISE,
+  CAMRY_F33_DEVELOPMENT_LATERAL,
   CAMRY_F33_EPS_394_STATE_CANDIDATES,
   CAMRY_F33_GEAR,
   CAMRY_F33_MODULES,
@@ -96,10 +97,18 @@ class TestCamryF33Evidence(unittest.TestCase):
     self.assertFalse(CAMRY_F33_PRODUCTION_ARCHITECTURE["ready"])
     self.assertEqual([row["rank"] for row in CAMRY_F33_PRODUCTION_ARCHITECTURE["ranking"]], [1, 2, 3, 4])
 
-  def test_passive_opendbc_and_production_boundary(self):
-    self.assertEqual(CAMRY_F33_OPENDBC["opendbc_commit"], "0d5773bd393bbf3d4109728171d2390b60fcde16")
-    self.assertEqual(CAMRY_F33_OPENDBC["safety"], "noOutput")
+  def test_passive_default_development_gate_and_production_boundary(self):
+    self.assertEqual(CAMRY_F33_OPENDBC["opendbc_commit"], "dde0fcf0fbaf875750c54a072b0dcb3857f8829b")
+    self.assertIn("noOutput-default", CAMRY_F33_OPENDBC["safety"])
     self.assertFalse(CAMRY_F33_OPENDBC["controller_can_output"])
+    self.assertTrue(CAMRY_F33_OPENDBC["development_sender_available"])
+    self.assertFalse(CAMRY_F33_OPENDBC["production_output_supported"])
+    self.assertTrue(CAMRY_F33_DEVELOPMENT_LATERAL["available"])
+    self.assertFalse(CAMRY_F33_DEVELOPMENT_LATERAL["default_enabled"])
+    self.assertFalse(CAMRY_F33_DEVELOPMENT_LATERAL["release_allowed"])
+    self.assertEqual(CAMRY_F33_DEVELOPMENT_LATERAL["cadence_frames"], (1, 3))
+    self.assertEqual(CAMRY_F33_DEVELOPMENT_LATERAL["mac"], "intentionally-invalid-development-only")
+    self.assertFalse(CAMRY_F33_DEVELOPMENT_LATERAL["production_supported"])
     status = public_camry_f33_status()
     self.assertFalse(status["production_output_allowed"])
     self.assertEqual(tuple(status["remaining_production_gates"]), CAMRY_F33_REMAINING_PRODUCTION_GATES)

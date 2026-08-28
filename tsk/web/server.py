@@ -713,7 +713,7 @@ def dashboard_payload() -> dict:
   # expose only the dashboard-relevant projection.
   f33_status = (
     {key: value for key, value in public_camry_f33_status().items()
-     if key in ("secondary_software_id", "checkpoint", "production_architecture",
+     if key in ("secondary_software_id", "checkpoint", "development_lateral", "production_architecture",
                 "remaining_production_gates", "production_output_allowed")}
     if exact_f33 else None
   )

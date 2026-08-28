@@ -5,8 +5,10 @@ EPS application F181 **`8965F3307000 / 8A3113303100`**. The byte-level/static au
 remains `ghidra_rh850_analysis`; this document mirrors only findings that are already
 field- or exact-firmware-evidenced and useful to the fork.
 
-Nothing in this document authorizes steering output. The current Camry platform remains
-`dashcamOnly`, Panda `SafetyModel.noOutput`, and its controller emits zero CAN messages.
+Nothing in this document authorizes production steering output. The default Camry path remains
+`dashcamOnly` / Panda `SafetyModel.noOutput` and emits zero controller CAN. The fork now also stages
+an exact-F33, non-release development sender behind explicit live gates; that sender is intentionally
+invalid-MAC and exists for the Gate-2 bypass experiment, not as production TSS3 support.
 
 ## Exact ECU identities and route
 
@@ -203,14 +205,19 @@ Current production ranking therefore makes the volatile architecture first-class
 The checked-out fork already contains the passive target-native implementation:
 
 - passive-port baseline root commit `d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04`;
-- exact F33 fault-state observer is retained in opendbc commit
-  `0d5773bd393bbf3d4109728171d2390b60fcde16`;
+- exact F33 development gating is retained in root commit
+  `15f3550365e2eee54ca5645ae9c24d9d41ae4f31` and opendbc commit
+  `dde0fcf0fbaf875750c54a072b0dcb3857f8829b`;
 - exact `TOYOTA_CAMRY_TSS3` F181 binding and source-real P/R/N/D/B + Ready replay;
 - generated TSS3 PT DBC, B6 application/freshness/signing helpers, and shadow F33 limits;
 - 179-ID Camry census deliberately excluded from legacy CAN fingerprinting because the
   Corolla TSS3 census is a strict subset;
-- controller output remains **zero CAN**; `0x0B6` is absent from Toyota production Tx
-  whitelists; CarParams uses `SafetyModel.noOutput`.
+- default controller output remains **zero CAN** and CarParams uses `SafetyModel.noOutput`;
+- a DEVELOPMENT_ONLY exact-F33 path can opt into `TSS3_DEV_LATERAL` only on non-release builds after
+  an exact `8965F3307000` match, relay-correct bus-0 topology, a stock-validated 28-byte B6 template,
+  1–3 control-frame cadence, and explicit Gate-2-bypass plus exclusive-B6-authority attestations;
+- that development sender intentionally emits an invalid MAC and therefore does not constitute a
+  production SecOC signer or production TSS3 output support.
 
 ## Remaining production gates
 
