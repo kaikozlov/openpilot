@@ -8,6 +8,7 @@ Offline discovery works without Panda access:
 ./tools/toyota ecu list
 ./tools/toyota ecu info eps
 ./tools/toyota did list frc "LTA Control Condition"
+./tools/toyota did decode eps 0x1037 0001
 ./tools/toyota dtc catalog frc U0131
 ./tools/toyota active-test plan frc 0xA429
 ```
@@ -16,7 +17,8 @@ Live reads require `pandad` to be stopped so the process has exclusive Panda own
 
 ```bash
 ./tools/toyota dtc scan
-./tools/toyota did read eps 0xF181
+./tools/toyota did read eps 0x1037
+./tools/toyota did watch frc 0x1601 --interval 0.25
 ./tools/toyota uds raw eps 0x22 F181
 ```
 

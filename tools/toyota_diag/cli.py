@@ -207,6 +207,27 @@ def cmd_dtc_clear(args, profile: Profile) -> int:
   return 0
 
 
+def _print_did_value(ecu, did: int, signals: list[dict[str, Any]], data: bytes, prefix: str = "") -> None:
+  printable = "".join(chr(value) if 32 <= value < 127 else "." for value in data)
+  print(f"{prefix}{ecu.name} DID 0x{did:04X}: {data.hex()} |{printable}|")
+  for signal in signals:
+    try:
+      print(f"  {decode.format_decoded_signal(data, signal)}")
+    except decode.DecodeError as e:
+      print(f"  {_format_signal(signal)} — decode unavailable: {e}")
+
+
+def cmd_did_decode(args, profile: Profile) -> int:
+  try:
+    ecu = profile.lookup_ecu(args.ecu)
+    did, signals = profile.resolve_did(ecu, args.did)
+    data = registry.parse_bytes(args.payload, "DID payload")
+  except registry.RegistryError as e:
+    raise SystemExit(str(e)) from e
+  _print_did_value(ecu, did, signals, data)
+  return 0
+
+
 def cmd_did_read(args, profile: Profile) -> int:
   try:
     ecu = profile.lookup_ecu(args.ecu)
@@ -216,13 +237,37 @@ def cmd_did_read(args, profile: Profile) -> int:
   transport = _live_transport()
   panda = transport.connect()
   data = transport.uds_client_factory(panda, profile)(ecu.address).read_data_by_identifier(did)
-  printable = "".join(chr(value) if 32 <= value < 127 else "." for value in data)
-  print(f"{ecu.name} DID 0x{did:04X}: {data.hex()} |{printable}|")
-  for signal in signals:
-    try:
-      print(f"  {decode.format_decoded_signal(data, signal)}")
-    except decode.DecodeError as e:
-      print(f"  {_format_signal(signal)} — decode unavailable: {e}")
+  _print_did_value(ecu, did, signals, data)
+  return 0
+
+
+def cmd_did_watch(args, profile: Profile) -> int:
+  import time
+  if args.interval < 0:
+    raise SystemExit("--interval must be >= 0")
+  if args.count < 0:
+    raise SystemExit("--count must be >= 0 (0 means until interrupted)")
+  try:
+    ecu = profile.lookup_ecu(args.ecu)
+    did, signals = profile.resolve_did(ecu, args.did)
+  except registry.RegistryError as e:
+    raise SystemExit(str(e)) from e
+
+  transport = _live_transport()
+  panda = transport.connect()
+  client = transport.uds_client_factory(panda, profile)(ecu.address)
+  started = time.monotonic()
+  sample = 0
+  try:
+    while args.count == 0 or sample < args.count:
+      data = client.read_data_by_identifier(did)
+      sample += 1
+      elapsed = time.monotonic() - started
+      _print_did_value(ecu, did, signals, data, prefix=f"[{sample:04d} +{elapsed:.3f}s] ")
+      if args.count == 0 or sample < args.count:
+        time.sleep(args.interval)
+  except KeyboardInterrupt:
+    print("stopped")
   return 0
 
 
@@ -302,10 +347,21 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("query", nargs="?")
   p.add_argument("--limit", type=int, default=100)
   p.set_defaults(func=cmd_did_list)
+  p = did_sub.add_parser("decode")
+  p.add_argument("ecu")
+  p.add_argument("did")
+  p.add_argument("payload", help="DID value bytes as hex; positive SID/DID echo excluded")
+  p.set_defaults(func=cmd_did_decode)
   p = did_sub.add_parser("read")
   p.add_argument("ecu")
   p.add_argument("did")
   p.set_defaults(func=cmd_did_read)
+  p = did_sub.add_parser("watch")
+  p.add_argument("ecu")
+  p.add_argument("did")
+  p.add_argument("--interval", type=float, default=0.25, help="seconds between reads (default: 0.25)")
+  p.add_argument("--count", type=int, default=0, help="number of samples; 0 means until interrupted")
+  p.set_defaults(func=cmd_did_watch)
 
   dtc_parser = commands.add_parser("dtc")
   dtc_sub = dtc_parser.add_subparsers(required=True)

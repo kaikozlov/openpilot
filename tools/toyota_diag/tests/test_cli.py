@@ -21,6 +21,7 @@ class TestOfflineCli(unittest.TestCase):
       cases = [
         (["ecu", "info", "eps"], "8965F3307000"),
         (["did", "list", "frc", "LTA Control Condition"], "0x1601"),
+        (["did", "decode", "eps", "0x1037", "0001"], "Steering Angle: 1.5 deg"),
         (["dtc", "catalog", "frc", "U0131"], "Missing Message"),
         (["active-test", "plan", "frc", "0xA429"], "31011588"),
       ]
@@ -68,6 +69,20 @@ class TestLiveCli(unittest.TestCase):
     self.assertEqual(scripted.calls, [(0x7A1, "read_did", 0x1037)])
     self.assertIn("Power Steering DID 0x1037: 0001", output)
     self.assertIn("Steering Angle: 1.5 deg (raw=0x0001)", output)
+
+  def test_did_watch_reuses_client_and_decodes_samples(self):
+    scripted = support.ScriptedUds()
+    values = iter((bytes.fromhex("0001"), bytes.fromhex("0002")))
+    scripted.did[0x7A1] = {0x1037: lambda: next(values)}
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["did", "watch", "eps", "0x1037", "--interval", "0", "--count", "2"])
+    self.assertEqual(rc, 0, output)
+    self.assertEqual(scripted.calls, [(0x7A1, "read_did", 0x1037), (0x7A1, "read_did", 0x1037)])
+    self.assertIn("[0001 +", output)
+    self.assertIn("Steering Angle: 1.5 deg", output)
+    self.assertIn("[0002 +", output)
+    self.assertIn("Steering Angle: 3.0 deg", output)
 
   def test_did_read_fails_closed_when_payload_is_short(self):
     scripted = support.ScriptedUds()
