@@ -81,6 +81,21 @@ class TestPlanResolution(unittest.TestCase):
     self.assertFalse(plan.executable)
     self.assertIn("execution is 'plan_only'", " ".join(plan.refusals))
 
+  def test_bundled_v4_runtime_inventory_is_fail_closed(self):
+    profile = registry.load_registry()
+    grades = {"executable": 0, "blocked_geometry": 0, "plan_only": 0, "unresolved_static_plan": 0}
+    for ecu in profile.ecus:
+      for row in profile.active_tests(ecu):
+        plan = resolve_plan(ecu, row)
+        refusals = runtime_refusals(profile, plan)
+        if row.get("execution") == "executable":
+          grades["blocked_geometry" if refusals else "executable"] += 1
+        else:
+          grades[str(row.get("execution"))] += 1
+    self.assertEqual(grades, {
+      "executable": 14, "blocked_geometry": 27, "plan_only": 361, "unresolved_static_plan": 26,
+    })
+
   def test_unresolved_and_partially_recovered_rows_refuse(self):
     ecu = support.synthetic_ecu(support.load_profile(None))
     unresolved = resolve_plan(ecu, executable_routine(execution="unresolved_static_plan", reason="no DLL"))
