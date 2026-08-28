@@ -19,6 +19,7 @@ Offline discovery works without Panda access. The CLI is ECU-first now, so you c
 ./tools/toyota can topology
 ./tools/toyota did decode eps 0x1037 0001
 ./tools/toyota active-test plan frc 0xA429
+./tools/toyota active-test plan frc 0xA429 --json
 ```
 
 `search` spans ECU/category names, Data List signals, DTCs, Active Tests, v4 function/plugin bindings, and recovered generic utility-family metadata. `ecu ... functions` shows the recovered type-26/27 function/detail hierarchy even where Toyota's function names remain unrecovered; `ecu ... plugins` shows the role → DLL binding and only labels semantic kinds recovered for the exact plugin identity. ECU lookup errors include close-match suggestions. The original verb-first `ecu info`, `did list`, `dtc catalog`, etc. remain supported.
@@ -56,11 +57,13 @@ Raw/functional requests that are not in the explicit read-only allowlist require
 
 Registry v4 separates **static geometry** from **runtime authorization**. Its 428 Active-Test candidates contain 41 rows whose fixed request geometry is complete, 361 plan-only rows, and 26 unresolved rows. The Comma runtime is stricter again: `executor.py` rejects placeholder identifiers (for example a recovered `0xFFFF` RID), requires complete wire geometry, and for extended-session operations requires the target category to be inside `session_control.wire_proven_categories`. With the current F33 registry that reduces the 41 geometry-complete rows to **14 runtime-executable** and **27 blocked** (21 Engine + 3 HV Battery lifecycle-unproven rows, plus 3 Brake `RID=0xFFFF` placeholders). Fixed routine controls such as FRC `0xA429` LTA Steering Vibration remain runtime-executable, while all direct `0x2F` tests remain plan-only because their exact runtime payload length is not recovered. v4 also carries the raw Toyota CommSet rows (for example CommSet 1 `receive_timeout=1020`, retry count 1); the runtime exposes those rows but deliberately does not reinterpret the raw timeout as seconds until Techstream's `CheckAndConvertRcvTimeOut` conversion is fully recovered.
 
-Viewing and listing never transmits. Mutation requires the literal `--execute` acknowledgement and the profile identity guard; without `--execute`, `active-test run/stop` is a dry-run. Started operations always attempt their recovered stop/return-control request on exception or Ctrl-C, and context cleanup returns an extended session to D1. Cleanup failures are surfaced separately and produce a nonzero result instead of looking successful.
+Viewing and listing never transmits. `active-test list --json` and `active-test plan --json` expose both the raw registry geometry grade and the stricter runtime execution grade/refusal reasons, so automation does not have to infer executability from the generated catalog alone. Mutation requires the literal `--execute` acknowledgement and the profile identity guard; without `--execute`, `active-test run/stop` is a dry-run. Started operations always attempt their recovered stop/return-control request on exception or Ctrl-C, and context cleanup returns an extended session to D1. Cleanup failures are surfaced separately and produce a nonzero result instead of looking successful.
 
 ```bash
 ./tools/toyota active-test list frc
+./tools/toyota active-test list frc --json
 ./tools/toyota active-test plan frc 0xA429
+./tools/toyota active-test plan frc 0xA429 --json
 ./tools/toyota active-test run frc 0xA429                # dry-run only
 ./tools/toyota active-test run frc 0xA429 --execute --hold 1
 ./tools/toyota active-test stop frc 0xA429 --execute

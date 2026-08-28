@@ -50,6 +50,25 @@ class TestOfflineCli(unittest.TestCase):
     self.assertIn("utility-family", output)
     self.assertIn("0xD4", output)
 
+  def test_active_test_list_and_plan_json_expose_runtime_boundary(self):
+    import json
+
+    rc, output = run_cli(["active-test", "list", "frc", "--json"])
+    self.assertEqual(rc, 0, output)
+    document = json.loads(output)
+    self.assertEqual(document["profile"], "camry-2026-f33")
+    a429 = next(row for row in document["active_tests"] if row["id"] == 0xA429)
+    self.assertEqual((a429["registry_execution"], a429["runtime_execution"], a429["runtime_executable"]),
+                     ("executable", "executable", True))
+    self.assertEqual(a429["wire_plan"]["routine_id"], 0x1588)
+
+    rc, output = run_cli(["active-test", "plan", "brake", "42001", "--json"])
+    self.assertEqual(rc, 0, output)
+    blocked = json.loads(output)["active_test"]
+    self.assertEqual((blocked["registry_execution"], blocked["runtime_execution"], blocked["runtime_executable"]),
+                     ("executable", "blocked", False))
+    self.assertTrue(any("0xFFFF" in reason for reason in blocked["runtime_refusals"]))
+
   def test_profile_name_alias_resolves_bundled_registry(self):
     rc, output = run_cli(["--profile", "camry-2026-f33", "ecu", "eps"])
     self.assertEqual(rc, 0, output)

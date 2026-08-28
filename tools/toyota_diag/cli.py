@@ -310,7 +310,10 @@ def cmd_active_test_list(args, profile: Profile) -> int:
       ecu = profile.lookup_ecu(args.ecu)
     except registry.RegistryError as e:
       raise SystemExit(str(e)) from e
-  print(active_test.render_list(profile, ecu))
+  if getattr(args, "json", False):
+    print(json.dumps(active_test.list_document(profile, ecu), sort_keys=True))
+  else:
+    print(active_test.render_list(profile, ecu))
   return 0
 
 
@@ -320,7 +323,10 @@ def cmd_active_test_plan(args, profile: Profile) -> int:
     test = profile.lookup_active_test(ecu, args.item, args.kind)
   except registry.RegistryError as e:
     raise SystemExit(str(e)) from e
-  print(active_test.render_plan(profile, ecu, test))
+  if getattr(args, "json", False):
+    print(json.dumps({"profile": profile.name, "vehicle": profile.vehicle, "active_test": active_test.describe(profile, ecu, test)}, sort_keys=True))
+  else:
+    print(active_test.render_plan(profile, ecu, test))
   return 0
 
 
@@ -1165,11 +1171,13 @@ def build_parser() -> argparse.ArgumentParser:
   at_sub = at.add_subparsers(required=True)
   p = at_sub.add_parser("list")
   p.add_argument("ecu", nargs="?")
+  p.add_argument("--json", action="store_true", help="emit registry and runtime execution grades as JSON")
   p.set_defaults(func=cmd_active_test_list)
   p = at_sub.add_parser("plan")
   p.add_argument("ecu")
   p.add_argument("item")
   p.add_argument("--kind", choices=("direct", "routine"))
+  p.add_argument("--json", action="store_true", help="emit the zero-transmit plan and runtime refusal reasons as JSON")
   p.set_defaults(func=cmd_active_test_plan)
   p = at_sub.add_parser("run", help="run only a runtime-authorized recovered Active Test")
   p.add_argument("ecu")

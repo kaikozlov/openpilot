@@ -25,6 +25,31 @@ def _grade(profile: Profile, ecu: EcuSpec, row: dict[str, Any]) -> str:
   return "unresolved"
 
 
+def describe(profile: Profile, ecu: EcuSpec, row: dict[str, Any]) -> dict[str, Any]:
+  """Machine-readable zero-transmit view of one recovered Active Test."""
+  plan = executor.resolve_plan(ecu, row)
+  refusals = executor.runtime_refusals(profile, plan)
+  grade = _grade(profile, ecu, row)
+  return {
+    "ecu": {"key": ecu.key, "name": ecu.name, "address": ecu.address, "category_id": ecu.category_id},
+    "id": int(row.get("id", 0)),
+    "name": str(row.get("name") or ""),
+    "kind": str(row.get("kind") or ""),
+    "registry_execution": str(row.get("execution") or "unresolved"),
+    "runtime_execution": grade,
+    "runtime_executable": not refusals,
+    "runtime_refusals": list(refusals),
+    "session_requirement": row.get("session_requirement"),
+    "wire_plan": dict(row),
+  }
+
+
+def list_document(profile: Profile, ecu: EcuSpec | None = None) -> dict[str, Any]:
+  targets = [ecu] if ecu is not None else [item for item in profile.ecus if profile.active_tests(item)]
+  rows = [describe(profile, spec, test) for spec in targets for test in profile.active_tests(spec)]
+  return {"profile": profile.name, "vehicle": profile.vehicle, "active_tests": rows}
+
+
 def render_list(profile: Profile, ecu: EcuSpec | None = None) -> str:
   ecus = [ecu] if ecu is not None else [item for item in profile.ecus if profile.active_tests(item)]
   lines = [PLAN_VIEW_BANNER]
