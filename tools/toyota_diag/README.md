@@ -8,7 +8,9 @@ Offline discovery works without Panda access. The CLI is ECU-first now, so you c
 ./tools/toyota search LTA
 ./tools/toyota ecu list
 ./tools/toyota ecu frc
+./tools/toyota frc                         # shorthand for `ecu frc`
 ./tools/toyota ecu frc data "LTA Control"
+./tools/toyota frc data "LTA Control"      # shorthand keeps ECU context
 ./tools/toyota ecu frc dtcs U0131
 ./tools/toyota ecu frc active-tests
 ./tools/toyota ecu frc plugins

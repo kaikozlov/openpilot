@@ -1299,13 +1299,24 @@ def _normalize_argv(argv: list[str]) -> list[str]:
     prefix.extend(argv[index:index + 2])
     index += 2
   tail = argv[index:]
+  ecu_actions = {"list", "info", "functions", "plugins", "data", "dtcs", "active-tests"}
+  top_level = {
+    "search", "vehicle", "scan", "monitor", "transport", "can", "ecu", "did", "dtc",
+    "uds", "functional", "active-test", "utility",
+  }
   if len(tail) >= 2 and tail[0] == "ecu":
-    actions = {"list", "info", "functions", "plugins", "data", "dtcs", "active-tests"}
-    if tail[1] not in actions and not tail[1].startswith("-"):
+    if tail[1] not in ecu_actions and not tail[1].startswith("-"):
       ref = tail[1]
-      if len(tail) >= 3 and tail[2] in actions - {"list", "info"}:
+      if len(tail) >= 3 and tail[2] in ecu_actions - {"list", "info"}:
         return [*prefix, "ecu", tail[2], ref, *tail[3:]]
       return [*prefix, "ecu", "info", ref, *tail[2:]]
+  elif tail and tail[0] not in top_level and not tail[0].startswith("-"):
+    # Direct ECU shorthand: `toyota frc`, `toyota frc data LTA`, etc. Unknown
+    # words intentionally flow through ECU lookup so its close-match suggestions apply.
+    ref = tail[0]
+    if len(tail) >= 2 and tail[1] in ecu_actions - {"list", "info"}:
+      return [*prefix, "ecu", tail[1], ref, *tail[2:]]
+    return [*prefix, "ecu", "info", ref, *tail[1:]]
   return argv
 
 

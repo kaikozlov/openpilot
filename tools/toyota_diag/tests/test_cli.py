@@ -94,6 +94,26 @@ class TestOfflineCli(unittest.TestCase):
                      ("executable", "blocked", False))
     self.assertTrue(any("0xFFFF" in reason for reason in blocked["runtime_refusals"]))
 
+  def test_direct_ecu_shorthand_preserves_top_level_commands(self):
+    rc, output = run_cli(["frc"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("Front Recognition Camera", output)
+
+    rc, output = run_cli(["frc", "data", "LTA Control"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("LTA Control Condition", output)
+
+    rc, output = run_cli(["--profile", "camry-2026-f33", "frc", "plugins", "--json"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("GetDatMonListP5_DT.dll", output)
+
+    rc, output = run_cli(["search", "LTA", "--limit", "1"])
+    self.assertEqual(rc, 0, output)
+    self.assertNotIn("no ECU matches", output)
+
+    with self.assertRaisesRegex(SystemExit, "did you mean frc"):
+      run_cli(["frontcam"])
+
   def test_profile_name_alias_resolves_bundled_registry(self):
     rc, output = run_cli(["--profile", "camry-2026-f33", "ecu", "eps"])
     self.assertEqual(rc, 0, output)
