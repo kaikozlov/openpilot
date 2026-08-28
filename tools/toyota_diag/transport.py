@@ -70,7 +70,23 @@ def _managed_refusal(panda_states: Any, profile: Profile) -> str:
   ))
 
 
-class ManagedPandaAdapter:
+class ManagedCanReceiver:
+  """Receive-only CAN adapter backed by pandad's public `can` service."""
+
+  def __init__(self, *, messaging_module=None) -> None:
+    if messaging_module is None:
+      import openpilot.cereal.messaging as messaging_module
+    self.messaging = messaging_module
+    self.can_sock = messaging_module.sub_sock("can", conflate=False, timeout=100)
+
+  def can_recv(self) -> list[tuple[int, bytes, int]]:
+    frames: list[tuple[int, bytes, int]] = []
+    for event in self.messaging.drain_sock(self.can_sock, wait_for_one=False):
+      frames.extend((msg.address, bytes(msg.dat), msg.src) for msg in event.can)
+    return frames
+
+
+class ManagedPandaAdapter(ManagedCanReceiver):
   """Minimal Panda-compatible CAN adapter backed by openpilot can/sendcan sockets."""
 
   def __init__(self, profile: Profile, *, messaging_module=None, can_serializer=None,
@@ -81,10 +97,9 @@ class ManagedPandaAdapter:
       from openpilot.selfdrive.pandad import can_list_to_can_capnp
       can_serializer = can_list_to_can_capnp
 
+    super().__init__(messaging_module=messaging_module)
     self.profile = profile
-    self.messaging = messaging_module
     self.can_serializer = can_serializer
-    self.can_sock = messaging_module.sub_sock("can", conflate=False, timeout=100)
     self.sendcan = messaging_module.pub_sock("sendcan")
     self.sm, _ = _wait_panda_states(messaging_module)
     self._assert_ready()
@@ -104,12 +119,6 @@ class ManagedPandaAdapter:
     self._assert_ready()
     payload = self.can_serializer([(address, bytes(data), bus)], msgtype="sendcan")
     self.sendcan.send(payload)
-
-  def can_recv(self) -> list[tuple[int, bytes, int]]:
-    frames: list[tuple[int, bytes, int]] = []
-    for event in self.messaging.drain_sock(self.can_sock, wait_for_one=False):
-      frames.extend((msg.address, bytes(msg.dat), msg.src) for msg in event.can)
-    return frames
 
   def can_clear(self, flags: int) -> None:
     del flags
@@ -136,6 +145,14 @@ def status(profile: Profile, *, messaging_module=None) -> dict[str, Any]:
     "ready": ready,
     "detail": "pandad already owns Panda in validated diagnostic-safe ELM327/param1 state" if ready else _managed_refusal(states, profile),
   }
+
+
+def passive_receiver():
+  """Return a receive-only CAN source without changing Panda safety."""
+  if pandad_running():
+    return ManagedCanReceiver()
+  from panda import Panda  # lazy: offline commands must not import Panda
+  return Panda()
 
 
 def connect(profile: Profile):

@@ -66,6 +66,24 @@ class TestLiveCli(unittest.TestCase):
   def mode04_panda():
     return support.FakePanda(recv_batches=[[(addr, b"\x01\x44\x00\x00\x00\x00\x00\x00", 0) for addr in support.LEGISLATED_RESPONDERS]])
 
+  def test_can_sniff_is_receive_only_and_filters_bus_and_address(self):
+    import json
+    panda = support.FakePanda(recv_batches=[[
+      (0x0B6, b"\x01\x02", 0),
+      (0x0B6, b"\x99", 1),
+      (0x123, b"\x55", 0),
+      (0x0B6, b"\x03\x04", 0),
+    ]])
+    with mock.patch("tools.toyota_diag.transport.passive_receiver", return_value=panda):
+      rc, output = run_cli(["can", "sniff", "0xB6", "--duration", "0", "--count", "2", "--json"])
+    self.assertEqual(rc, 0, output)
+    rows = [json.loads(line) for line in output.splitlines()]
+    self.assertEqual([(row["address"], row["bus"], row["data_hex"]) for row in rows], [
+      (0x0B6, 0, "0102"), (0x0B6, 0, "0304"),
+    ])
+    self.assertEqual(panda.sent, [])
+    self.assertEqual(panda.safety, [])
+
   def test_did_read_decodes_gts_engineering_value(self):
     scripted = support.ScriptedUds()
     scripted.did[0x7A1] = {0x1037: bytes.fromhex("0001")}

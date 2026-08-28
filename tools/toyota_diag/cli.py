@@ -166,6 +166,48 @@ def cmd_transport_status(args, profile: Profile) -> int:
   return 0 if state["ready"] else 1
 
 
+def cmd_can_sniff(args, profile: Profile) -> int:
+  import time
+  if args.duration < 0:
+    raise SystemExit("--duration must be >= 0 (0 means until interrupted)")
+  if args.count < 0:
+    raise SystemExit("--count must be >= 0")
+  bus = profile.bus if args.bus is None else args.bus
+  if not 0 <= bus <= 3:
+    raise SystemExit("--bus must be 0..3")
+  addresses = {_cli_int(value, "CAN address") for value in args.address}
+  if any(not 0 <= address <= 0x1FFFFFFF for address in addresses):
+    raise SystemExit("CAN address must fit 29 bits")
+
+  receiver = _live_transport().passive_receiver()
+  started = time.monotonic()
+  seen = 0
+  try:
+    while args.duration == 0 or time.monotonic() - started < args.duration:
+      frames = receiver.can_recv()
+      if not frames:
+        time.sleep(0.01)
+        continue
+      for address, data, recv_bus in frames:
+        if recv_bus != bus or address not in addresses:
+          continue
+        seen += 1
+        elapsed = time.monotonic() - started
+        if args.json:
+          print(json.dumps({
+            "sample": seen, "elapsed_s": round(elapsed, 6), "bus": recv_bus,
+            "address": address, "data_hex": data.hex(),
+          }, sort_keys=True))
+        else:
+          print(f"[{seen:06d}] +{elapsed:9.3f}s bus={recv_bus} addr=0x{address:X} data={data.hex()}")
+        if args.count and seen >= args.count:
+          return 0
+  except KeyboardInterrupt:
+    if not args.json:
+      print("stopped")
+  return 0
+
+
 # Live -----------------------------------------------------------------------
 def _scan_set(profile: Profile, refs: list[str] | None) -> list[tuple[int, str]]:
   if not refs:
@@ -406,6 +448,16 @@ def build_parser() -> argparse.ArgumentParser:
   p = transport_sub.add_parser("status")
   p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_transport_status)
+
+  can_parser = commands.add_parser("can")
+  can_sub = can_parser.add_subparsers(required=True)
+  p = can_sub.add_parser("sniff")
+  p.add_argument("address", nargs="+", help="one or more 11/29-bit CAN addresses")
+  p.add_argument("--bus", type=int, help="Panda bus (default: profile diagnostic bus)")
+  p.add_argument("--duration", type=float, default=5.0, help="seconds to capture; 0 means until interrupted (default: 5)")
+  p.add_argument("--count", type=int, default=0, help="stop after this many matching frames; 0 means no count limit")
+  p.add_argument("--json", action="store_true", help="emit one JSON object per matching frame")
+  p.set_defaults(func=cmd_can_sniff)
 
   ecu = commands.add_parser("ecu")
   ecu_sub = ecu.add_subparsers(required=True)
