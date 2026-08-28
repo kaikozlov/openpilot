@@ -4,7 +4,7 @@ from contextlib import ExitStack, redirect_stdout
 from io import StringIO
 from unittest import mock
 
-from tools.toyota_diag import active_test, cli
+from tools.toyota_diag import active_test, cli, registry
 from tools.toyota_diag.tests import support
 
 
@@ -40,6 +40,16 @@ class TestOfflineCli(unittest.TestCase):
     self.assertIn("0x1601", output)
     self.assertIn("LTA Control Condition", output)
 
+    rc, output = run_cli(["ecu", "frc", "plugins"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("GetDatMonListP5_DT.dll", output)
+    self.assertIn("p5_monitor_list", output)
+
+    rc, output = run_cli(["search", "single_routine_active_test"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("utility-family", output)
+    self.assertIn("0xD4", output)
+
   def test_profile_name_alias_resolves_bundled_registry(self):
     rc, output = run_cli(["--profile", "camry-2026-f33", "ecu", "eps"])
     self.assertEqual(rc, 0, output)
@@ -69,7 +79,9 @@ class TestOfflineCli(unittest.TestCase):
         (["did", "list", "frc", "LTA Control Condition"], "0x1601"),
         (["did", "decode", "eps", "0x1037", "0001"], "Steering Angle: 1.5 deg"),
         (["dtc", "catalog", "frc", "U0131"], "Missing Message"),
-        (["active-test", "plan", "frc", "0xA429"], "31011588"),
+        (["active-test", "plan", "frc", "0xA429"], "runtime: executable"),
+        (["utility", "list"], "single_routine_active_test"),
+        (["utility", "plan", "single_routine_active_test"], "31 <01 start|02 stop|03 result>"),
       ]
       for argv, expected in cases:
         with self.subTest(argv=argv):
@@ -181,7 +193,7 @@ class TestLiveCli(unittest.TestCase):
     self.assertEqual([[value["did"] for value in row["values"]] for row in documents], [[0x1601, 0x1501], [0x1601, 0x1501]])
     self.assertEqual(len(scripted.calls), 4)
 
-  def test_monitor_jsonl_reuses_one_client_and_decodes(self):
+  def test_monitor_jsonl_reuses_one_session_and_restores_default(self):
     import json
     scripted = support.ScriptedUds()
     scripted.did[0x792] = {0x1601: bytes.fromhex("01000000")}
@@ -191,9 +203,81 @@ class TestLiveCli(unittest.TestCase):
     self.assertEqual(rc, 0, output)
     documents = [json.loads(line) for line in output.splitlines()]
     self.assertEqual([row["sample"] for row in documents], [1, 2])
-    self.assertEqual(scripted.calls, [(0x792, "read_did", 0x1601), (0x792, "read_did", 0x1601)])
+    self.assertEqual([call[1:] for call in scripted.calls], [
+      ("read_did", 0xF186),
+      ("session", 1), ("session", 3),
+      ("read_did", 0x1601), ("read_did", 0x1601),
+      ("session", 1),
+    ])
     condition = next(signal for signal in documents[0]["values"][0]["signals"] if signal["name"] == "LTA Control Condition")
     self.assertEqual(condition["pattern"], "LTA Enabled")
+
+  def test_monitor_unproven_category_stays_default_session(self):
+    scripted = support.ScriptedUds()
+    scripted.did[0x700] = {0x0000: b"\x01"}
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["monitor", "engine", "0x0000", "--interval", "0", "--count", "1", "--jsonl"])
+    self.assertEqual(rc, 0, output)
+    self.assertEqual(scripted.calls, [(0x700, "read_did", 0x0000)])
+
+  def test_active_test_dry_run_and_runtime_blocks_do_not_connect(self):
+    with mock.patch("tools.toyota_diag.transport.connect", side_effect=AssertionError("must not connect")):
+      rc, output = run_cli(["active-test", "run", "frc", "0xA429"])
+      self.assertEqual(rc, 0, output)
+      self.assertIn("DRY RUN", output)
+
+      with self.assertRaisesRegex(SystemExit, "placeholder 0xFFFF"):
+        run_cli(["active-test", "run", "brake", "42001", "--execute"])
+
+      engine = registry.load_registry()
+      blocked = next(row for row in engine.active_tests("engine") if row.get("execution") == "executable")
+      with self.assertRaisesRegex(SystemExit, "not wire-proven for ECU category 372"):
+        run_cli(["active-test", "run", "engine", str(blocked["id"]), "--execute"])
+
+  def test_active_test_run_and_stop_use_guarded_recovered_lifecycle(self):
+    scripted = support.ScriptedUds()
+    scripted.did[0x7A1] = {0xF181: support.EXPECTED_EPS_F181}
+    # F186 intentionally absent: the recovered SendProc falls through to D1→D2.
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli([
+        "active-test", "run", "frc", "0xA429", "--execute", "--hold", "0.001", "--poll-interval", "1",
+      ])
+    self.assertEqual(rc, 0, output)
+    self.assertEqual([call[1:] for call in scripted.calls], [
+      ("read_did", 0xF181),
+      ("read_did", 0xF186),
+      ("session", 1), ("session", 3),
+      ("routine", 1, 0x1588, b""),
+      ("routine", 2, 0x1588, b""),
+      ("session", 1),
+    ])
+    self.assertIn("executed: yes", output)
+
+    scripted.calls.clear()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["active-test", "stop", "frc", "0xA429", "--execute"])
+    self.assertEqual(rc, 0, output)
+    self.assertEqual([call[1:] for call in scripted.calls], [
+      ("read_did", 0xF181),
+      ("read_did", 0xF186),
+      ("session", 1), ("session", 3),
+      ("routine", 2, 0x1588, b""),
+      ("session", 1),
+    ])
+
+  def test_v4_utility_families_are_plan_only_not_concrete_execution(self):
+    rc, output = run_cli(["utility", "list"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("0xD4", output)
+    self.assertIn("metadata only", output)
+    rc, output = run_cli(["utility", "plan", "single_routine_active_test"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("runtime: metadata/plan only", output)
+    with mock.patch("tools.toyota_diag.transport.connect", side_effect=AssertionError("must not connect")):
+      with self.assertRaisesRegex(SystemExit, "no concrete executable utility resolved"):
+        run_cli(["utility", "run", "frc", "0xD4", "--execute"])
 
   def test_scan_builds_high_level_inventory(self):
     import json

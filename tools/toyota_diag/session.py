@@ -63,6 +63,7 @@ class SessionLifecycle:
   enter_sequence: tuple[bytes, ...]  # TMS-077 SendProc: D1 default reset then D2 extended
   return_default_request: bytes  # D1 cleanup
   keepalive: KeepaliveSpec | None
+  wire_proven_categories: frozenset[int] | None = None
 
 
 def _session_byte(value: Any, what: str) -> int:
@@ -109,6 +110,13 @@ def parse_lifecycle(profile: Profile) -> SessionLifecycle | None:
 
   enter_sequence = _parse_enter_sequence(raw, default_session, extended_session)
 
+  wire_proven_categories = None
+  if raw.get("wire_proven_categories") is not None:
+    rows = raw["wire_proven_categories"]
+    if not isinstance(rows, list) or not rows or any(isinstance(value, bool) or not isinstance(value, int) for value in rows):
+      raise registry.RegistryError("session_control.wire_proven_categories: expected a non-empty integer list")
+    wire_proven_categories = frozenset(rows)
+
   keepalive = None
   if raw.get("keepalive") is not None:
     spec = raw["keepalive"]
@@ -135,6 +143,7 @@ def parse_lifecycle(profile: Profile) -> SessionLifecycle | None:
     enter_sequence=enter_sequence,
     return_default_request=return_default,
     keepalive=keepalive,
+    wire_proven_categories=wire_proven_categories,
   )
 
 
@@ -203,6 +212,10 @@ class DiagnosticSession:
     self.profile = profile
     self.ecu = ecu
     self.timeouts = registry.commset_timeouts(profile, operation_row)
+    # v4 also carries the raw Toyota CommSet row. Keep it visible to callers,
+    # but do not reinterpret receive_timeout=1020 as seconds until Toyota's
+    # CheckAndConvertRcvTimeOut conversion is recovered.
+    self.session_commset = profile.session_commset(ecu)
     self.cleanup_errors: list[str] = []
     self._lifecycle: SessionLifecycle | None | None = None  # parsed lazily; None means absent
     self._active_session: int | None = None  # session byte when this session established it
@@ -247,6 +260,19 @@ class DiagnosticSession:
       raise LifecycleError(f"DID {self._session_did():#06x} returned no session byte")
     return value[0]
 
+  def require_lifecycle_proven(self) -> SessionLifecycle:
+    """Return lifecycle metadata only when its host behavior is proven for this ECU category."""
+    lifecycle = self.lifecycle
+    if lifecycle is None:
+      raise LifecycleUnsupported("registry supplies no recovered session_control metadata")
+    proven = lifecycle.wire_proven_categories
+    if proven is not None and self.ecu.category_id not in proven:
+      category = "unresolved" if self.ecu.category_id is None else str(self.ecu.category_id)
+      allowed = ", ".join(str(value) for value in sorted(proven))
+      raise LifecycleUnsupported(
+        f"current-P5 lifecycle is not wire-proven for ECU category {category}; proven categories: {allowed}")
+    return lifecycle
+
   def enter_extended(self, *, acknowledge: bool = False) -> None:
     """TMS-077 SendProc entry into the extended session; requires an explicit acknowledgement.
 
@@ -257,9 +283,7 @@ class DiagnosticSession:
     """
     if not acknowledge:
       raise LifecycleError("entering the extended session requires an explicit acknowledgement")
-    lifecycle = self.lifecycle
-    if lifecycle is None:
-      raise LifecycleUnsupported("registry supplies no recovered session_control metadata; cannot enter the extended session")
+    lifecycle = self.require_lifecycle_proven()
     if self._active_session == lifecycle.extended_session:
       return
     poll = self._declared_session_poll(lifecycle)
@@ -285,17 +309,15 @@ class DiagnosticSession:
 
   def restore_default(self) -> None:
     """D1 cleanup: return the ECU to the recovered default session."""
-    lifecycle = self.lifecycle
-    if lifecycle is None:
-      raise LifecycleUnsupported("registry supplies no recovered session_control metadata; cannot restore the default session")
+    lifecycle = self.require_lifecycle_proven()
     self.client().diagnostic_session_control(lifecycle.default_session)
     self._active_session = None
     self._extended = False
 
   def keepalive(self) -> None:
     """One recovered keepalive step: tester present or the `22 F1 86` session-DID poll."""
-    lifecycle = self.lifecycle
-    if lifecycle is None or lifecycle.keepalive is None:
+    lifecycle = self.require_lifecycle_proven()
+    if lifecycle.keepalive is None:
       raise LifecycleUnsupported("registry supplies no recovered keepalive metadata")
     spec = lifecycle.keepalive
     if spec.kind == KEEPALIVE_TESTER_PRESENT:

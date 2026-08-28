@@ -12,7 +12,7 @@ class TestRegistry(unittest.TestCase):
     cls.profile = registry.load_registry()
 
   def test_exact_camry_profile_and_guard(self):
-    self.assertEqual(self.profile.document["schema"], "toyota-diagnostics-registry-v3")
+    self.assertEqual(self.profile.document["schema"], "toyota-diagnostics-registry-v4")
     self.assertEqual(self.profile.name, "camry-2026-f33")
     self.assertEqual(self.profile.bus, 0)
     self.assertEqual(self.profile.fault_status_mask, 0xAF)
@@ -56,6 +56,21 @@ class TestRegistry(unittest.TestCase):
     test = self.profile.lookup_active_test("frc", "0xA429")
     self.assertEqual((test["routine_id"], test["start_static"], test["stop_static"], test["result_static"]),
                      (0x1588, "31011588", "31021588", "31031588"))
+    self.assertEqual((test["execution"], test["session_requirement"]), ("executable", "extended"))
+
+  def test_v4_lifecycle_plugins_and_utility_family_metadata(self):
+    session = self.profile.session_control
+    self.assertEqual((session["generation"], session["enter_sequence"], session["return_default"]),
+                     ("current-p5", ["1001", "1003"], "1001"))
+    self.assertEqual(session["wire_proven_categories"], [397, 435, 498])
+    self.assertEqual(session["keepalive"]["request"], "22f186")
+    comm_set_id, commset = self.profile.session_commset("frc")
+    self.assertEqual((comm_set_id, commset["receive_timeout"], commset["retry_count"]), (1, 1020, 1))
+    plugins = self.profile.roles("frc")
+    self.assertTrue(any(row["role"] == 5 and row["dll"] == "GetDatMonListP5_DT.dll" for row in plugins))
+    self.assertEqual(len(self.profile.utility_bindings()), 10)
+    self.assertEqual(self.profile.lookup_utility_family("0xD4")["semantic_kind"], "single_routine_active_test")
+    self.assertEqual(self.profile.utilities("frc"), [])
 
   def test_dtc_status_names_match_opendbc(self):
     self.assertEqual(registry.decode_status_bits(0xAF), get_dtc_status_names(0xAF))

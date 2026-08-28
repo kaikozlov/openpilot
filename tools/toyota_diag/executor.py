@@ -28,7 +28,7 @@ from opendbc.car.uds import CONTROL_PARAMETER_TYPE, ROUTINE_CONTROL_TYPE
 
 from tools.toyota_diag import registry
 from tools.toyota_diag.registry import EcuSpec
-from tools.toyota_diag.session import DiagnosticSession
+from tools.toyota_diag.session import DiagnosticSession, LifecycleError, parse_lifecycle
 
 EXECUTION_EXECUTABLE = "executable"
 SESSION_REQUIREMENT_EXTENDED = "extended"
@@ -54,9 +54,10 @@ class ExecutorError(ValueError):
 class PlanNotExecutable(ExecutorError):
   """The registry row does not resolve to an executable plan."""
 
-  def __init__(self, plan: TestPlan) -> None:
+  def __init__(self, plan: TestPlan, refusals: tuple[str, ...] | None = None) -> None:
     self.plan = plan
-    details = "; ".join(plan.refusals) if plan.refusals else "plan is not resolved for execution"
+    self.refusals = plan.refusals if refusals is None else refusals
+    details = "; ".join(self.refusals) if self.refusals else "plan is not resolved for execution"
     super().__init__(f"{plan.describe()} is not executable: {details}")
 
 
@@ -172,11 +173,31 @@ def resolve_plan(ecu: EcuSpec, row: dict[str, Any]) -> TestPlan:
                   refusals=(f"kind is {kind!r}, expected 'direct' or 'routine'",))
 
 
+def runtime_refusals(profile: registry.Profile, plan: TestPlan) -> tuple[str, ...]:
+  """Execution gates beyond static wire geometry; pure and zero-transmit."""
+  refusals = list(plan.refusals)
+  if plan.session_requirement == SESSION_REQUIREMENT_EXTENDED:
+    try:
+      lifecycle = parse_lifecycle(profile)
+    except (registry.RegistryError, LifecycleError) as e:
+      refusals.append(f"recovered lifecycle metadata is not executable: {e}")
+    else:
+      if lifecycle is None:
+        refusals.append("registry supplies no recovered session lifecycle")
+      elif lifecycle.wire_proven_categories is not None and plan.ecu.category_id not in lifecycle.wire_proven_categories:
+        category = "unresolved" if plan.ecu.category_id is None else str(plan.ecu.category_id)
+        allowed = ", ".join(str(value) for value in sorted(lifecycle.wire_proven_categories))
+        refusals.append(f"current-P5 lifecycle is not wire-proven for ECU category {category}; proven categories: {allowed}")
+  return tuple(refusals)
+
+
 def _resolve_direct(ecu: EcuSpec, test_id: int, name: str, row: dict[str, Any]) -> DirectTestPlan:
   refusals = _base_refusals(row, "direct", DIRECT_SERVICE, DIRECT_POSITIVE_SID)
   kwargs: dict[str, Any] = {}
   try:
     did = registry.parse_int(row["did"], "direct did")
+    if did == 0xFFFF:
+      refusals.append("direct DID is unresolved placeholder 0xFFFF")
     start_prefix = registry.parse_bytes(row["start_prefix"], "direct start_prefix")
     stop_prefix = registry.parse_bytes(row["stop_prefix"], "direct stop_prefix")
     start = _decompose_direct_prefix(start_prefix, did, "start_prefix")
@@ -212,6 +233,8 @@ def _resolve_routine(ecu: EcuSpec, test_id: int, name: str, row: dict[str, Any])
   kwargs: dict[str, Any] = {}
   try:
     rid = registry.parse_int(row["routine_id"], "routine routine_id")
+    if rid == 0xFFFF:
+      refusals.append("routine identifier is unresolved placeholder 0xFFFF")
     start_option = _decompose_routine_static(registry.parse_bytes(row["start_static"], "routine start_static"),
                                              ROUTINE_CONTROL_START, rid, "start_static")
     stop_option = _decompose_routine_static(registry.parse_bytes(row["stop_static"], "routine stop_static"),
@@ -281,8 +304,13 @@ def _prepare(session: DiagnosticSession, plan: TestPlan, *, execute: bool,
   """
   if not execute:
     return plan.session_requirement
-  if not plan.executable:
-    raise PlanNotExecutable(plan)
+  refusals = runtime_refusals(session.profile, plan)
+  if refusals:
+    raise PlanNotExecutable(plan, refusals)
+  # Refuse before even the read-only identity guard when the recovered lifecycle
+  # is explicitly bounded to other ECU categories.
+  if plan.session_requirement == SESSION_REQUIREMENT_EXTENDED:
+    session.require_lifecycle_proven()
   session.guard(echo=echo)
   if plan.session_requirement == SESSION_REQUIREMENT_EXTENDED:
     session.enter_extended(acknowledge=True)
@@ -336,9 +364,10 @@ def run_direct_test(session: DiagnosticSession, plan: DirectTestPlan, *, hold_s:
     started = True
     statuses = _hold(session, hold_s=hold_s, status_fn=None, poll_interval_s=None, sleep=sleep, clock=clock)
     stop = stop_control()
-  except BaseException:
+  except BaseException as e:
     if started:
       _best_effort_stop(cleanup_errors, stop_control)
+    _attach_cleanup_errors(e, cleanup_errors)
     raise
   return ActiveTestResult(plan=plan, executed=True, session_requirement=session_requirement, start=start,
                           statuses=statuses, stop=stop, cleanup_errors=tuple(cleanup_errors + session.cleanup_errors))
@@ -358,16 +387,20 @@ def run_routine_test(session: DiagnosticSession, plan: RoutineTestPlan, *, hold_
     raise ExecutorError(f"expected a routine plan, got kind {plan.kind!r}")
   if hold_s <= 0:
     raise ExecutorError("hold_s must be positive")
+  if not execute:
+    session_requirement = _prepare(session, plan, execute=False, echo=echo)
+    return ActiveTestResult(plan=plan, executed=False, session_requirement=session_requirement)
+
+  refusals = runtime_refusals(session.profile, plan)
+  if refusals:
+    raise PlanNotExecutable(plan, refusals)
   if plan.parameterized:
     if not option_record:
       raise ExecutorError("registry marks this routine parameterized; explicit option_record bytes are required")
   elif option_record:
     raise ExecutorError("fixed routine takes no runtime option record")
 
-  session_requirement = _prepare(session, plan, execute=execute, echo=echo)
-  if not execute:
-    return ActiveTestResult(plan=plan, executed=False, session_requirement=session_requirement)
-
+  session_requirement = _prepare(session, plan, execute=True, echo=echo)
   client = session.client()
   start_option = plan.start_option_prefix + (option_record if plan.parameterized else b"")
 
@@ -385,12 +418,42 @@ def run_routine_test(session: DiagnosticSession, plan: RoutineTestPlan, *, hold_
     statuses = _hold(session, hold_s=hold_s, status_fn=_status_poller(client, plan),
                      poll_interval_s=poll_interval_s, sleep=sleep, clock=clock)
     stop = _routine_stop(client, plan)
-  except BaseException:
+  except BaseException as e:
     if started:
       _best_effort_stop(cleanup_errors, emergency_stop)
+    _attach_cleanup_errors(e, cleanup_errors)
     raise
   return ActiveTestResult(plan=plan, executed=True, session_requirement=session_requirement, start=start,
                           statuses=statuses, stop=stop, cleanup_errors=tuple(cleanup_errors + session.cleanup_errors))
+
+
+def stop_test(session: DiagnosticSession, plan: TestPlan, *, control_enable_mask: bytes = b"",
+              execute: bool = False, echo: Callable[[str], None] = print) -> ActiveTestResult:
+  """Explicit recovery/stop surface for an already-running recovered Active Test.
+
+  Routine stops use the recovered fixed 0x31 stop request. Direct controls require
+  an explicit control-enable mask of exactly the recovered runtime length. Like
+  normal execution, no transmission occurs without `execute=True`.
+  """
+  session_requirement = _prepare(session, plan, execute=execute, echo=echo)
+  if not execute:
+    return ActiveTestResult(plan=plan, executed=False, session_requirement=session_requirement)
+
+  client = session.client()
+  if isinstance(plan, RoutineTestPlan):
+    stop = _routine_stop(client, plan)
+  elif isinstance(plan, DirectTestPlan):
+    if plan.runtime_length is None:
+      raise PlanNotExecutable(plan)
+    if len(control_enable_mask) != plan.runtime_length:
+      raise ExecutorError(
+        f"control_enable_mask must be exactly {plan.runtime_length} byte(s), got {len(control_enable_mask)}")
+    stop = client.input_output_control_by_identifier(
+      plan.did, CONTROL_PARAMETER_TYPE(plan.stop_control), plan.stop_option_prefix, control_enable_mask)
+  else:
+    raise ExecutorError(f"expected a routine or direct plan, got kind {plan.kind!r}")
+  return ActiveTestResult(plan=plan, executed=True, session_requirement=session_requirement, stop=stop,
+                          cleanup_errors=tuple(session.cleanup_errors))
 
 
 def _status_poller(client, plan: RoutineTestPlan) -> Callable[[], bytes] | None:
@@ -401,6 +464,15 @@ def _status_poller(client, plan: RoutineTestPlan) -> Callable[[], bytes] | None:
     return client.routine_control(ROUTINE_CONTROL_TYPE(plan.status_control), plan.rid, plan.status_option_prefix)
 
   return poll
+
+
+def _attach_cleanup_errors(error: BaseException, errors: list[str]) -> None:
+  if not errors:
+    return
+  try:
+    error.toyota_cleanup_errors = tuple(errors)
+  except BaseException:
+    pass
 
 
 def _best_effort_stop(errors: list[str], stop: Callable[[], Any]) -> None:

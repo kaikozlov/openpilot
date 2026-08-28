@@ -1,9 +1,10 @@
 """Techstream-style Utilities backend over the registry catalogs.
 
-Utilities are catalog rows (`catalogs.<id>.utilities`) with the same shape as
-Active Tests; listing/planning/running reuses the executor's plan resolution and
-run backends. The bundled v3 registry carries no `utilities` metadata, so listing
-returns nothing and running fails closed — the registry still loads unchanged.
+Concrete executable utilities are catalog rows (`catalogs.<id>.utilities`) with
+the same shape as Active Tests; planning/running reuses the executor backends.
+Registry v4 additionally carries top-level recovered generic utility-family
+metadata (`utilities.bindings`) for discovery only. Those families are never
+silently promoted into executable per-ECU operations.
 """
 from __future__ import annotations
 
@@ -16,6 +17,16 @@ from tools.toyota_diag.registry import EcuSpec, Profile
 from tools.toyota_diag.session import DiagnosticSession
 
 PLAN_ONLY_NOTE = "no utility request is sent without an explicit execute acknowledgement"
+
+
+def list_families(profile: Profile) -> list[dict[str, Any]]:
+  """Recovered generic utility/plugin families; metadata-only in registry v4."""
+  return profile.utility_bindings()
+
+
+def plan_family(profile: Profile, query: str) -> dict[str, Any]:
+  """Resolve one generic utility family without claiming a concrete ECU operation."""
+  return profile.lookup_utility_family(query)
 
 
 def list_utilities(profile: Profile, ecu: EcuSpec | None = None) -> list[tuple[EcuSpec, list[dict[str, Any]]]]:

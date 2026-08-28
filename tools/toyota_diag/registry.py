@@ -134,6 +134,34 @@ class Profile:
     raw = self.document["profile"].get("session_control")
     return raw if isinstance(raw, dict) else None
 
+  def commset(self, comm_set_id: int) -> dict[str, Any] | None:
+    """Raw Toyota CommSet row; timeout units remain intentionally untranslated."""
+    raw = self.document.get("commsets")
+    rows = raw.get("rows") if isinstance(raw, dict) else None
+    row = rows.get(str(comm_set_id)) if isinstance(rows, dict) else None
+    return row if isinstance(row, dict) else None
+
+  def session_commset(self, ecu: EcuSpec | str | int) -> tuple[int, dict[str, Any]] | None:
+    """CommSet referenced by this category's recovered session frames, when v4 supplies one."""
+    spec = ecu if isinstance(ecu, EcuSpec) else self.lookup_ecu(ecu)
+    raw = self.session_control
+    per_category = raw.get("per_category") if raw is not None else None
+    category = per_category.get(str(spec.category_id)) if isinstance(per_category, dict) else None
+    if not isinstance(category, dict):
+      return None
+    ids = {
+      int(frame["comm_set"])
+      for key in ("default_session", "extended_session", "keepalive")
+      if isinstance((frame := category.get(key)), dict) and frame.get("comm_set") is not None
+    }
+    if len(ids) != 1:
+      raise RegistryError(f"session_control category {spec.category_id}: expected one shared CommSet, got {sorted(ids)}")
+    comm_set_id = next(iter(ids))
+    row = self.commset(comm_set_id)
+    if row is None:
+      raise RegistryError(f"session_control category {spec.category_id}: CommSet {comm_set_id} is not present")
+    return comm_set_id, row
+
   def guard_specs(self) -> tuple[tuple[int, str, Guard], ...]:
     ecu = self.lookup_ecu(self.guard.ecu_key)
     return ((ecu.address, ecu.name, self.guard),)
@@ -212,17 +240,24 @@ class Profile:
 
   def roles(self, ecu: EcuSpec | str | int) -> list[dict[str, Any]]:
     category = self.category(ecu)
-    return [] if category is None else category.get("roles", [])
-
-  def utilities(self, ecu: EcuSpec | str | int) -> list[dict[str, Any]]:
-    category = self.category(ecu)
     if category is None:
       return []
-    explicit = category.get("utilities")
-    if isinstance(explicit, list):
-      return explicit
-    # v1-v3 registries expose routine Active Tests but no separate utility catalog.
-    return [row for row in category.get("active_tests", []) if row.get("kind") == "routine"]
+    rows = category.get("roles")
+    if isinstance(rows, list):
+      return rows
+    # Registry v4 names the recovered role→DLL surface `plugins`.
+    plugins = category.get("plugins")
+    return plugins if isinstance(plugins, list) else []
+
+  @property
+  def utility_metadata(self) -> dict[str, Any] | None:
+    raw = self.document.get("utilities")
+    return raw if isinstance(raw, dict) else None
+
+  def utility_bindings(self) -> list[dict[str, Any]]:
+    raw = self.utility_metadata
+    rows = raw.get("bindings") if raw is not None else None
+    return rows if isinstance(rows, list) else []
 
   def suggest_ecus(self, ref: str, limit: int = 5) -> list[EcuSpec]:
     import difflib
@@ -246,6 +281,11 @@ class Profile:
     return out
 
   def utilities(self, ecu: EcuSpec | str | int) -> list[dict[str, Any]]:
+    """Concrete per-ECU utility rows, when a registry has recovered them.
+
+    Registry v4 currently carries generic utility-family metadata at top level,
+    but deliberately contains no concrete per-ECU utility execution rows.
+    """
     category = self.category(ecu)
     rows = category.get("utilities") if category is not None else None
     return rows if isinstance(rows, list) else []
@@ -253,6 +293,28 @@ class Profile:
   def lookup_utility(self, ecu: EcuSpec | str | int, query: str, kind: str | None = None) -> dict[str, Any]:
     rows = [row for row in self.utilities(ecu) if kind is None or row.get("kind") == kind]
     return _lookup_catalog_rows(rows, query, "utility")
+
+  def lookup_utility_family(self, query: str) -> dict[str, Any]:
+    rows = self.utility_bindings()
+    try:
+      role = parse_hex_key(query, "utility role")
+    except RegistryError:
+      role = None
+    if role is not None:
+      matches = [row for row in rows if row.get("role") == role]
+    else:
+      needle = query.casefold()
+      matches = [
+        row for row in rows
+        if needle in str(row.get("semantic_kind") or "").casefold()
+        or needle in str(row.get("dll") or "").casefold()
+      ]
+    matches = _dedupe_rows(matches)
+    if len(matches) == 1:
+      return matches[0]
+    if not matches:
+      raise RegistryError(f"no utility family matches {query!r}")
+    raise RegistryError(f"ambiguous utility family {query!r}; use an exact semantic kind or numeric role")
 
   def lookup_active_test(self, ecu: EcuSpec | str | int, query: str, kind: str | None = None) -> dict[str, Any]:
     tests = [row for row in self.active_tests(ecu) if kind is None or row.get("kind") == kind]
@@ -295,7 +357,17 @@ class Profile:
     return out
 
 
+def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+  """Preserve order while collapsing byte-for-byte-equivalent catalog rows."""
+  out: list[dict[str, Any]] = []
+  for row in rows:
+    if row not in out:
+      out.append(row)
+  return out
+
+
 def _lookup_catalog_rows(rows: list[dict[str, Any]], query: str, what: str) -> dict[str, Any]:
+  rows = _dedupe_rows(rows)
   try:
     item = parse_hex_key(query, what)
   except RegistryError:

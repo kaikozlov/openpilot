@@ -25,9 +25,18 @@ def current_p5_lifecycle(keepalive=None, commset=None, **overrides):
 
 class TestLifecycleParsing(unittest.TestCase):
   def test_absent_metadata_is_none_and_v3_still_loads(self):
-    profile = registry.load_registry()
+    profile = support.load_profile(None)
+    self.assertEqual(profile.document["schema"], "toyota-diagnostics-registry-v3")
     self.assertIsNone(profile.session_control)
     self.assertIsNone(parse_lifecycle(profile))
+
+  def test_bundled_v4_lifecycle_and_wire_scope(self):
+    profile = registry.load_registry()
+    lifecycle = parse_lifecycle(profile)
+    assert lifecycle is not None
+    self.assertEqual(lifecycle.enter_sequence, (bytes.fromhex("1001"), bytes.fromhex("1003")))
+    self.assertEqual(lifecycle.keepalive.did, 0xF186)
+    self.assertEqual(lifecycle.wire_proven_categories, frozenset({397, 435, 498}))
 
   def test_enter_sequence_parses_and_legacy_shape_expands_to_sendproc(self):
     profile = support.load_profile(None, session_control=current_p5_lifecycle())

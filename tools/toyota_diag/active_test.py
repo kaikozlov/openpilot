@@ -1,43 +1,63 @@
-"""Read-only rendering for GTS+-derived Active-Test plans.
+"""Rendering helpers for GTS+-derived Active-Test plans.
 
-There is intentionally no transport import or execution function in this module.
+Rendering never transmits. Runtime execution lives in :mod:`executor` and requires
+an explicit acknowledgement plus a registry row graded ``execution=executable``.
 """
 from __future__ import annotations
 
 from typing import Any
 
+from tools.toyota_diag import executor
 from tools.toyota_diag.registry import EcuSpec, Profile
 
-PLAN_ONLY_BANNER = "PLAN ONLY - no Active Test request is sent."
+PLAN_VIEW_BANNER = "PLAN VIEW - no Active Test request is sent."
+
+
+def _grade(profile: Profile, ecu: EcuSpec, row: dict[str, Any]) -> str:
+  plan = executor.resolve_plan(ecu, row)
+  if not executor.runtime_refusals(profile, plan):
+    return "executable"
+  execution = str(row.get("execution") or "unresolved")
+  if execution == "executable":
+    return "blocked"
+  if execution == "plan_only":
+    return "plan-only"
+  return "unresolved"
 
 
 def render_list(profile: Profile, ecu: EcuSpec | None = None) -> str:
   ecus = [ecu] if ecu is not None else [item for item in profile.ecus if profile.active_tests(item)]
-  lines = [PLAN_ONLY_BANNER]
+  lines = [PLAN_VIEW_BANNER]
   for spec in ecus:
     tests = profile.active_tests(spec)
     if not tests:
       continue
     lines.append(f"\n{spec.key} ({spec.name}) - {len(tests)} candidate(s)")
     for test in tests:
-      state = "resolved" if test.get("execution") == "plan_only" else "unresolved"
-      lines.append(f"  0x{int(test['id']):04X}  {test.get('kind','?'):<7} {state:<10} {test.get('name') or ''}")
+      lines.append(
+        f"  0x{int(test['id']):04X}  {test.get('kind','?'):<7} {_grade(profile, spec, test):<10} {test.get('name') or ''}")
   if len(lines) == 1:
     lines.append("no Active Tests in selected catalog")
   return "\n".join(lines)
 
 
-def render_plan(ecu: EcuSpec, test: dict[str, Any]) -> str:
+def render_plan(profile: Profile, ecu: EcuSpec, test: dict[str, Any]) -> str:
+  execution = str(test.get("execution") or "unresolved_static_plan")
+  plan = executor.resolve_plan(ecu, test)
+  runtime_refusals = executor.runtime_refusals(profile, plan)
   lines = [
-    PLAN_ONLY_BANNER,
+    PLAN_VIEW_BANNER,
     f"ECU: {ecu.key} ({ecu.name})",
     f"Active Test: 0x{int(test['id']):04X} {test.get('name') or ''}",
     f"kind: {test.get('kind')}",
-    f"resolution: {test.get('execution')}",
+    f"resolution: {execution}",
   ]
-  if test.get("execution") != "plan_only":
+  if test.get("session_requirement"):
+    lines.append(f"session: {test['session_requirement']}")
+  if execution == "unresolved_static_plan":
     lines.append(f"reason: {test.get('reason') or test.get('error') or 'static plan unresolved'}")
     return "\n".join(lines)
+
   if test.get("kind") == "routine":
     lines.extend([
       f"RID: 0x{int(test['routine_id']):04X}",
@@ -48,7 +68,7 @@ def render_plan(ecu: EcuSpec, test: dict[str, Any]) -> str:
       f"fixed request: {bool(test.get('fixed_request'))}",
     ])
     if not test.get("fixed_request"):
-      lines.append("parameterized: static bytes are not authorization to invent runtime value/button data")
+      lines.append("parameterized: runtime value/button data remains explicit and is never invented")
   elif test.get("kind") == "direct":
     lines.extend([
       f"DID: 0x{int(test['did']):04X}",
@@ -61,4 +81,12 @@ def render_plan(ecu: EcuSpec, test: dict[str, Any]) -> str:
     examples = test.get("minimum_examples")
     if examples:
       lines.append(f"minimum examples only: {examples.get('raw_0')} / {examples.get('raw_1')} / {examples.get('return_control')}")
+  if not runtime_refusals:
+    lines.append("runtime: executable; transmission still requires explicit --execute and the vehicle identity guard")
+  elif execution == "executable":
+    lines.append("runtime: blocked despite complete static geometry")
+    lines.extend(f"  refusal: {reason}" for reason in runtime_refusals)
+  else:
+    lines.append("runtime: plan-only; unresolved runtime data prevents execution")
+    lines.extend(f"  refusal: {reason}" for reason in runtime_refusals)
   return "\n".join(lines)

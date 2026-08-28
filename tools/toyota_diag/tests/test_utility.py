@@ -33,10 +33,13 @@ class TestBundledRegistry(unittest.TestCase):
   def setUpClass(cls):
     cls.profile = registry.load_registry()
 
-  def test_bundled_v3_registry_remains_plan_only_and_utilities_empty(self):
-    self.assertIsNone(self.profile.session_control)
+  def test_bundled_v4_exposes_generic_families_but_no_concrete_utilities(self):
+    self.assertIsNotNone(self.profile.session_control)
     self.assertEqual(utility.list_utilities(self.profile), [])
     self.assertEqual(self.profile.utilities("frc"), [])
+    families = utility.list_families(self.profile)
+    self.assertEqual(len(families), 10)
+    self.assertEqual(utility.plan_family(self.profile, "0xD4")["semantic_kind"], "single_routine_active_test")
     with self.assertRaises(registry.RegistryError):
       self.profile.lookup_utility("frc", "0x3001")
 

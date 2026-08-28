@@ -93,20 +93,32 @@ def search(profile: Profile, query: str, limit: int = 50) -> list[SearchResult]:
       if score:
         results.append(SearchResult("function", ecu, ident, name or "Function", str(row.get("semantic_kind") or ""), score))
 
-    for row in category.get("roles", []):
-      ident = str(row.get("role") or row.get("id") or "")
-      name = str(row.get("plugin") or row.get("name") or "")
+    for row in profile.roles(ecu):
+      role = row.get("role") or row.get("id") or ""
+      ident = f"0x{int(role):02X}" if isinstance(role, int) else str(role)
+      name = str(row.get("dll") or row.get("plugin") or row.get("name") or "")
       semantic = str(row.get("semantic_kind") or row.get("kind") or "")
-      score = _score(query, (ident, name, semantic))
+      status = str(row.get("semantic_status") or "")
+      score = _score(query, (ident, name, semantic, status))
       if score:
-        results.append(SearchResult("role", ecu, ident, name or "Role", semantic, score))
+        detail = " ".join(value for value in (semantic, status) if value)
+        results.append(SearchResult("plugin", ecu, ident, name or "Plugin", detail, score))
 
-    for row in category.get("utilities", []):
+    for row in profile.utilities(ecu):
       ident = str(row.get("id") or row.get("routine_id") or "")
       name = str(row.get("name") or "")
       score = _score(query, (ident, name, str(row.get("kind") or "")))
       if score:
         results.append(SearchResult("utility", ecu, ident, name or "Utility", str(row.get("execution") or ""), score))
+
+  for row in profile.utility_bindings():
+    role = row.get("role")
+    ident = f"0x{int(role):02X}" if isinstance(role, int) else str(role or "")
+    name = str(row.get("semantic_kind") or row.get("dll") or "Utility family")
+    detail = str(row.get("dll") or "")
+    score = _score(query, (ident, name, detail))
+    if score:
+      results.append(SearchResult("utility-family", None, ident, name, detail, score))
 
   results.sort(key=lambda row: (-row.score, row.kind, row.ecu.key if row.ecu else "", row.identifier, row.name))
   return results[:limit]
@@ -135,8 +147,8 @@ def summary_counts(profile: Profile, ecu: EcuSpec) -> dict[str, int]:
     "dtcs": sum(len(rows) for rows in dtcs.values()),
     "active_tests": len(category.get("active_tests", [])),
     "functions": len(category.get("functions", [])),
-    "roles": len(category.get("roles", [])),
-    "utilities": len(category.get("utilities", [])),
+    "roles": len(profile.roles(ecu)),
+    "utilities": len(profile.utilities(ecu)),
   }
 
 

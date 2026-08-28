@@ -4,8 +4,8 @@ from opendbc.car.uds import MessageTimeoutError, NegativeResponseError
 
 from tools.toyota_diag import registry
 from tools.toyota_diag.executor import (DirectTestPlan, ExecutorError, PlanNotExecutable, RoutineTestPlan,
-                                        resolve_plan, run_direct_test, run_routine_test)
-from tools.toyota_diag.session import DiagnosticSession, LifecycleUnsupported
+                                        resolve_plan, run_direct_test, run_routine_test, runtime_refusals)
+from tools.toyota_diag.session import DiagnosticSession
 from tools.toyota_diag.tests import support
 
 ADDR = support.SYNTH_ECU_ADDRESS
@@ -56,13 +56,30 @@ def session_calls(scripted):
 
 
 class TestPlanResolution(unittest.TestCase):
-  def test_bundled_v3_rows_stay_plan_only(self):
+  def test_bundled_v4_runtime_grades_are_stricter_than_static_geometry(self):
     profile = registry.load_registry()
-    row = profile.lookup_active_test("frc", "0xA429")
-    plan = resolve_plan(profile.lookup_ecu("frc"), row)
+
+    frc_row = profile.lookup_active_test("frc", "0xA429")
+    frc_plan = resolve_plan(profile.lookup_ecu("frc"), frc_row)
+    self.assertTrue(frc_plan.executable)
+    self.assertEqual(runtime_refusals(profile, frc_plan), ())
+
+    engine_row = next(row for row in profile.active_tests("engine") if row.get("execution") == "executable")
+    engine_plan = resolve_plan(profile.lookup_ecu("engine"), engine_row)
+    self.assertTrue(engine_plan.executable)  # static request geometry is complete
+    self.assertIn("not wire-proven for ECU category 372", " ".join(runtime_refusals(profile, engine_plan)))
+
+    brake_row = profile.lookup_active_test("brake", "42001")
+    brake_plan = resolve_plan(profile.lookup_ecu("brake"), brake_row)
+    self.assertFalse(brake_plan.executable)
+    self.assertIn("placeholder 0xFFFF", " ".join(brake_plan.refusals))
+
+  def test_legacy_v3_row_stays_plan_only_without_runtime_authorization(self):
+    profile = support.load_profile(None, active_tests=[executable_routine(execution="plan_only")])
+    row = profile.lookup_active_test("ecu", "0x2001")
+    plan = resolve_plan(profile.lookup_ecu("ecu"), row)
     self.assertFalse(plan.executable)
     self.assertIn("execution is 'plan_only'", " ".join(plan.refusals))
-    self.assertIn("session_requirement", " ".join(plan.refusals))
 
   def test_unresolved_and_partially_recovered_rows_refuse(self):
     ecu = support.synthetic_ecu(support.load_profile(None))
@@ -182,9 +199,9 @@ class TestRoutineExecution(unittest.TestCase):
 
   def test_extended_requirement_without_lifecycle_fails_closed_before_start(self):
     routine_scripts(self.scripted)
-    with self.assertRaises(LifecycleUnsupported):
+    with self.assertRaises(PlanNotExecutable):
       self.run_with(executable_routine(session_requirement="extended"), execute=True)
-    self.assertEqual([call[1] for call in self.scripted.calls], ["read_did"])  # guard only, no mutation
+    self.assertEqual(self.scripted.calls, [])  # lifecycle refusal happens before even the identity-guard read
 
   def test_exception_during_hold_still_stops_the_routine(self):
     self.scripted.routine[(ADDR, 1, 0x1105)] = b"\x00"
@@ -224,12 +241,17 @@ class TestRoutineExecution(unittest.TestCase):
     plan = resolve_plan(ecu, executable_routine())
     assert isinstance(plan, RoutineTestPlan)
     session = DiagnosticSession(profile, ecu, client_factory=self.scripted.factory)
-    with self.assertRaises(KeyboardInterrupt):
+    with self.assertRaises(KeyboardInterrupt) as caught:
       run_routine_test(session, plan, hold_s=5.0, execute=True, echo=lambda text: None, sleep=no_sleep)
     self.assertEqual(routine_controls(self.scripted), [1, 2])  # stop attempted even though it timed out
+    self.assertIn("emergency stop failed", " ".join(caught.exception.toyota_cleanup_errors))
 
   def test_parameterized_routine_requires_explicit_option_record(self):
     routine_scripts(self.scripted)
+    dry = self.run_with(executable_routine(fixed_request=False), execute=False)
+    self.assertFalse(dry.executed)
+    self.assertEqual(self.scripted.calls, [])  # dry-run never validates runtime payload by touching the vehicle
+
     with self.assertRaises(ExecutorError):
       self.run_with(executable_routine(fixed_request=False), execute=True)
     self.assertEqual(self.scripted.calls, [])  # refused before any read or transmit
