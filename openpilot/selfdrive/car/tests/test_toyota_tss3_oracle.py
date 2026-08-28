@@ -47,7 +47,7 @@ def exact_cp(*, passive: bool = True, f181: bytes = b"\x028965F3307000\x00"):
 
 class TestToyotaTSS3FrcOracle(unittest.TestCase):
   def test_exact_fixed_rdbi_frames_only(self):
-    self.assertEqual(FRC_BUS, 1)
+    self.assertEqual(FRC_BUS, 0)
     self.assertEqual(FRC_REQUESTS, {
       FRC_LTA_DID: bytes.fromhex("0322160100000000"),
       FRC_ACC_OPERATION_DID: bytes.fromhex("0322191400000000"),
@@ -99,14 +99,15 @@ class TestToyotaTSS3FrcOracle(unittest.TestCase):
       CanData(FRC_TX, FRC_REQUESTS[FRC_ACC_OPERATION_DID], FRC_BUS),
     ])
 
-  def test_only_exact_bus1_positive_responses_count(self):
+  def test_only_exact_post_repin_bus0_positive_responses_count(self):
     poller = ToyotaTSS3FrcOraclePoller()
     start = 2_000_000_000
     poller.poll(start, diagnostics_allowed=True)
     lta = bytes.fromhex("0762160101000000")
     acc = bytes.fromhex("0562191480000000")
-    poller.observe([[CanData(FRC_RX, lta, 0), CanData(FRC_RX, acc, FRC_BUS)]], start + 10_000_000)
-    # Bus-0 LTA must not keep the exact bus-1 capture alive.
+    poller.observe([[CanData(FRC_RX, lta, 1), CanData(FRC_RX, acc, FRC_BUS)]], start + 10_000_000)
+    # A pre-repin/logical-bus1 LTA response must not keep the exact post-repin
+    # bus0 capture alive.
     self.assertEqual(poller.poll(start + RESPONSE_STALE_NS + 1, diagnostics_allowed=True), [])
     self.assertTrue(poller.stopped)
 

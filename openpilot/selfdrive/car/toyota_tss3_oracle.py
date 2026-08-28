@@ -7,9 +7,10 @@ from opendbc.car.toyota.values import CAR, Ecu
 
 FRC_TX = 0x792
 FRC_RX = 0x79A
-# Exact Camry live diagnostics and the post-repin topology both place FRC on
-# logical bus 1; do not probe unrelated buses for this identity-bound helper.
-FRC_BUS = 1
+# The relay-correct 2026-08-27 post-repin DTC sweep directly reaches FRC 0x792
+# on Panda logical bus 0. Toyota/GTS+ Central-Gateway "Bus 1" is a vehicle
+# topology label, not a Panda bus number; do not conflate the two namespaces.
+FRC_BUS = 0
 FRC_LTA_DID = 0x1601
 FRC_ACC_OPERATION_DID = 0x1914
 F33_EPS_F181 = b"8965F3307000"

@@ -222,8 +222,11 @@ The checked-out fork already contains the passive target-native implementation:
   `ToyotaTSS3FrcOracleCapture`. It is exact-F33/F181-bound, requires passive CarParams,
   `ControlsReady=false`, one Panda reporting ELM327 parameter 1 with controls disallowed,
   and uses `card`'s existing `sendcan` publisher (never a second Panda owner). It emits
-  only fixed 8-byte SID-`0x22` requests to the proven FRC route **bus 1 / 0x792** for
-  DIDs `0x1601` and `0x1914`, alternated at 10 Hz per DID; if exact positive FRC responses
+  only fixed 8-byte SID-`0x22` requests to the relay-correct post-repin FRC route
+  **Panda bus 0 / 0x792** for
+  DIDs `0x1601` and `0x1914`, alternated at 10 Hz per DID. The earlier normal-harness
+  pre-repin diagnostic route was Panda bus1; current-GTS+ “Bus 1” is a Central-Gateway
+  topology label and must not be read as a Panda bus number. If exact positive FRC responses
   never appear or disappear for two seconds, polling stops for that process lifetime.
   This capture path does not set `ControlsReady`, enable a Toyota control safety model,
   or emit any steering/vehicle-control frame.
