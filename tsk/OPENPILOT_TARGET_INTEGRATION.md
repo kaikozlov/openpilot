@@ -39,6 +39,7 @@ means no correct implementation primitive has yet been recovered.
 | F33 cruise switch observation | **implemented-read-only** | FRC P5 DIDs and bus-1 `0x0FE/32` MAIN/RES+/SET-/CANCEL carrier are retained; following-distance `0x251/0x5AF` joins remain candidates |
 | F33 protected B6 receiver / SecOC geometry | **implemented-read-only** | exact PDU44, 28-byte application + FV4/CMAC28, FV46/CMAC128, slot4/command7, Target Lateral ID, signed target angle, sequence, companion fields and exact target limits/timing are represented in opendbc helpers/DBC |
 | F33 passive platform / DBC / CarState | **implemented-read-only** | `TOYOTA_CAMRY_TSS3` has exact F181 binding, generated TSS3 DBC, source-real Ready/gear replay, state parsing, explicit B6 packing/freshness/signing interfaces and shadow safety. CarParams remains `dashcamOnly` / `SafetyModel.noOutput`; controller emits zero CAN |
+| F33 synchronized FRC operating-state capture | **implemented-read-only / live-pending** | DEVELOPMENT_ONLY `ToyotaTSS3FrcOracleCapture` stays passive and exact-F181-bound, reuses `card`'s sole `sendcan` publisher, requires ELM327 param1 + ControlsReady=false + controls disallowed, and emits only fixed bus-1 `0x792` SID-22 reads for `0x1601`/`0x1914`; a 2 s exact-response watchdog stops failed captures. Normal loggerd therefore retains request/response timing without a competing Panda process. |
 | F33 generated Tx/status + `0x394` classifier | **implemented-read-only** | exact `0x030/0x351/0x394/0x4A3/0x4C8` Tx/packer geometry is retained and the 17-row `0x394` table projection is decoded to candidate internal states; lossy tuples stay candidate sets and are deliberately not converted to openpilot temporary/permanent faults |
 | F33 production B6 sender / safety | **blocked-by-live-policy** | receiver limits/timing are closed, but stock B6 cadence/full 28-byte template/freshness, exclusive relay suppression, ICU-S generation permission/latency, driver override/current response and live fault/recovery dynamics remain mandatory |
 | F33 application-retained RAM placement | **implemented-read-only** | low `FEBF0000` boot pocket is disproved as application-retained; live high tail `FEBFF9F0..FEBFFBFB` (524 bytes) survives stock startup and is executable |
@@ -260,7 +261,9 @@ The passive Camry TSS3 platform now supplies exact identity, platform/DBC/CarSta
 receiver limits/timing, shadow B6 packing/freshness and source-real Ready/gear state. Before
 it can become a production-control port, the corresponding opendbc change still needs:
 
-- complete **stock-captured** B6 28-byte template/cadence, sequence restart and freshness behavior;
+- synchronized factory operating-state evidence using FRC `0x1601` + `0x1914`; only if B6
+  appears in that interval does the port still need its stock 28-byte template/cadence, sequence
+  restart and freshness behavior. Repeated relay-correct blind drives already retained zero B6;
 - relay-correct stock producer location and exclusive suppression behavior;
 - application-context ICU-S slot-4 general-generation permission and measured latency/jitter;
 - a validated physical driver-override threshold for the decoded `0x030` torque plus

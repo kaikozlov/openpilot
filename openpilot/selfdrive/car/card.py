@@ -21,6 +21,7 @@ from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.car.toyota_tss3_dev import parse_toyota_tss3_development_config
+from openpilot.selfdrive.car.toyota_tss3_oracle import configure_toyota_tss3_frc_oracle, elm327_diagnostic_ready
 
 REPLAY = "REPLAY" in os.environ
 
@@ -154,6 +155,12 @@ class Car:
       safety_config.safetyModel = structs.CarParams.SafetyModel.noOutput
       self.CP.safetyConfigs = [safety_config]
 
+    self.tss3_frc_oracle = configure_toyota_tss3_frc_oracle(
+      self.params, is_release, self.CP, self.tss3_development_lateral,
+    )
+    if self.tss3_frc_oracle is not None:
+      cloudlog.warning("Enabled exact-F33 read-only FRC LTA/ACC oracle capture; vehicle controls remain disabled")
+
     if self.CP.secOcRequired:
       # Copy user key if available
       try:
@@ -232,6 +239,9 @@ class Car:
     can_strs = messaging.drain_sock_raw(self.can_sock, wait_for_one=True)
     can_list = can_capnp_to_list(can_strs)
 
+    if self.tss3_frc_oracle is not None:
+      self.tss3_frc_oracle.observe(can_list, time.monotonic_ns())
+
     # Update carState from CAN
     CS = self.CI.update(can_list)
 
@@ -290,6 +300,14 @@ class Car:
       tracks_msg.radarTracks = RD
       self.pm.send('radarTracks', tracks_msg)
 
+  def tss3_frc_oracle_update(self, CS: car.CarState) -> None:
+    if self.tss3_frc_oracle is None:
+      return
+    diagnostics_allowed = CS.canValid and elm327_diagnostic_ready(self.sm['pandaStates'])
+    can_sends = self.tss3_frc_oracle.poll(time.monotonic_ns(), diagnostics_allowed=diagnostics_allowed)
+    if can_sends:
+      self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=True))
+
   def controls_update(self, CS: car.CarState, CC: car.CarControl):
     """control update loop, driven by carControl"""
 
@@ -312,6 +330,7 @@ class Car:
     CS, RD = self.state_update()
 
     self.state_publish(CS, RD)
+    self.tss3_frc_oracle_update(CS)
 
     initialized = (not any(e.name == EventName.selfdriveInitializing for e in self.sm['onroadEvents']) and
                    self.sm.seen['onroadEvents'])

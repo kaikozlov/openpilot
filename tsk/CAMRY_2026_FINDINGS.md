@@ -218,14 +218,28 @@ The checked-out fork already contains the passive target-native implementation:
   1–3 control-frame cadence, and explicit Gate-2-bypass plus exclusive-B6-authority attestations;
 - that development sender intentionally emits an invalid MAC and therefore does not constitute a
   production SecOC signer or production TSS3 output support.
+- an independent DEVELOPMENT_ONLY **read-only FRC oracle capture** can be armed with
+  `ToyotaTSS3FrcOracleCapture`. It is exact-F33/F181-bound, requires passive CarParams,
+  `ControlsReady=false`, one Panda reporting ELM327 parameter 1 with controls disallowed,
+  and uses `card`'s existing `sendcan` publisher (never a second Panda owner). It emits
+  only fixed 8-byte SID-`0x22` requests to the proven FRC route **bus 1 / 0x792** for
+  DIDs `0x1601` and `0x1914`, alternated at 10 Hz per DID; if exact positive FRC responses
+  never appear or disappear for two seconds, polling stops for that process lifetime.
+  This capture path does not set `ControlsReady`, enable a Toyota control safety model,
+  or emit any steering/vehicle-control frame.
 
 ## Remaining production gates
 
 Static receiver discovery is no longer the principal blocker. Before lateral output can
 be enabled we still need all of the following live/architecture closures:
 
-1. relay-correct **stock B6 off -> active -> off capture**: exact cadence, full 28-byte
-   application template/secondary fields, sequence restart, freshness behavior;
+1. a relay-correct synchronized factory-operating-state capture. Two blind drives already
+   retained healthy protected traffic with zero B6, so the next discriminator is FRC
+   `0x1601` (LTA Switch/Control) plus `0x1914` (ACC Control in Operation) in the normal
+   loggerd route. If that machine-proves the expected factory operating interval while B6
+   remains absent, the upstream FRC/Brake transformation or a non-COM/internal EPS path
+   becomes the next RE boundary rather than another blind B6 drive; if B6 appears, retain
+   its exact cadence/full 28-byte template/secondary fields, sequence restart and freshness;
 2. proof of exclusive stock-B6 producer suppression / relay authority;
 3. application-context ICU-S slot-4 **general generation permission and latency/jitter**;
 4. validated driver-override and motor-Q-current response policy;
