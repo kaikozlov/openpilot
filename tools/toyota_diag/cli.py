@@ -166,7 +166,7 @@ def _scan_set(profile: Profile, refs: list[str] | None) -> list[tuple[int, str]]
 
 def cmd_dtc_scan(args, profile: Profile) -> int:
   transport = _live_transport()
-  panda = transport.connect()
+  panda = transport.connect(profile)
   client_factory = transport.uds_client_factory(panda, profile)
   responding, faults = dtc.scan(client_factory, _scan_set(profile, args.ecu), profile.fault_status_mask, show_all=args.all)
   print(f"responding ECUs: {len(responding)}; fault-status records: {len(faults)}")
@@ -183,7 +183,7 @@ def cmd_dtc_scan(args, profile: Profile) -> int:
 def cmd_dtc_clear(args, profile: Profile) -> int:
   import time
   transport = _live_transport()
-  panda = transport.connect()
+  panda = transport.connect(profile)
   client_factory = transport.uds_client_factory(panda, profile)
   scan_set = _scan_set(profile, None)
 
@@ -273,7 +273,7 @@ def cmd_did_read(args, profile: Profile) -> int:
   except registry.RegistryError as e:
     raise SystemExit(str(e)) from e
   transport = _live_transport()
-  panda = transport.connect()
+  panda = transport.connect(profile)
   client = transport.uds_client_factory(panda, profile)(ecu.address)
   values = []
   for did, signals in dids:
@@ -300,7 +300,7 @@ def cmd_did_watch(args, profile: Profile) -> int:
     raise SystemExit(str(e)) from e
 
   transport = _live_transport()
-  panda = transport.connect()
+  panda = transport.connect(profile)
   client = transport.uds_client_factory(panda, profile)(ecu.address)
   started = time.monotonic()
   sample = 0
@@ -344,7 +344,7 @@ def cmd_uds_raw(args, profile: Profile) -> int:
     raise SystemExit(f"refusing mutating service 0x{service:02X}; pass --force (identity guard still applies)")
 
   transport = _live_transport()
-  panda = transport.connect()
+  panda = transport.connect(profile)
   client_factory = transport.uds_client_factory(panda, profile)
   if mutating:
     _guard(profile, client_factory)
@@ -370,7 +370,7 @@ def cmd_functional_obd(args, profile: Profile) -> int:
     raise SystemExit(f"refusing mutating OBD mode 0x{mode:02X}; pass --force (identity guard still applies)")
 
   transport = _live_transport()
-  panda = transport.connect()
+  panda = transport.connect(profile)
   if mutating:
     _guard(profile, transport.uds_client_factory(panda, profile))
   positives = dtc.functional_obd_request(panda, mode, payload, profile.legislated_responders, profile.bus, args.window)

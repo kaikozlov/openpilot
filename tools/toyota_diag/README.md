@@ -13,7 +13,7 @@ Offline discovery works without Panda access:
 ./tools/toyota active-test plan frc 0xA429
 ```
 
-Live reads require `pandad` to be stopped so the process has exclusive Panda ownership:
+Live commands have two transport modes. If `pandad` is stopped, the CLI takes direct Panda ownership using the exact live-validated Camry ELM327 setup. If `pandad` is already running, the CLI reuses openpilot's `can`/`sendcan` ISO-TP path **only** when the one live Panda is already in ELM327 safety param 1 with `controlsAllowed=false` on the profile's validated bus-0 topology. It never changes a running Panda's safety mode; if openpilot has already transitioned to Toyota/onroad safety, the command fails closed and tells you to stop manager for direct access.
 
 ```bash
 ./tools/toyota dtc scan

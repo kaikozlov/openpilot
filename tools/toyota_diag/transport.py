@@ -1,31 +1,123 @@
-"""Exclusive-Panda transport for live Toyota diagnostics."""
+"""Live Toyota diagnostic transports.
+
+When pandad is stopped, use direct Panda ownership and the exact Camry-validated
+ELM327 setup. When pandad is already running, reuse openpilot's can/sendcan
+messaging path only if the live Panda is already in the validated non-OBD
+ELM327 diagnostic state with controls disallowed. The managed path never
+changes Panda safety itself.
+"""
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from subprocess import CalledProcessError, check_output
+from typing import Any
 
 from opendbc.car.structs import CarParams
 from opendbc.car.uds import IsoTpMessage, UdsClient
 
 from tools.toyota_diag.registry import Profile
 
+ELM327_PARAM_NORMAL = 1
+MANAGED_READY_TIMEOUT = 1.0
+SENDCAN_WARMUP = 0.15
 
-def require_exclusive_panda() -> None:
+
+def pandad_running() -> bool:
   try:
     check_output(["pidof", "pandad"])
+    return True
   except CalledProcessError as e:
     if e.returncode == 1:
-      return
+      return False
     raise
   except FileNotFoundError as e:
-    raise SystemExit("cannot verify exclusive Panda access: pidof unavailable") from e
-  raise SystemExit("pandad is running; stop openpilot/manager before live Toyota diagnostics")
+    raise SystemExit("cannot verify Panda ownership: pidof unavailable") from e
 
 
-def connect():
-  require_exclusive_panda()
+def managed_diagnostic_ready(panda_states: Any, profile: Profile) -> bool:
+  """Return whether sendcan is in the exact fail-closed state used for F33 diagnostics."""
+  if profile.bus != 0 or len(panda_states) != 1:
+    return False
+  state = panda_states[0]
+  return (state.safetyModel == CarParams.SafetyModel.elm327 and
+          state.safetyParam == ELM327_PARAM_NORMAL and
+          not state.controlsAllowed)
+
+
+def _managed_refusal(panda_states: Any, profile: Profile) -> str:
+  if profile.bus != 0:
+    return f"profile Panda bus {profile.bus} is not validated for managed diagnostics"
+  if len(panda_states) != 1:
+    return f"expected one Panda for managed diagnostics, got {len(panda_states)}"
+  state = panda_states[0]
+  return "".join((
+    "pandad is running but Panda is not in diagnostic-safe ELM327/param1 state ",
+    f"(safetyModel={state.safetyModel}, safetyParam={state.safetyParam}, controlsAllowed={state.controlsAllowed}); ",
+    "stop openpilot/manager for direct Panda diagnostics",
+  ))
+
+
+class ManagedPandaAdapter:
+  """Minimal Panda-compatible CAN adapter backed by openpilot can/sendcan sockets."""
+
+  def __init__(self, profile: Profile, *, messaging_module=None, can_serializer=None,
+               sleep: Callable[[float], None] = time.sleep) -> None:
+    if messaging_module is None:
+      import openpilot.cereal.messaging as messaging_module
+    if can_serializer is None:
+      from openpilot.selfdrive.pandad import can_list_to_can_capnp
+      can_serializer = can_list_to_can_capnp
+
+    self.profile = profile
+    self.messaging = messaging_module
+    self.can_serializer = can_serializer
+    self.can_sock = messaging_module.sub_sock("can", conflate=False, timeout=100)
+    self.sendcan = messaging_module.pub_sock("sendcan")
+    self.sm = messaging_module.SubMaster(["pandaStates"])
+
+    deadline = time.monotonic() + MANAGED_READY_TIMEOUT
+    states = self.sm["pandaStates"]
+    while not len(states) and time.monotonic() < deadline:
+      self.sm.update(100)
+      states = self.sm["pandaStates"]
+    self._assert_ready()
+
+    # ZMQ slow-joiner guard; openpilot's own VIN/FW path relies on the same
+    # publisher/subscriber connection settling before the first diagnostic TX.
+    sleep(SENDCAN_WARMUP)
+
+  def _assert_ready(self) -> None:
+    self.sm.update(0)
+    states = self.sm["pandaStates"]
+    if not managed_diagnostic_ready(states, self.profile):
+      raise SystemExit(_managed_refusal(states, self.profile))
+
+  def can_send(self, address: int, data: bytes, bus: int, timeout=None) -> None:
+    del timeout
+    self._assert_ready()
+    payload = self.can_serializer([(address, bytes(data), bus)], msgtype="sendcan")
+    self.sendcan.send(payload)
+
+  def can_recv(self) -> list[tuple[int, bytes, int]]:
+    frames: list[tuple[int, bytes, int]] = []
+    for event in self.messaging.drain_sock(self.can_sock, wait_for_one=False):
+      frames.extend((msg.address, bytes(msg.dat), msg.src) for msg in event.can)
+    return frames
+
+  def can_clear(self, flags: int) -> None:
+    del flags
+    self.messaging.drain_sock(self.can_sock, wait_for_one=False)
+
+
+def connect(profile: Profile):
+  if pandad_running():
+    return ManagedPandaAdapter(profile)
+
   from panda import Panda  # lazy: offline commands must not import Panda
   panda = Panda()
+  # Param 0 is the exact live-validated Camry DTC-clear setup. The current
+  # profile uses bus 0, so the bus-1 OBD multiplex side effect is irrelevant.
   panda.set_safety_mode(CarParams.SafetyModel.elm327, 0)
   return panda
 
