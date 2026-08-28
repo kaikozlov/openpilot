@@ -7,6 +7,7 @@ binary/database payloads are required on the Comma.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -127,6 +128,16 @@ class Profile:
   def gts_can_topology(self) -> dict[str, Any] | None:
     return self.document["profile"].get("gts_can_topology")
 
+  @property
+  def session_control(self) -> dict[str, Any] | None:
+    """Raw recovered session-lifecycle metadata, or None when the registry supplies none."""
+    raw = self.document["profile"].get("session_control")
+    return raw if isinstance(raw, dict) else None
+
+  def guard_specs(self) -> tuple[tuple[int, str, Guard], ...]:
+    ecu = self.lookup_ecu(self.guard.ecu_key)
+    return ((ecu.address, ecu.name, self.guard),)
+
   def observed_identity(self, ecu: EcuSpec | str | int) -> dict[str, Any] | None:
     spec = ecu if isinstance(ecu, EcuSpec) else self.lookup_ecu(ecu)
     raw = next(row for row in self.document["profile"]["ecus"] if row["key"] == spec.key)
@@ -234,6 +245,19 @@ class Profile:
         out.append(ecu)
     return out
 
+  def utilities(self, ecu: EcuSpec | str | int) -> list[dict[str, Any]]:
+    category = self.category(ecu)
+    rows = category.get("utilities") if category is not None else None
+    return rows if isinstance(rows, list) else []
+
+  def lookup_utility(self, ecu: EcuSpec | str | int, query: str, kind: str | None = None) -> dict[str, Any]:
+    rows = [row for row in self.utilities(ecu) if kind is None or row.get("kind") == kind]
+    return _lookup_catalog_rows(rows, query, "utility")
+
+  def lookup_active_test(self, ecu: EcuSpec | str | int, query: str, kind: str | None = None) -> dict[str, Any]:
+    tests = [row for row in self.active_tests(ecu) if kind is None or row.get("kind") == kind]
+    return _lookup_catalog_rows(tests, query, "Active Test")
+
   def resolve_did(self, ecu: EcuSpec | str | int, query: str) -> tuple[int, list[dict[str, Any]]]:
     dids = self.dids(ecu)
     try:
@@ -261,24 +285,6 @@ class Profile:
       raise RegistryError(f"no DID matches {query!r}")
     raise RegistryError(f"DID name {query!r} maps to multiple DIDs: {', '.join(f'0x{x:04X}' for x in matches)}")
 
-  def lookup_active_test(self, ecu: EcuSpec | str | int, query: str, kind: str | None = None) -> dict[str, Any]:
-    tests = [row for row in self.active_tests(ecu) if kind is None or row.get("kind") == kind]
-    try:
-      item = parse_hex_key(query, "Active Test")
-    except RegistryError:
-      item = None
-    if item is not None:
-      matches = [row for row in tests if row.get("id") == item]
-    else:
-      needle = query.casefold()
-      exact = [row for row in tests if str(row.get("name") or "").casefold() == needle]
-      matches = exact or [row for row in tests if needle in str(row.get("name") or "").casefold()]
-    if len(matches) == 1:
-      return matches[0]
-    if not matches:
-      raise RegistryError(f"no Active Test matches {query!r}")
-    raise RegistryError(f"ambiguous Active Test {query!r}; specify --kind or numeric ID")
-
   def describe_dtc(self, ecu: EcuSpec | str | int, code: str) -> list[dict[str, Any]]:
     needle = re.sub(r"[^0-9A-Za-z]", "", code).casefold()
     out = []
@@ -287,6 +293,64 @@ class Profile:
         if re.sub(r"[^0-9A-Za-z]", "", str(row.get("code") or "")).casefold() == needle:
           out.append(row)
     return out
+
+
+def _lookup_catalog_rows(rows: list[dict[str, Any]], query: str, what: str) -> dict[str, Any]:
+  try:
+    item = parse_hex_key(query, what)
+  except RegistryError:
+    item = None
+  if item is not None:
+    matches = [row for row in rows if row.get("id") == item]
+  else:
+    needle = query.casefold()
+    exact = [row for row in rows if str(row.get("name") or "").casefold() == needle]
+    matches = exact or [row for row in rows if needle in str(row.get("name") or "").casefold()]
+  if len(matches) == 1:
+    return matches[0]
+  if not matches:
+    raise RegistryError(f"no {what} matches {query!r}")
+  raise RegistryError(f"ambiguous {what} {query!r}; specify --kind or numeric ID")
+
+
+@dataclass(frozen=True)
+class CommTimeouts:
+  """CommSet-style UDS timing in seconds, mirroring the UdsClient constructor units."""
+  uds_timeout: float
+  response_pending_timeout: float
+
+
+_COMMSET_KEYS = frozenset({"uds_timeout_s", "response_pending_timeout_s"})
+
+
+def parse_seconds(value: Any, what: str) -> float:
+  if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) or value <= 0:
+    raise RegistryError(f"{what}: expected a positive finite number of seconds, got {value!r}")
+  return float(value)
+
+
+def commset_timeouts(profile: Profile, row: dict[str, Any] | None = None) -> CommTimeouts:
+  """Resolve CommSet timeouts: operation row overrides profile session_control overrides live-validated defaults."""
+  sources: list[tuple[str, Any]] = []
+  raw = profile.session_control
+  if raw is not None and raw.get("commset") is not None:
+    sources.append(("profile session_control.commset", raw["commset"]))
+  if row is not None and row.get("commset") is not None:
+    sources.append(("operation commset", row["commset"]))
+  values: dict[str, float] = {
+    "uds_timeout_s": profile.uds_timeout,
+    "response_pending_timeout_s": profile.uds_response_pending_timeout,
+  }
+  for what, commset in sources:
+    if not isinstance(commset, dict):
+      raise RegistryError(f"{what}: expected an object")
+    unknown = sorted(set(commset) - _COMMSET_KEYS)
+    if unknown:
+      raise RegistryError(f"{what}: unsupported commset keys: {', '.join(unknown)}")
+    for key in sorted(_COMMSET_KEYS):
+      if key in commset:
+        values[key] = parse_seconds(commset[key], f"{what}.{key}")
+  return CommTimeouts(uds_timeout=values["uds_timeout_s"], response_pending_timeout=values["response_pending_timeout_s"])
 
 
 def _load_ecus(profile: dict[str, Any]) -> tuple[EcuSpec, ...]:

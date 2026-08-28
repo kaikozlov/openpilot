@@ -1,6 +1,10 @@
 """No-hardware doubles for Toyota diagnostic CLI tests."""
 from __future__ import annotations
 
+import json
+import tempfile
+from pathlib import Path
+
 from opendbc.car.uds import MessageTimeoutError, NegativeResponseError
 
 CAMRY_ECUS = [
@@ -58,6 +62,28 @@ class _ScriptedClient:
     self.owner.calls.append((self.address, "read_did", did))
     return self.owner.result(self.owner.did.get(self.address, {}).get(did), MessageTimeoutError())
 
+  def diagnostic_session_control(self, session_type):
+    self.owner.calls.append((self.address, "session", int(session_type)))
+    return self.owner.result(self.owner.session.get((self.address, int(session_type))), None)
+
+  def tester_present(self, *args, **kwargs):
+    self.owner.calls.append((self.address, "tester_present"))
+    return self.owner.result(self.owner.tester.get(self.address), None)
+
+  def input_output_control_by_identifier(self, did, control_parameter_type,
+                                         control_option_record=b"", control_enable_mask_record=b""):
+    self.owner.calls.append((self.address, "io_control", int(did), int(control_parameter_type),
+                             bytes(control_option_record), bytes(control_enable_mask_record)))
+    return self.owner.result(self.owner.io_control.get((self.address, int(did), int(control_parameter_type))), b"")
+
+  def routine_control(self, routine_control_type, routine_identifier, routine_option_record=b""):
+    self.owner.calls.append((self.address, "routine", int(routine_control_type), int(routine_identifier),
+                             bytes(routine_option_record)))
+    return self.owner.result(
+      self.owner.routine.get((self.address, int(routine_control_type), int(routine_identifier))), b"")
+
+
+
 
 class ScriptedUds:
   def __init__(self):
@@ -65,6 +91,11 @@ class ScriptedUds:
     self.dtc = {}
     self.clear = {}
     self.did = {}
+    self.session = {}
+    self.tester = {}
+    self.io_control = {}
+    self.routine = {}
+
 
   @staticmethod
   def result(script, default):
@@ -84,3 +115,56 @@ class ScriptedUds:
   @staticmethod
   def negative_response():
     return NegativeResponseError("service not supported", 0x14, 0x11)
+
+
+SYNTH_ECU_KEY = "ecu"
+SYNTH_ECU_ADDRESS = 0x7A0
+SYNTH_CATEGORY_ID = 9001
+
+
+def build_registry_document(*, session_control=None, active_tests=None, utilities=None) -> dict:
+  """A minimal loader-valid registry document for runtime-core tests."""
+  catalog = {
+    "category": {"name": "Synthetic"},
+    "dids": {},
+    "dtcs": {},
+    "active_tests": list(active_tests or []),
+  }
+  if utilities is not None:
+    catalog["utilities"] = list(utilities)
+  profile = {
+    "profile": "synthetic-test",
+    "vehicle": "Synthetic Vehicle",
+    "panda_bus": 0,
+    "fault_status_mask": 0xAF,
+    "ecus": [{"key": SYNTH_ECU_KEY, "name": "Synthetic ECU", "address": SYNTH_ECU_ADDRESS,
+              "category_id": SYNTH_CATEGORY_ID}],
+    "identity_guard": {"ecu": SYNTH_ECU_KEY, "did": 0xF181, "contains_ascii": "8965F3307000"},
+    "dtc_clear": {"functional_obd": {"request_id": 0x7DF, "mode04_request": "0104000000000000",
+                                     "expected_responders": [0x7E8]}},
+  }
+  if session_control is not None:
+    profile["session_control"] = session_control
+  return {"schema": "toyota-diagnostics-registry-v3", "profile": profile, "catalogs": {str(SYNTH_CATEGORY_ID): catalog}}
+
+
+def write_registry(document, tmp_path):
+  path = tmp_path / "synthetic_registry.json"
+  path.write_text(json.dumps(document))
+  return path
+
+
+def load_profile(tmp_path=None, **document_kwargs):
+  from tools.toyota_diag import registry
+  if tmp_path is None:
+    with tempfile.TemporaryDirectory() as directory:
+      return registry.load_registry(write_registry(build_registry_document(**document_kwargs), Path(directory)))
+  return registry.load_registry(write_registry(build_registry_document(**document_kwargs), tmp_path))
+
+
+def synthetic_ecu(profile):
+  return profile.lookup_ecu(SYNTH_ECU_KEY)
+
+
+def guard_pass(scripted, address=SYNTH_ECU_ADDRESS):
+  scripted.did.setdefault(address, {})[0xF181] = EXPECTED_EPS_F181

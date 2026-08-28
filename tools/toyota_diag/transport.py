@@ -16,6 +16,7 @@ from typing import Any
 from opendbc.car.structs import CarParams
 from opendbc.car.uds import IsoTpMessage, UdsClient
 
+from tools.toyota_diag import registry
 from tools.toyota_diag.registry import Profile
 
 ELM327_PARAM_NORMAL = 1
@@ -167,10 +168,11 @@ def connect(profile: Profile):
   return panda
 
 
-def uds_client_factory(panda, profile: Profile) -> Callable[[int], UdsClient]:
+def uds_client_factory(panda, profile: Profile, timeouts: registry.CommTimeouts | None = None) -> Callable[[int], UdsClient]:
   def factory(address: int) -> UdsClient:
-    return UdsClient(panda, address, bus=profile.bus, timeout=profile.uds_timeout,
-                     response_pending_timeout=profile.uds_response_pending_timeout)
+    return UdsClient(panda, address, bus=profile.bus,
+                     timeout=timeouts.uds_timeout if timeouts is not None else profile.uds_timeout,
+                     response_pending_timeout=timeouts.response_pending_timeout if timeouts is not None else profile.uds_response_pending_timeout)
   return factory
 
 
