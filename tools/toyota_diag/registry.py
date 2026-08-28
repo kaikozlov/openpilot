@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_REGISTRY = Path(__file__).with_name("data") / "camry_2026_f33.json"
-SUPPORTED_SCHEMAS = frozenset({"toyota-diagnostics-registry-v1", "toyota-diagnostics-registry-v2"})
+SUPPORTED_SCHEMAS = frozenset({
+  "toyota-diagnostics-registry-v1", "toyota-diagnostics-registry-v2", "toyota-diagnostics-registry-v3",
+})
 DEFAULT_UDS_TIMEOUT = 0.35
 DEFAULT_UDS_RESPONSE_PENDING_TIMEOUT = 2.0
 
@@ -119,6 +121,16 @@ class Profile:
   @property
   def dtc_clear(self) -> dict[str, Any]:
     return self.document["profile"]["dtc_clear"]
+
+  @property
+  def gts_can_topology(self) -> dict[str, Any] | None:
+    return self.document["profile"].get("gts_can_topology")
+
+  def observed_identity(self, ecu: EcuSpec | str | int) -> dict[str, Any] | None:
+    spec = ecu if isinstance(ecu, EcuSpec) else self.lookup_ecu(ecu)
+    raw = next(row for row in self.document["profile"]["ecus"] if row["key"] == spec.key)
+    identity = raw.get("observed_identity")
+    return identity if isinstance(identity, dict) else None
 
   @property
   def legislated_responders(self) -> frozenset[int]:

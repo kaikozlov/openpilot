@@ -7,6 +7,7 @@ Offline discovery works without Panda access:
 ```bash
 ./tools/toyota ecu list
 ./tools/toyota ecu info eps
+./tools/toyota can topology
 ./tools/toyota did list frc "LTA Control Condition"
 ./tools/toyota did decode eps 0x1037 0001
 ./tools/toyota dtc catalog frc U0131
@@ -39,8 +40,10 @@ Raw/functional requests that are not in the explicit read-only allowlist require
 
 Active Tests are intentionally **plan-only**. The registry exposes recovered `0x2F` direct and `0x31` routine wire plans, but this CLI has no Active-Test execution path.
 
-Registry v2 also carries the recovered ordinary-P5 Techstream Data Monitor decoder. `did read` always prints the raw DID value bytes first, then decodes each known signal using the registry-selected `p5-linear-msb0-v1` contract: MSB-first bit numbering, big-endian field assembly, two's-complement signed values, `trunc_toward_zero(raw * Mul / Div) + Offset`, exact decimal precision, and converted-value pattern labels. For example, EPS DID `0x1037` renders raw `0001` as `Steering Angle: 1.5 deg`; FRC DID `0x1601` renders Toyota's LTA/Hands-Off state labels. Unknown decoder kinds or undersized payloads fail closed and leave the raw bytes plus metadata visible.
+Registry v2 added the recovered ordinary-P5 Techstream Data Monitor decoder. `did read` always prints the raw DID value bytes first, then decodes each known signal using the registry-selected `p5-linear-msb0-v1` contract: MSB-first bit numbering, big-endian field assembly, two's-complement signed values, `trunc_toward_zero(raw * Mul / Div) + Offset`, exact decimal precision, and converted-value pattern labels. For example, EPS DID `0x1037` renders raw `0001` as `Steering Angle: 1.5 deg`; FRC DID `0x1601` renders Toyota's LTA/Hands-Off state labels. Unknown decoder kinds or undersized payloads fail closed and leave the raw bytes plus metadata visible.
+
+Registry v3 adds the current Camry-HV GTS CAN Bus Check topology plus tracked EPS/FRC/Brake identity observations. `can topology` shows Toyota's vehicle-network domains (for example Front Camera Module on GTS Bus 1 and EPS/Skid Control on GTS Bus 4 behind Central Gateway); those labels are explicitly **not** Panda bus numbers. `ecu info` shows observed F181/F18C/part identities where available and labels their 2026-08-26 Panda-bus1 route as historical pre-repin evidence. The active diagnostic profile remains post-repin Panda bus0.
 
 `did read` and `did watch` accept multiple DID numbers or GTS names for one ECU and reuse a single UDS client. `--json` on `read` emits one machine-readable snapshot; `--json` on `watch` emits one JSON object per sample group, making the same phone/SSH command useful as a lightweight capture logger without a separate script. `can sniff` is strictly receive-only: with `pandad` running it subscribes to the public `can` service regardless of Panda safety mode, and with `pandad` stopped it reads directly from Panda without changing safety. It can filter multiple addresses and emit JSONL for analysis captures.
 
-Use `--registry FILE` to load another supported derived registry when additional vehicles are added. The loader accepts v1 for catalog/backward compatibility, but engineering-value decoding requires explicit v2 decoder metadata; it is never inferred for older registries.
+Use `--registry FILE` to load another supported derived registry when additional vehicles are added. The loader accepts v1/v2 for catalog/backward compatibility, but engineering-value decoding requires explicit decoder metadata and topology/observed identities require v3 fields; neither is inferred for older registries.

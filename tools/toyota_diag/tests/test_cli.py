@@ -26,7 +26,9 @@ class TestOfflineCli(unittest.TestCase):
   def test_offline_catalog_and_plans_do_not_import_panda(self):
     with mock.patch.dict(sys.modules, {"panda": None}):
       cases = [
-        (["ecu", "info", "eps"], "8965F3307000"),
+        (["ecu", "info", "eps"], "8965033K9011J2740743"),
+        (["ecu", "info", "frc"], "8646C06091"),
+        (["can", "topology"], "Power Steering (EPS) via Central Gateway"),
         (["did", "list", "frc", "LTA Control Condition"], "0x1601"),
         (["did", "decode", "eps", "0x1037", "0001"], "Steering Angle: 1.5 deg"),
         (["dtc", "catalog", "frc", "U0131"], "Missing Message"),

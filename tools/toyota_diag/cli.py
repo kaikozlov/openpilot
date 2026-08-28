@@ -87,6 +87,15 @@ def cmd_ecu_info(args, profile: Profile) -> int:
     print(f"DIDs:      {len(category['dids'])}")
     print(f"DTCs:      {len(category['dtcs'])}")
     print(f"Active Tests: {len(category['active_tests'])} candidate(s), plan-only")
+  identity = profile.observed_identity(ecu)
+  if identity is not None:
+    print(f"observed:  {identity['observation']}")
+    print(f"F181:      {', '.join(identity['f181_software_ids'])}")
+    if identity.get("ecu_part_0105"):
+      print(f"part 0105: {identity['ecu_part_0105']}")
+    print(f"F18C:      {identity['f18c_serial']}")
+    print(f"obs route: Panda bus {identity['panda_bus_at_observation']}, ELM327 param {identity['elm327_param']}")
+    print(f"route note: {identity['route_note']}")
   if ecu.key == profile.guard.ecu_key:
     print(f"mutation guard: DID 0x{profile.guard.did:04X} contains {profile.guard.contains_ascii}")
   return 0
@@ -164,6 +173,30 @@ def cmd_transport_status(args, profile: Profile) -> int:
     print(f"ready:  {'yes' if state['ready'] else 'no'}")
     print(f"detail: {state['detail']}")
   return 0 if state["ready"] else 1
+
+
+def cmd_can_topology(args, profile: Profile) -> int:
+  topology = profile.gts_can_topology
+  if topology is None:
+    raise SystemExit("registry does not carry GTS CAN topology")
+  if args.json:
+    print(json.dumps(topology, sort_keys=True))
+    return 0
+
+  print(f"Toyota GTS topology: {topology['vehicle_name']} type={topology['vehicle_type']} CANBusCarID={topology['can_bus_car_id']}")
+  print(f"options={topology['option_count']} placement_variants={topology['placement_variant_count']}")
+  placements = topology["placement_variants"][0]["placements"]
+  buses: dict[str, list[dict[str, Any]]] = {}
+  for row in placements:
+    buses.setdefault(row["bus_name"], []).append(row)
+  for bus_name, rows in sorted(buses.items(), key=lambda item: min(row["bus_index"] for row in item[1])):
+    print(f"{bus_name}:")
+    for row in rows:
+      gateways = f" via {', '.join(row['gateway_names'])}" if row["gateway_names"] else ""
+      junction = f" @ {row['junction_name']}" if row["junction_name"] and row["junction_name"] != "-" else ""
+      print(f"  {row['component_hex']}  {row['ecu_domain']}{gateways}{junction}")
+  print(f"boundary: {topology['namespace_boundary']}")
+  return 0
 
 
 def cmd_can_sniff(args, profile: Profile) -> int:
@@ -482,6 +515,9 @@ def build_parser() -> argparse.ArgumentParser:
 
   can_parser = commands.add_parser("can")
   can_sub = can_parser.add_subparsers(required=True)
+  p = can_sub.add_parser("topology")
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_can_topology)
   p = can_sub.add_parser("sniff")
   p.add_argument("address", nargs="+", help="one or more 11/29-bit CAN addresses")
   p.add_argument("--bus", type=int, help="Panda bus (default: profile diagnostic bus)")

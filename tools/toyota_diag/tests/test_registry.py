@@ -12,7 +12,7 @@ class TestRegistry(unittest.TestCase):
     cls.profile = registry.load_registry()
 
   def test_exact_camry_profile_and_guard(self):
-    self.assertEqual(self.profile.document["schema"], "toyota-diagnostics-registry-v2")
+    self.assertEqual(self.profile.document["schema"], "toyota-diagnostics-registry-v3")
     self.assertEqual(self.profile.name, "camry-2026-f33")
     self.assertEqual(self.profile.bus, 0)
     self.assertEqual(self.profile.fault_status_mask, 0xAF)
@@ -21,6 +21,31 @@ class TestRegistry(unittest.TestCase):
     self.assertEqual(self.profile.mode04_request, bytes.fromhex("0104000000000000"))
     self.assertEqual((self.profile.guard.ecu_key, self.profile.guard.did, self.profile.guard.contains),
                      ("eps", 0xF181, support.EXPECTED_EPS_F181))
+
+  def test_topology_and_observed_identities(self):
+    topology = self.profile.gts_can_topology
+    self.assertIsNotNone(topology)
+    self.assertEqual((topology["vehicle_type"], topology["vehicle_name"], topology["can_bus_car_id"]),
+                     (12704, "Camry HV", "0x00A7D910"))
+    self.assertEqual((topology["option_count"], topology["placement_variant_count"]), (18, 1))
+    placements = {row["ecu_domain"]: row for row in topology["placement_variants"][0]["placements"]}
+    self.assertEqual(placements["Front Camera Module"]["bus_name"], "Bus 1")
+    self.assertEqual(placements["Power Steering (EPS)"]["bus_name"], "Bus 4")
+    self.assertEqual(placements["Skid Control (ABS/VSC/TRAC)"]["bus_name"], "Bus 4")
+    self.assertIn("not Panda logical bus numbers", topology["namespace_boundary"])
+
+    eps = self.profile.observed_identity("eps")
+    frc = self.profile.observed_identity("frc")
+    brake = self.profile.observed_identity("brake")
+    self.assertEqual(eps["f181_software_ids"], ["8965F3307000", "8A3113303100"])
+    self.assertEqual(eps["f18c_serial"], "8965033K9011J2740743")
+    self.assertEqual((frc["f181_software_ids"], frc["ecu_part_0105"], frc["f18c_serial"]),
+                     (["8646F3315000"], "8646C06091", "TN69400026030404235J"))
+    self.assertEqual((brake["f181_software_ids"], brake["ecu_part_0105"], brake["f18c_serial"]),
+                     (["F152633K0000"], "8954147040", "8954147040CFC1800985"))
+    for identity in (eps, frc, brake):
+      self.assertEqual((identity["panda_bus_at_observation"], identity["elm327_param"]), (1, 1))
+      self.assertIn("current profile diagnostic route is post-repin Panda bus0", identity["route_note"])
 
   def test_gts_catalog_witnesses(self):
     did, signals = self.profile.resolve_did("frc", "LTA Control Condition")
