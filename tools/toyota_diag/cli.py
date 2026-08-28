@@ -5,7 +5,7 @@ import argparse
 import sys
 from typing import Any
 
-from tools.toyota_diag import active_test, dtc, registry
+from tools.toyota_diag import active_test, decode, dtc, registry
 from tools.toyota_diag.registry import Profile
 
 READ_ONLY_UDS_SERVICES = frozenset({0x19, 0x22, 0x23, 0x24, 0x3E})
@@ -218,10 +218,11 @@ def cmd_did_read(args, profile: Profile) -> int:
   data = transport.uds_client_factory(panda, profile)(ecu.address).read_data_by_identifier(did)
   printable = "".join(chr(value) if 32 <= value < 127 else "." for value in data)
   print(f"{ecu.name} DID 0x{did:04X}: {data.hex()} |{printable}|")
-  # Bit extraction/endian semantics are intentionally not guessed here. Show the exact
-  # GTS-derived metadata next to the raw response until the Data Monitor value decoder is closed.
   for signal in signals:
-    print(f"  {_format_signal(signal)}")
+    try:
+      print(f"  {decode.format_decoded_signal(data, signal)}")
+    except decode.DecodeError as e:
+      print(f"  {_format_signal(signal)} — decode unavailable: {e}")
   return 0
 
 

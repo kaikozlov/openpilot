@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_REGISTRY = Path(__file__).with_name("data") / "camry_2026_f33.json"
-EXPECTED_SCHEMA = "toyota-diagnostics-registry-v1"
+SUPPORTED_SCHEMAS = frozenset({"toyota-diagnostics-registry-v1", "toyota-diagnostics-registry-v2"})
 DEFAULT_UDS_TIMEOUT = 0.35
 DEFAULT_UDS_RESPONSE_PENDING_TIMEOUT = 2.0
 
@@ -255,7 +255,7 @@ def load_registry(path: str | Path = DEFAULT_REGISTRY) -> Profile:
     raise RegistryError(f"registry file not found: {path}") from e
   except json.JSONDecodeError as e:
     raise RegistryError(f"registry is not valid JSON: {path}: {e}") from e
-  if document.get("schema") != EXPECTED_SCHEMA:
+  if document.get("schema") not in SUPPORTED_SCHEMAS:
     raise RegistryError(f"unsupported registry schema {document.get('schema')!r}")
   raw = document.get("profile")
   if not isinstance(raw, dict):

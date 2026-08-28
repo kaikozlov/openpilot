@@ -12,6 +12,7 @@ class TestRegistry(unittest.TestCase):
     cls.profile = registry.load_registry()
 
   def test_exact_camry_profile_and_guard(self):
+    self.assertEqual(self.profile.document["schema"], "toyota-diagnostics-registry-v2")
     self.assertEqual(self.profile.name, "camry-2026-f33")
     self.assertEqual(self.profile.bus, 0)
     self.assertEqual(self.profile.fault_status_mask, 0xAF)
@@ -25,6 +26,7 @@ class TestRegistry(unittest.TestCase):
     did, signals = self.profile.resolve_did("frc", "LTA Control Condition")
     self.assertEqual(did, 0x1601)
     self.assertTrue(any(row["name"] == "LTA Control Condition" for row in signals))
+    self.assertTrue(all(row["decoder"] == "p5-linear-msb0-v1" for row in signals))
     self.assertEqual(self.profile.describe_dtc("frc", "U013187")[0]["failure"], "Missing Message")
     test = self.profile.lookup_active_test("frc", "0xA429")
     self.assertEqual((test["routine_id"], test["start_static"], test["stop_static"], test["result_static"]),

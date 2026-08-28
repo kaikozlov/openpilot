@@ -58,6 +58,27 @@ class TestLiveCli(unittest.TestCase):
   def mode04_panda():
     return support.FakePanda(recv_batches=[[(addr, b"\x01\x44\x00\x00\x00\x00\x00\x00", 0) for addr in support.LEGISLATED_RESPONDERS]])
 
+  def test_did_read_decodes_gts_engineering_value(self):
+    scripted = support.ScriptedUds()
+    scripted.did[0x7A1] = {0x1037: bytes.fromhex("0001")}
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["did", "read", "eps", "0x1037"])
+    self.assertEqual(rc, 0, output)
+    self.assertEqual(scripted.calls, [(0x7A1, "read_did", 0x1037)])
+    self.assertIn("Power Steering DID 0x1037: 0001", output)
+    self.assertIn("Steering Angle: 1.5 deg (raw=0x0001)", output)
+
+  def test_did_read_fails_closed_when_payload_is_short(self):
+    scripted = support.ScriptedUds()
+    scripted.did[0x7A1] = {0x1037: b"\x00"}
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["did", "read", "eps", "0x1037"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("decode unavailable: bits 0..15 exceed 1-byte DID payload", output)
+    self.assertIn("Steering Angle", output)
+
   def test_dtc_clear_preserves_exact_route_and_verifies(self):
     scripted = self.scripted_clear()
     panda = self.mode04_panda()

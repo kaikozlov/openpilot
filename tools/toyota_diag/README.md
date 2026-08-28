@@ -30,6 +30,8 @@ It verifies EPS F181 contains `8965F3307000`, scans the exact 17-address post-re
 
 Raw/functional requests that are not in the explicit read-only allowlist require `--force` **and** the same vehicle identity guard. Unknown/proprietary service IDs therefore fail closed rather than being assumed harmless.
 
-Active Tests are intentionally **plan-only**. The registry exposes recovered `0x2F` direct and `0x31` routine wire plans, but this CLI has no Active-Test execution path. DID reads likewise print raw bytes plus GTS-derived signal metadata; value extraction/endian semantics are not guessed until the Techstream Data Monitor decode path is recovered completely.
+Active Tests are intentionally **plan-only**. The registry exposes recovered `0x2F` direct and `0x31` routine wire plans, but this CLI has no Active-Test execution path.
 
-Use `--registry FILE` to load another registry produced by the same `toyota-diagnostics-registry-v1` schema when additional vehicles are added.
+Registry v2 also carries the recovered ordinary-P5 Techstream Data Monitor decoder. `did read` always prints the raw DID value bytes first, then decodes each known signal using the registry-selected `p5-linear-msb0-v1` contract: MSB-first bit numbering, big-endian field assembly, two's-complement signed values, `trunc_toward_zero(raw * Mul / Div) + Offset`, exact decimal precision, and converted-value pattern labels. For example, EPS DID `0x1037` renders raw `0001` as `Steering Angle: 1.5 deg`; FRC DID `0x1601` renders Toyota's LTA/Hands-Off state labels. Unknown decoder kinds or undersized payloads fail closed and leave the raw bytes plus metadata visible.
+
+Use `--registry FILE` to load another supported derived registry when additional vehicles are added. The loader accepts v1 for catalog/backward compatibility, but engineering-value decoding requires explicit v2 decoder metadata; it is never inferred for older registries.
