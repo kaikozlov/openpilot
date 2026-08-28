@@ -12,8 +12,10 @@ invalid-MAC and exists for the Gate-2 bypass experiment, not as production TSS3 
 
 ## Exact ECU identities and route
 
-All three relevant diagnostic endpoints were observed on **normal-harness routing,
-ELM327 parameter 1, logical bus 1**:
+Before the physical Toyota-B CAN0/CAN1 repin, all three relevant diagnostic endpoints
+were observed on **normal-harness routing, ELM327 parameter 1, Panda logical bus 1**.
+The post-repin 2026-08-27 DTC sweep reaches the same direct diagnostic family on Panda
+bus0; these are capture-topology labels, not Toyota/GTS+ Central-Gateway bus numbers:
 
 | ECU | request -> response | exact identity |
 |---|---|---|
@@ -39,7 +41,7 @@ Controlled passive captures on this exact Camry establish:
 
 FRC P5 DIDs `1202/1901/1905/1906/1912/1914/1918/1928` are readable in NRTD. Isolated
 button captures and a synchronized CAN+diagnostic capture locate the ordinary momentary
-switch carrier at **bus 1 `0x0FE`, 32 bytes, ~33.19 Hz**. For bytes `(B3,B4,B6,B7)`:
+switch carrier at **pre-repin Panda bus 1 `0x0FE`, 32 bytes, ~33.19 Hz**. For bytes `(B3,B4,B6,B7)`:
 
 | state/event | tuple |
 |---|---|
