@@ -23,6 +23,43 @@ class TestOfflineCli(unittest.TestCase):
     self.assertEqual(rc, 0)
     self.assertEqual(__import__("json").loads(output), state)
 
+  def test_search_and_ecu_first_browsing(self):
+    rc, output = run_cli(["search", "LTA", "--limit", "20"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("did          frc", output)
+    self.assertIn("0x1601", output)
+    self.assertNotIn("High Voltage Electric Heater", output)
+
+    rc, output = run_cli(["ecu", "frc"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("Front Recognition Camera", output)
+    self.assertIn("Data List: 148 DID(s), 283 signal(s)", output)
+
+    rc, output = run_cli(["ecu", "frc", "data", "LTA Control"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("0x1601", output)
+    self.assertIn("LTA Control Condition", output)
+
+  def test_profile_name_alias_resolves_bundled_registry(self):
+    rc, output = run_cli(["--profile", "camry-2026-f33", "ecu", "eps"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("Power Steering", output)
+
+  def test_vehicle_commands_are_offline_and_machine_readable(self):
+    import json
+    rc, output = run_cli(["vehicle", "--json"])
+    self.assertEqual(rc, 0, output)
+    document = json.loads(output)
+    self.assertEqual((document["profile"], document["panda_bus"]), ("camry-2026-f33", 0))
+    rc, output = run_cli(["vehicle", "list", "--json"])
+    self.assertEqual(rc, 0, output)
+    rows = json.loads(output)
+    self.assertTrue(any(row["profile"] == "camry-2026-f33" for row in rows))
+
+  def test_ecu_typo_suggests_match(self):
+    with self.assertRaisesRegex(SystemExit, "did you mean frc"):
+      run_cli(["ecu", "frontcam"])
+
   def test_offline_catalog_and_plans_do_not_import_panda(self):
     with mock.patch.dict(sys.modules, {"panda": None}):
       cases = [
@@ -143,6 +180,49 @@ class TestLiveCli(unittest.TestCase):
     self.assertEqual([row["sample"] for row in documents], [1, 2])
     self.assertEqual([[value["did"] for value in row["values"]] for row in documents], [[0x1601, 0x1501], [0x1601, 0x1501]])
     self.assertEqual(len(scripted.calls), 4)
+
+  def test_monitor_jsonl_reuses_one_client_and_decodes(self):
+    import json
+    scripted = support.ScriptedUds()
+    scripted.did[0x792] = {0x1601: bytes.fromhex("01000000")}
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["monitor", "frc", "LTA Control Condition", "--interval", "0", "--count", "2", "--jsonl"])
+    self.assertEqual(rc, 0, output)
+    documents = [json.loads(line) for line in output.splitlines()]
+    self.assertEqual([row["sample"] for row in documents], [1, 2])
+    self.assertEqual(scripted.calls, [(0x792, "read_did", 0x1601), (0x792, "read_did", 0x1601)])
+    condition = next(signal for signal in documents[0]["values"][0]["signals"] if signal["name"] == "LTA Control Condition")
+    self.assertEqual(condition["pattern"], "LTA Enabled")
+
+  def test_scan_builds_high_level_inventory(self):
+    import json
+    scripted = support.ScriptedUds()
+    scripted.dtc[0x7A1] = support.dtc_payload()
+    scripted.did[0x7A1] = {
+      0xF181: b"\x00" + support.EXPECTED_EPS_F181 + b"\x00",
+      0xF18C: b"SERIAL123",
+      0x0105: b"PART123",
+    }
+    panda = support.FakePanda()
+    state = {"pandad_running": True, "mode": "managed-sendcan", "ready": True, "detail": "ready"}
+    with self.patch_live(panda, scripted), mock.patch("tools.toyota_diag.transport.status", return_value=state):
+      rc, output = run_cli(["scan", "--json"])
+    self.assertEqual(rc, 0, output)
+    document = json.loads(output)
+    self.assertEqual((document["profile"], document["responding_ecus"]), ("camry-2026-f33", 1))
+    self.assertEqual(document["ecus"][0]["key"], "eps")
+    self.assertIn("8965F3307000", document["ecus"][0]["identity"]["0xF181"]["ascii"])
+
+  def test_vehicle_detect_is_read_only_identity_match(self):
+    scripted = support.ScriptedUds()
+    scripted.did[0x7A1] = {0xF181: support.EXPECTED_EPS_F181}
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["vehicle", "detect"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("camry-2026-f33", output)
+    self.assertFalse([call for call in scripted.calls if call[1] != "read_did"])
 
   def test_did_read_fails_closed_when_payload_is_short(self):
     scripted = support.ScriptedUds()

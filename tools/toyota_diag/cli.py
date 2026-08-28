@@ -6,7 +6,7 @@ import json
 import sys
 from typing import Any
 
-from tools.toyota_diag import active_test, decode, dtc, registry
+from tools.toyota_diag import active_test, decode, discovery, dtc, monitor, registry, snapshot
 from tools.toyota_diag.registry import Profile
 
 READ_ONLY_UDS_SERVICES = frozenset({0x19, 0x22, 0x23, 0x24, 0x3E})
@@ -58,7 +58,139 @@ def _filter_rows(rows: list[tuple[int, dict[str, Any]]], query: str | None) -> l
   return [(key, row) for key, row in rows if needle in f"0x{key:04x} {row}".casefold()]
 
 
+def _json_or_text(args, document: Any, text: str) -> int:
+  if getattr(args, "json", False):
+    print(json.dumps(document, sort_keys=True))
+  else:
+    print(text)
+  return 0
+
+
 # Offline --------------------------------------------------------------------
+def cmd_search(args, profile: Profile) -> int:
+  rows = discovery.search(profile, args.query, args.limit)
+  if args.json:
+    document = [{
+      "kind": row.kind,
+      "ecu": row.ecu.key if row.ecu else None,
+      "ecu_name": row.ecu.name if row.ecu else None,
+      "identifier": row.identifier,
+      "name": row.name,
+      "detail": row.detail,
+    } for row in rows]
+    print(json.dumps(document, sort_keys=True))
+  else:
+    print(discovery.render(rows))
+  return 0 if rows else 1
+
+
+def cmd_vehicle_show(args, profile: Profile) -> int:
+  document = {
+    "profile": profile.name,
+    "vehicle": profile.vehicle,
+    "panda_bus": profile.bus,
+    "registry": str(profile.path),
+    "identity_guard": {
+      "ecu": profile.guard.ecu_key,
+      "did": profile.guard.did,
+      "contains_ascii": profile.guard.contains_ascii,
+    },
+  }
+  text = "\n".join((
+    profile.vehicle,
+    f"profile:  {profile.name}",
+    f"registry: {profile.path}",
+    f"Panda bus: {profile.bus}",
+    f"guard:    {profile.guard.ecu_key} DID 0x{profile.guard.did:04X} contains {profile.guard.contains_ascii}",
+  ))
+  return _json_or_text(args, document, text)
+
+
+def cmd_vehicle_list(args, profile: Profile) -> int:
+  rows = []
+  for path in registry.available_registries(profile.path.parent):
+    try:
+      item = registry.load_registry(path)
+    except registry.RegistryError:
+      continue
+    rows.append({"profile": item.name, "vehicle": item.vehicle, "path": str(path), "default": path.resolve() == profile.path.resolve()})
+  if args.json:
+    print(json.dumps(rows, sort_keys=True))
+  else:
+    for row in rows:
+      mark = "*" if row["default"] else " "
+      print(f"{mark} {row['profile']:<22} {row['vehicle']}")
+  return 0
+
+
+def cmd_vehicle_detect(args, profile: Profile) -> int:
+  live = _live_transport()
+  candidates = []
+  for path in registry.available_registries(profile.path.parent):
+    try:
+      candidates.append(registry.load_registry(path))
+    except registry.RegistryError:
+      continue
+  matches = []
+  errors = []
+  for candidate in candidates:
+    try:
+      panda = live.connect(candidate)
+      factory = live.uds_client_factory(panda, candidate)
+      ecu = candidate.lookup_ecu(candidate.guard.ecu_key)
+      data = factory(ecu.address).read_data_by_identifier(candidate.guard.did)
+      if candidate.guard.contains in data:
+        matches.append({"profile": candidate.name, "vehicle": candidate.vehicle, "guard_data_hex": bytes(data).hex()})
+    except Exception as e:
+      errors.append({"profile": candidate.name, "error": str(e)})
+  document = {"matches": matches, "errors": errors}
+  if args.json:
+    print(json.dumps(document, sort_keys=True))
+  else:
+    if matches:
+      for row in matches:
+        print(f"✓ {row['profile']}: {row['vehicle']}")
+    else:
+      print("no bundled profile matched the live identity guard")
+    for row in errors:
+      if args.verbose:
+        print(f"  {row['profile']}: {row['error']}")
+  return 0 if matches else 1
+
+
+def cmd_ecu_functions(args, profile: Profile) -> int:
+  try:
+    ecu = profile.lookup_ecu(args.ecu)
+  except registry.RegistryError as e:
+    raise SystemExit(str(e)) from e
+  rows = profile.functions(ecu)
+  if not rows:
+    print("registry has no compiled function hierarchy for this ECU")
+    return 1
+  for row in rows[:args.limit]:
+    ident = row.get("id") or row.get("function_id") or "?"
+    detail = f"/{row['detail_id']}" if row.get("detail_id") is not None else ""
+    name = row.get("name") or row.get("detail_name") or "(unnamed)"
+    semantic = row.get("semantic_kind") or row.get("kind") or ""
+    print(f"{ident}{detail:<8} {name}{f' — {semantic}' if semantic else ''}")
+  return 0
+
+
+def cmd_ecu_data(args, profile: Profile) -> int:
+  args.query = args.query if hasattr(args, "query") else None
+  return cmd_did_list(args, profile)
+
+
+def cmd_ecu_dtcs(args, profile: Profile) -> int:
+  args.query = args.query if hasattr(args, "query") else None
+  return cmd_dtc_catalog(args, profile)
+
+
+def cmd_ecu_active_tests(args, profile: Profile) -> int:
+  args.ecu = args.ecu
+  return cmd_active_test_list(args, profile)
+
+
 def cmd_ecu_list(args, profile: Profile) -> int:
   print(f"{profile.vehicle}  profile={profile.name}  Panda bus={profile.bus}")
   for ecu in profile.ecus:
@@ -83,10 +215,13 @@ def cmd_ecu_info(args, profile: Profile) -> int:
   category = profile.category(ecu)
   if category is not None:
     meta = category["category"]
+    counts = discovery.summary_counts(profile, ecu)
     print(f"GTS DB:    {meta['database']} ({meta['name']})")
-    print(f"DIDs:      {len(category['dids'])}")
-    print(f"DTCs:      {len(category['dtcs'])}")
-    print(f"Active Tests: {len(category['active_tests'])} candidate(s), plan-only")
+    print(f"Data List: {counts['dids']} DID(s), {counts['signals']} signal(s)")
+    print(f"DTCs:      {counts['dtcs']}")
+    print(f"Active Tests: {counts['active_tests']} candidate(s)")
+    if counts["functions"] or counts["roles"]:
+      print(f"Functions: {counts['functions']}  Roles: {counts['roles']}  Utilities: {counts['utilities']}")
   identity = profile.observed_identity(ecu)
   if identity is not None:
     print(f"observed:  {identity['observation']}")
@@ -338,6 +473,30 @@ def _resolve_did_queries(profile: Profile, ecu, queries: list[str]) -> list[tupl
   return resolved
 
 
+def _resolve_monitor_queries(profile: Profile, ecu, queries: list[str]) -> list[tuple[int, list[dict[str, Any]]]]:
+  if not queries:
+    raise registry.RegistryError("monitor requires at least one DID number or Data List search term")
+  out: list[tuple[int, list[dict[str, Any]]]] = []
+  seen: set[int] = set()
+  for query in queries:
+    try:
+      matches = [profile.resolve_did(ecu, query)]
+    except registry.RegistryError as exact_error:
+      needle = query.casefold()
+      matches = [
+        (int(key, 16), rows)
+        for key, rows in profile.dids(ecu).items()
+        if any(needle in str(row.get("name") or "").casefold() for row in rows)
+      ]
+      if not matches:
+        raise exact_error
+    for did, signals in matches:
+      if did not in seen:
+        out.append((did, signals))
+        seen.add(did)
+  return out
+
+
 def _did_value_record(ecu, did: int, signals: list[dict[str, Any]], data: bytes) -> dict[str, Any]:
   decoded = []
   for signal in signals:
@@ -446,6 +605,46 @@ def cmd_did_watch(args, profile: Profile) -> int:
   return 0
 
 
+def cmd_monitor(args, profile: Profile) -> int:
+  try:
+    ecu = profile.lookup_ecu(args.ecu)
+    dids = _resolve_monitor_queries(profile, ecu, args.item)
+  except registry.RegistryError as e:
+    raise SystemExit(str(e)) from e
+  transport = _live_transport()
+  panda = transport.connect(profile)
+  client = transport.uds_client_factory(panda, profile)(ecu.address)
+
+  def read_values():
+    return [_did_value_record(ecu, did, signals, client.read_data_by_identifier(did)) for did, signals in dids]
+
+  try:
+    return monitor.run(
+      ecu.name, read_values,
+      interval=args.interval,
+      count=args.count,
+      changed=args.changed,
+      jsonl=args.jsonl,
+      csv_output=args.csv,
+      clear=False if args.no_clear else None,
+    )
+  except ValueError as e:
+    raise SystemExit(str(e)) from e
+
+
+def cmd_scan(args, profile: Profile) -> int:
+  transport = _live_transport()
+  state = transport.status(profile)
+  panda = transport.connect(profile)
+  client_factory = transport.uds_client_factory(panda, profile)
+  document = snapshot.build(profile, client_factory, state, show_all_dtcs=args.all_dtcs)
+  if args.json:
+    print(json.dumps(document, sort_keys=True))
+  else:
+    print(snapshot.render(document))
+  return 1 if document["fault_status_records"] else 0
+
+
 def cmd_uds_raw(args, profile: Profile) -> int:
   service = _cli_int(args.service, "service")
   if not 0 < service <= 0xFF:
@@ -502,10 +701,48 @@ def cmd_functional_obd(args, profile: Profile) -> int:
 def build_parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(prog="toyota", description="Toyota/GTS-derived diagnostics on a Comma Panda")
   parser.add_argument(
-    "--registry", default=str(registry.DEFAULT_REGISTRY), metavar="FILE",
-    help="derived registry JSON (default: bundled Camry F33 profile)",
+    "--registry", "--profile", dest="registry", default=str(registry.DEFAULT_REGISTRY), metavar="PROFILE_OR_FILE",
+    help="derived profile name or registry JSON (default: bundled Camry F33 profile)",
   )
   commands = parser.add_subparsers(dest="command", required=True)
+
+  p = commands.add_parser("search", help="search ECUs, Data List items, DTCs, functions, and Active Tests")
+  p.add_argument("query")
+  p.add_argument("--limit", type=int, default=50)
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_search)
+
+  vehicle = commands.add_parser("vehicle", help="show, list, or detect vehicle profiles")
+  vehicle.add_argument("--json", action="store_true", help="emit the default vehicle summary as JSON")
+  vehicle_sub = vehicle.add_subparsers(required=False)
+  p = vehicle_sub.add_parser("show")
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_vehicle_show)
+  p = vehicle_sub.add_parser("list")
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_vehicle_list)
+  p = vehicle_sub.add_parser("detect")
+  p.add_argument("--json", action="store_true")
+  p.add_argument("--verbose", action="store_true")
+  p.set_defaults(func=cmd_vehicle_detect)
+  vehicle.set_defaults(func=cmd_vehicle_show, json=False)
+
+  p = commands.add_parser("scan", help="read-only vehicle inventory, identity, and DTC snapshot")
+  p.add_argument("--json", action="store_true")
+  p.add_argument("--all-dtcs", action="store_true", help="preserve non-fault-status DTC records too")
+  p.set_defaults(func=cmd_scan)
+
+  p = commands.add_parser("monitor", help="live decoded Techstream Data List monitor")
+  p.add_argument("ecu")
+  p.add_argument("item", nargs="+", help="DID numbers, exact names, or broad Data List search terms")
+  p.add_argument("--interval", type=float, default=0.25)
+  p.add_argument("--count", type=int, default=0, help="sample groups; 0 means until interrupted")
+  p.add_argument("--changed", action="store_true", help="show only signals whose value changed")
+  output = p.add_mutually_exclusive_group()
+  output.add_argument("--jsonl", action="store_true", help="emit one JSON object per sample group")
+  output.add_argument("--csv", action="store_true", help="emit one CSV row per decoded signal sample")
+  p.add_argument("--no-clear", action="store_true", help="never redraw an interactive terminal in-place")
+  p.set_defaults(func=cmd_monitor)
 
   transport_parser = commands.add_parser("transport")
   transport_sub = transport_parser.add_subparsers(required=True)
@@ -526,13 +763,30 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("--json", action="store_true", help="emit one JSON object per matching frame")
   p.set_defaults(func=cmd_can_sniff)
 
-  ecu = commands.add_parser("ecu")
+  ecu = commands.add_parser("ecu", help="browse one ECU or list known ECUs")
   ecu_sub = ecu.add_subparsers(required=True)
   p = ecu_sub.add_parser("list")
   p.set_defaults(func=cmd_ecu_list)
   p = ecu_sub.add_parser("info")
   p.add_argument("ecu")
   p.set_defaults(func=cmd_ecu_info)
+  p = ecu_sub.add_parser("functions")
+  p.add_argument("ecu")
+  p.add_argument("--limit", type=int, default=100)
+  p.set_defaults(func=cmd_ecu_functions)
+  p = ecu_sub.add_parser("data")
+  p.add_argument("ecu")
+  p.add_argument("query", nargs="?")
+  p.add_argument("--limit", type=int, default=100)
+  p.set_defaults(func=cmd_ecu_data)
+  p = ecu_sub.add_parser("dtcs")
+  p.add_argument("ecu")
+  p.add_argument("query", nargs="?")
+  p.add_argument("--limit", type=int, default=100)
+  p.set_defaults(func=cmd_ecu_dtcs)
+  p = ecu_sub.add_parser("active-tests")
+  p.add_argument("ecu")
+  p.set_defaults(func=cmd_ecu_active_tests)
 
   did = commands.add_parser("did")
   did_sub = did.add_subparsers(required=True)
@@ -610,8 +864,29 @@ def build_parser() -> argparse.ArgumentParser:
   return parser
 
 
+def _normalize_argv(argv: list[str]) -> list[str]:
+  # Preserve the original verb-first surface while allowing the more natural
+  # `toyota ecu frc` / `toyota ecu frc data LTA` browsing form. Global profile
+  # options may precede the command, so normalize only the command tail.
+  prefix: list[str] = []
+  index = 0
+  while index + 1 < len(argv) and argv[index] in {"--registry", "--profile"}:
+    prefix.extend(argv[index:index + 2])
+    index += 2
+  tail = argv[index:]
+  if len(tail) >= 2 and tail[0] == "ecu":
+    actions = {"list", "info", "functions", "data", "dtcs", "active-tests"}
+    if tail[1] not in actions and not tail[1].startswith("-"):
+      ref = tail[1]
+      if len(tail) >= 3 and tail[2] in actions - {"list", "info"}:
+        return [*prefix, "ecu", tail[2], ref, *tail[3:]]
+      return [*prefix, "ecu", "info", ref, *tail[2:]]
+  return argv
+
+
 def main(argv: list[str] | None = None) -> int:
-  args = build_parser().parse_args(argv)
+  normalized = _normalize_argv(list(sys.argv[1:] if argv is None else argv))
+  args = build_parser().parse_args(normalized)
   return int(args.func(args, _profile(args)))
 
 

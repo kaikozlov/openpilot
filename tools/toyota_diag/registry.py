@@ -15,6 +15,7 @@ from typing import Any
 DEFAULT_REGISTRY = Path(__file__).with_name("data") / "camry_2026_f33.json"
 SUPPORTED_SCHEMAS = frozenset({
   "toyota-diagnostics-registry-v1", "toyota-diagnostics-registry-v2", "toyota-diagnostics-registry-v3",
+  "toyota-diagnostics-registry-v4",
 })
 DEFAULT_UDS_TIMEOUT = 0.35
 DEFAULT_UDS_RESPONSE_PENDING_TIMEOUT = 2.0
@@ -163,7 +164,11 @@ class Profile:
     if len(matches) == 1:
       return matches[0]
     if not matches:
-      raise RegistryError(f"no ECU matches {ref!r}")
+      suggestions = self.suggest_ecus(str(ref))
+      hint = ""
+      if suggestions:
+        hint = "; did you mean " + ", ".join(f"{ecu.key} ({ecu.name})" for ecu in suggestions) + "?"
+      raise RegistryError(f"no ECU matches {ref!r}{hint}")
     raise RegistryError(f"ambiguous ECU {ref!r}: {', '.join(ecu.key for ecu in matches)}")
 
   def name_for(self, address: int) -> str:
@@ -188,7 +193,46 @@ class Profile:
 
   def active_tests(self, ecu: EcuSpec | str | int) -> list[dict[str, Any]]:
     category = self.category(ecu)
-    return [] if category is None else category["active_tests"]
+    return [] if category is None else category.get("active_tests", [])
+
+  def functions(self, ecu: EcuSpec | str | int) -> list[dict[str, Any]]:
+    category = self.category(ecu)
+    return [] if category is None else category.get("functions", [])
+
+  def roles(self, ecu: EcuSpec | str | int) -> list[dict[str, Any]]:
+    category = self.category(ecu)
+    return [] if category is None else category.get("roles", [])
+
+  def utilities(self, ecu: EcuSpec | str | int) -> list[dict[str, Any]]:
+    category = self.category(ecu)
+    if category is None:
+      return []
+    explicit = category.get("utilities")
+    if isinstance(explicit, list):
+      return explicit
+    # v1-v3 registries expose routine Active Tests but no separate utility catalog.
+    return [row for row in category.get("active_tests", []) if row.get("kind") == "routine"]
+
+  def suggest_ecus(self, ref: str, limit: int = 5) -> list[EcuSpec]:
+    import difflib
+    needle = ref.casefold()
+    keyed: dict[str, EcuSpec] = {}
+    for ecu in self.ecus:
+      for label in (ecu.key, ecu.name, f"0x{ecu.address:X}"):
+        keyed[label.casefold()] = ecu
+      category = self.category(ecu)
+      if category is not None:
+        meta = category.get("category", {})
+        for label in (meta.get("name"), meta.get("database")):
+          if label:
+            keyed[str(label).casefold()] = ecu
+    matches = difflib.get_close_matches(needle, list(keyed), n=limit, cutoff=0.35)
+    out: list[EcuSpec] = []
+    for match in matches:
+      ecu = keyed[match]
+      if ecu not in out:
+        out.append(ecu)
+    return out
 
   def resolve_did(self, ecu: EcuSpec | str | int, query: str) -> tuple[int, list[dict[str, Any]]]:
     dids = self.dids(ecu)
@@ -259,8 +303,30 @@ def _load_ecus(profile: dict[str, Any]) -> tuple[EcuSpec, ...]:
   return ecus
 
 
+def available_registries(directory: Path | None = None) -> list[Path]:
+  root = DEFAULT_REGISTRY.parent if directory is None else Path(directory)
+  return sorted(path for path in root.glob("*.json") if path.is_file())
+
+
+def _resolve_registry_path(path: str | Path) -> Path:
+  candidate = Path(path)
+  if candidate.exists():
+    return candidate
+  text = str(path)
+  if "/" not in text and "\\" not in text:
+    for item in available_registries():
+      try:
+        document = json.loads(item.read_text())
+      except (OSError, json.JSONDecodeError):
+        continue
+      raw = document.get("profile")
+      if isinstance(raw, dict) and str(raw.get("profile")) == text:
+        return item
+  return candidate
+
+
 def load_registry(path: str | Path = DEFAULT_REGISTRY) -> Profile:
-  path = Path(path)
+  path = _resolve_registry_path(path)
   try:
     document = json.loads(path.read_text())
   except FileNotFoundError as e:

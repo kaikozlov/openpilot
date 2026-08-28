@@ -2,17 +2,23 @@
 
 `tools/toyota` is the single Comma-side entry point for Toyota diagnostics recovered from Techstream/GTS+. The bundled `camry-2026-f33` registry is a generated, derived artifact: it contains ECU names/addresses, GTS DID/DTC catalogs, static Active-Test plans, the exact F33 identity guard, and the live-validated DTC-clear route. It does **not** contain Toyota DLL/DDB binaries.
 
-Offline discovery works without Panda access:
+Offline discovery works without Panda access. The CLI is ECU-first now, so you can browse by Toyota names instead of memorizing DIDs or command families:
 
 ```bash
+./tools/toyota search LTA
 ./tools/toyota ecu list
-./tools/toyota ecu info eps
+./tools/toyota ecu frc
+./tools/toyota ecu frc data "LTA Control"
+./tools/toyota ecu frc dtcs U0131
+./tools/toyota ecu frc active-tests
+./tools/toyota vehicle
+./tools/toyota vehicle list
 ./tools/toyota can topology
-./tools/toyota did list frc "LTA Control Condition"
 ./tools/toyota did decode eps 0x1037 0001
-./tools/toyota dtc catalog frc U0131
 ./tools/toyota active-test plan frc 0xA429
 ```
+
+`search` spans ECU/category names, Data List signals, DTCs, Active Tests, and v4 function/role/utility metadata when present. ECU lookup errors include close-match suggestions. The original verb-first `ecu info`, `did list`, `dtc catalog`, etc. remain supported.
 
 Live commands have two transport modes. If `pandad` is stopped, the CLI takes direct Panda ownership using the exact live-validated Camry ELM327 setup. If `pandad` is already running, the CLI reuses openpilot's `can`/`sendcan` ISO-TP path **only** when the one live Panda is already in ELM327 safety param 1 with `controlsAllowed=false` on the profile's validated bus-0 topology. It never changes a running Panda's safety mode; if openpilot has already transitioned to Toyota/onroad safety, the command fails closed and tells you to stop manager for direct access. `./tools/toyota transport status` checks this gate without transmitting anything.
 
@@ -24,9 +30,16 @@ Live commands have two transport modes. If `pandad` is stopped, the CLI takes di
 ./tools/toyota dtc scan --json > dtc-snapshot.json
 ./tools/toyota did read eps 0x1037
 ./tools/toyota did watch frc 0x1601 0x1501 0x1681 0x1903 --interval 0.25
-./tools/toyota did watch frc 0x1601 0x1501 --json > frc-monitor.jsonl
+./tools/toyota monitor frc LTA --changed
+./tools/toyota monitor frc 0x1601 0x1914 --jsonl > frc-monitor.jsonl
+./tools/toyota monitor frc 0x1601 0x1914 --csv > frc-monitor.csv
+./tools/toyota scan
+./tools/toyota scan --json > car-snapshot.json
+./tools/toyota vehicle detect
 ./tools/toyota uds raw eps 0x22 F181
 ```
+
+`monitor` is the human-facing Data List view: broad signal-name terms expand to matching DIDs, one UDS client is reused, signals sharing a DID are coalesced, interactive terminals redraw a compact value table, and `--changed` suppresses unchanged rows. `--jsonl` emits one structured sample group per line and `--csv` emits one row per decoded signal sample. `scan` produces a read-only vehicle inventory with responding ECUs, F181/F18C/0105 identity reads where supported, DTC status, active-fault summaries, transport state, and profile identity.
 
 The exact Camry maintenance clear is now:
 
