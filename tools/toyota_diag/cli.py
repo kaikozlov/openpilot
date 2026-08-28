@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from typing import Any
 
@@ -207,6 +208,40 @@ def cmd_dtc_clear(args, profile: Profile) -> int:
   return 0
 
 
+def _resolve_did_queries(profile: Profile, ecu, queries: list[str]) -> list[tuple[int, list[dict[str, Any]]]]:
+  resolved: list[tuple[int, list[dict[str, Any]]]] = []
+  seen: set[int] = set()
+  for query in queries:
+    did, signals = profile.resolve_did(ecu, query)
+    if did not in seen:
+      resolved.append((did, signals))
+      seen.add(did)
+  return resolved
+
+
+def _did_value_record(ecu, did: int, signals: list[dict[str, Any]], data: bytes) -> dict[str, Any]:
+  decoded = []
+  for signal in signals:
+    item = {
+      "name": signal.get("name") or "",
+      "decoder": signal.get("decoder"),
+      "bit_start": signal.get("bit_start"),
+      "bit_end": signal.get("bit_end"),
+      "unit": signal.get("unit"),
+    }
+    try:
+      item.update(decode.decode_signal(data, signal))
+    except decode.DecodeError as e:
+      item["error"] = str(e)
+    decoded.append(item)
+  return {
+    "ecu": {"key": ecu.key, "name": ecu.name, "address": ecu.address},
+    "did": did,
+    "data_hex": data.hex(),
+    "signals": decoded,
+  }
+
+
 def _print_did_value(ecu, did: int, signals: list[dict[str, Any]], data: bytes, prefix: str = "") -> None:
   printable = "".join(chr(value) if 32 <= value < 127 else "." for value in data)
   print(f"{prefix}{ecu.name} DID 0x{did:04X}: {data.hex()} |{printable}|")
@@ -224,20 +259,31 @@ def cmd_did_decode(args, profile: Profile) -> int:
     data = registry.parse_bytes(args.payload, "DID payload")
   except registry.RegistryError as e:
     raise SystemExit(str(e)) from e
-  _print_did_value(ecu, did, signals, data)
+  if args.json:
+    print(json.dumps(_did_value_record(ecu, did, signals, data), sort_keys=True))
+  else:
+    _print_did_value(ecu, did, signals, data)
   return 0
 
 
 def cmd_did_read(args, profile: Profile) -> int:
   try:
     ecu = profile.lookup_ecu(args.ecu)
-    did, signals = profile.resolve_did(ecu, args.did)
+    dids = _resolve_did_queries(profile, ecu, args.did)
   except registry.RegistryError as e:
     raise SystemExit(str(e)) from e
   transport = _live_transport()
   panda = transport.connect()
-  data = transport.uds_client_factory(panda, profile)(ecu.address).read_data_by_identifier(did)
-  _print_did_value(ecu, did, signals, data)
+  client = transport.uds_client_factory(panda, profile)(ecu.address)
+  values = []
+  for did, signals in dids:
+    data = client.read_data_by_identifier(did)
+    if args.json:
+      values.append(_did_value_record(ecu, did, signals, data))
+    else:
+      _print_did_value(ecu, did, signals, data)
+  if args.json:
+    print(json.dumps({"values": values}, sort_keys=True))
   return 0
 
 
@@ -249,7 +295,7 @@ def cmd_did_watch(args, profile: Profile) -> int:
     raise SystemExit("--count must be >= 0 (0 means until interrupted)")
   try:
     ecu = profile.lookup_ecu(args.ecu)
-    did, signals = profile.resolve_did(ecu, args.did)
+    dids = _resolve_did_queries(profile, ecu, args.did)
   except registry.RegistryError as e:
     raise SystemExit(str(e)) from e
 
@@ -260,14 +306,24 @@ def cmd_did_watch(args, profile: Profile) -> int:
   sample = 0
   try:
     while args.count == 0 or sample < args.count:
-      data = client.read_data_by_identifier(did)
+      values = []
+      for did, signals in dids:
+        data = client.read_data_by_identifier(did)
+        if args.json:
+          values.append(_did_value_record(ecu, did, signals, data))
+        else:
+          _print_did_value(ecu, did, signals, data, prefix=f"[{sample + 1:04d}] ")
       sample += 1
       elapsed = time.monotonic() - started
-      _print_did_value(ecu, did, signals, data, prefix=f"[{sample:04d} +{elapsed:.3f}s] ")
+      if args.json:
+        print(json.dumps({"sample": sample, "elapsed_s": round(elapsed, 6), "values": values}, sort_keys=True))
+      elif len(dids) > 1:
+        print(f"  sample {sample} complete +{elapsed:.3f}s")
       if args.count == 0 or sample < args.count:
         time.sleep(args.interval)
   except KeyboardInterrupt:
-    print("stopped")
+    if not args.json:
+      print("stopped")
   return 0
 
 
@@ -351,16 +407,19 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("ecu")
   p.add_argument("did")
   p.add_argument("payload", help="DID value bytes as hex; positive SID/DID echo excluded")
+  p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_did_decode)
   p = did_sub.add_parser("read")
   p.add_argument("ecu")
-  p.add_argument("did")
+  p.add_argument("did", nargs="+", help="one or more DID numbers or GTS names")
+  p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_did_read)
   p = did_sub.add_parser("watch")
   p.add_argument("ecu")
-  p.add_argument("did")
-  p.add_argument("--interval", type=float, default=0.25, help="seconds between reads (default: 0.25)")
-  p.add_argument("--count", type=int, default=0, help="number of samples; 0 means until interrupted")
+  p.add_argument("did", nargs="+", help="one or more DID numbers or GTS names")
+  p.add_argument("--interval", type=float, default=0.25, help="seconds between sample groups (default: 0.25)")
+  p.add_argument("--count", type=int, default=0, help="number of sample groups; 0 means until interrupted")
+  p.add_argument("--json", action="store_true", help="emit one JSON object per sample group")
   p.set_defaults(func=cmd_did_watch)
 
   dtc_parser = commands.add_parser("dtc")

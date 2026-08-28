@@ -18,7 +18,8 @@ Live reads require `pandad` to be stopped so the process has exclusive Panda own
 ```bash
 ./tools/toyota dtc scan
 ./tools/toyota did read eps 0x1037
-./tools/toyota did watch frc 0x1601 --interval 0.25
+./tools/toyota did watch frc 0x1601 0x1501 0x1681 0x1903 --interval 0.25
+./tools/toyota did watch frc 0x1601 0x1501 --json > frc-monitor.jsonl
 ./tools/toyota uds raw eps 0x22 F181
 ```
 
@@ -35,5 +36,7 @@ Raw/functional requests that are not in the explicit read-only allowlist require
 Active Tests are intentionally **plan-only**. The registry exposes recovered `0x2F` direct and `0x31` routine wire plans, but this CLI has no Active-Test execution path.
 
 Registry v2 also carries the recovered ordinary-P5 Techstream Data Monitor decoder. `did read` always prints the raw DID value bytes first, then decodes each known signal using the registry-selected `p5-linear-msb0-v1` contract: MSB-first bit numbering, big-endian field assembly, two's-complement signed values, `trunc_toward_zero(raw * Mul / Div) + Offset`, exact decimal precision, and converted-value pattern labels. For example, EPS DID `0x1037` renders raw `0001` as `Steering Angle: 1.5 deg`; FRC DID `0x1601` renders Toyota's LTA/Hands-Off state labels. Unknown decoder kinds or undersized payloads fail closed and leave the raw bytes plus metadata visible.
+
+`did read` and `did watch` accept multiple DID numbers or GTS names for one ECU and reuse a single UDS client. `--json` on `read` emits one machine-readable snapshot; `--json` on `watch` emits one JSON object per sample group, making the same phone/SSH command useful as a lightweight capture logger without a separate script.
 
 Use `--registry FILE` to load another supported derived registry when additional vehicles are added. The loader accepts v1 for catalog/backward compatibility, but engineering-value decoding requires explicit v2 decoder metadata; it is never inferred for older registries.

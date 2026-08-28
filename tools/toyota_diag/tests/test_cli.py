@@ -79,10 +79,43 @@ class TestLiveCli(unittest.TestCase):
       rc, output = run_cli(["did", "watch", "eps", "0x1037", "--interval", "0", "--count", "2"])
     self.assertEqual(rc, 0, output)
     self.assertEqual(scripted.calls, [(0x7A1, "read_did", 0x1037), (0x7A1, "read_did", 0x1037)])
-    self.assertIn("[0001 +", output)
+    self.assertIn("[0001] Power Steering DID 0x1037", output)
     self.assertIn("Steering Angle: 1.5 deg", output)
-    self.assertIn("[0002 +", output)
+    self.assertIn("[0002] Power Steering DID 0x1037", output)
     self.assertIn("Steering Angle: 3.0 deg", output)
+
+  def test_multi_did_read_reuses_client_and_json_is_machine_readable(self):
+    import json
+    scripted = support.ScriptedUds()
+    scripted.did[0x792] = {
+      0x1601: bytes.fromhex("00010000"),
+      0x1501: bytes.fromhex("00" * 8),
+    }
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["did", "read", "frc", "0x1601", "0x1501", "--json"])
+    self.assertEqual(rc, 0, output)
+    self.assertEqual(scripted.calls, [(0x792, "read_did", 0x1601), (0x792, "read_did", 0x1501)])
+    document = json.loads(output)
+    self.assertEqual([row["did"] for row in document["values"]], [0x1601, 0x1501])
+    condition = next(row for row in document["values"][0]["signals"] if row["name"] == "LTA Control Condition")
+    self.assertEqual((condition["raw"], condition["pattern"]), (1, "LTA Disabled"))
+
+  def test_watch_json_emits_one_object_per_sample_group(self):
+    import json
+    scripted = support.ScriptedUds()
+    scripted.did[0x792] = {
+      0x1601: bytes.fromhex("00010000"),
+      0x1501: bytes.fromhex("00" * 8),
+    }
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["did", "watch", "frc", "0x1601", "0x1501", "--interval", "0", "--count", "2", "--json"])
+    self.assertEqual(rc, 0, output)
+    documents = [json.loads(line) for line in output.splitlines()]
+    self.assertEqual([row["sample"] for row in documents], [1, 2])
+    self.assertEqual([[value["did"] for value in row["values"]] for row in documents], [[0x1601, 0x1501], [0x1601, 0x1501]])
+    self.assertEqual(len(scripted.calls), 4)
 
   def test_did_read_fails_closed_when_payload_is_short(self):
     scripted = support.ScriptedUds()
