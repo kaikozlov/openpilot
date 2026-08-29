@@ -248,6 +248,33 @@ unknown and the frame must not be labeled a Bus-1 camera message. Exact F33 does
 
 The `0x08A` trailer is also now structurally bounded as Toyota ordinary-P5 SecOC: B28 candidate reset-low2 agrees with preceding authenticated `0x00F` on 19,868/20,615 drive-A frames and 23,093/23,996 eligible drive-B frames; on every same-reset, same-segment B26+1 pair (18,727 A / 21,989 B), candidate message-low2 advances +1. B27 is zero and the remaining 28 trailer bits are effectively frame-unique. This strongly supports `FV4 || MAC28` framing without recovering the exact sender profile, key, or CMAC implementation.
 
+### Complete field census (VAR-088)
+
+A both-drive per-B21-state census over 44,613 deduped bus-0 frames closes every
+application byte, and the DBC entry now carries the full field set:
+
+| bytes | field (DBC signal) | closure |
+|---|---|---|
+| B0,B1,B2,B5,B15,B25,B27 | — | identically zero in every frame |
+| B3[3] | `CRUISE_OPERATING_LATCH` | value 8 latch; follows MAIN by 0.17-0.29 s, clears on CANCEL |
+| B6 / B7 | `CRUISE_SUBSTATE_1/2` | (0,18) off, (45,71) LTA-active, (44,70) second sub-mode, (0,146) transitional |
+| B8:B9, B11:B12 | `REQUEST_WORD_B8`, `REQUEST_WORD_B8_MIRROR` | byte-identical duplicate in 100% of frames; raw -1146..995; uncorrelated (|r|<=0.07) with accel, steering angle, driver torque, target-angle rate |
+| B10 | `SET_SPEED` | latched set speed, 1 km/h; zero when cruise off |
+| B13:B14, B16:B17 | `RESERVED_16BIT_B13/B16` | constant 0x7FFF sentinels |
+| B20[7:6], B22[4] | `CRUISE_STATE_B20`, `CRUISE_STATE_B22` | cruise mirrors of B3[3] (44,587/44,613) |
+| B21 | `TARGET_LATERAL_ID` | {0,11,18}; full 19-value GTS+ VAL_ dictionary |
+| B23[5] | `COOPERATIVE_SUBSTATE_FLAG` | set in every SDG row; toggles inside LTA/LCA |
+| B24 | `LATERAL_REQUEST_LEVEL` | 100 in every LTA/LCA frame, 50 in every SDG frame; percent bounded |
+| B26[5:0] | `SEQUENCE` | modulo-64 |
+| B28..B31 | `FRESHNESS_*`, `CMAC_MSB28` | FV4+MAC28 trailer geometry |
+
+GTS+ joins: EMPS_P5 DID `0x1CEE` is a four-monitor structured record (Target
+Lateral ID + Cooperative Control in Progress Flag + Target Steering Angle
+After Output Compensation + Advanced Drive Target Steering Angle), but it is
+absent from exact F33's RDBI table, so the EPS-side cooperative target is not
+directly pollable. Bus-4 ECU dictionaries carry no lateral-request vocabulary,
+so GTS+ cannot name the producer.
+
 ## Remaining production gates
 
 Static receiver discovery is no longer the principal blocker, and the old `0x08A -> B6` stock-LTA model is explicitly retired. Before lateral output can be enabled we still need all of the following closures:
