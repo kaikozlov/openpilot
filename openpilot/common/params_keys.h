@@ -117,8 +117,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"SecOCKey", {PERSISTENT | DONT_LOG, STRING}},
     {"ToyotaEphemeralSecOCBridge", {PERSISTENT, BOOL}},
     {"ToyotaEphemeralSecOCBridgeF181", {PERSISTENT, STRING}},
-    {"ToyotaTSS3DevLateral", {PERSISTENT | DEVELOPMENT_ONLY, BOOL}},
-    {"ToyotaTSS3DevLateralConfig", {PERSISTENT | DEVELOPMENT_ONLY, JSON}},
     {"ToyotaTSS3FrcOracleCapture", {PERSISTENT | DEVELOPMENT_ONLY, BOOL}},
     {"ShowDebugInfo", {PERSISTENT, BOOL}},
     {"RouteCount", {PERSISTENT, INT, "0"}},

@@ -58,19 +58,18 @@ class TestToyotaTSS3FrcOracle(unittest.TestCase):
     self.assertIsNone(parse_frc_positive_response(bytes.fromhex("0562191580000000")))
 
   def test_config_is_exact_f33_passive_dev_only(self):
-    self.assertIsNotNone(configure_toyota_tss3_frc_oracle(_Params(True), False, exact_cp(), False))
-    self.assertIsNone(configure_toyota_tss3_frc_oracle(_Params(False), False, exact_cp(), False))
-    self.assertIsNone(configure_toyota_tss3_frc_oracle(_Params(True, controls_ready=True), False, exact_cp(), False))
-    self.assertIsNone(configure_toyota_tss3_frc_oracle(_Params(True), True, exact_cp(), False))
-    self.assertIsNone(configure_toyota_tss3_frc_oracle(_Params(True), False, exact_cp(passive=False), False))
-    self.assertIsNone(configure_toyota_tss3_frc_oracle(_Params(True), False, exact_cp(), True))
+    self.assertIsNotNone(configure_toyota_tss3_frc_oracle(_Params(True), False, exact_cp()))
+    self.assertIsNone(configure_toyota_tss3_frc_oracle(_Params(False), False, exact_cp()))
+    self.assertIsNone(configure_toyota_tss3_frc_oracle(_Params(True, controls_ready=True), False, exact_cp()))
+    self.assertIsNone(configure_toyota_tss3_frc_oracle(_Params(True), True, exact_cp()))
+    self.assertIsNone(configure_toyota_tss3_frc_oracle(_Params(True), False, exact_cp(passive=False)))
     self.assertIsNone(configure_toyota_tss3_frc_oracle(
-      _Params(True), False, exact_cp(f181=b"\x028965F3307001\x00"), False,
+      _Params(True), False, exact_cp(f181=b"\x028965F3307001\x00"),
     ))
 
     other = exact_cp()
     other.carFingerprint = CAR.TOYOTA_CAMRY
-    self.assertIsNone(configure_toyota_tss3_frc_oracle(_Params(True), False, other, False))
+    self.assertIsNone(configure_toyota_tss3_frc_oracle(_Params(True), False, other))
 
   def test_requires_elm327_param1_with_controls_disallowed(self):
     ps = SimpleNamespace(

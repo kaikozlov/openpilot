@@ -98,11 +98,11 @@ class ToyotaTSS3FrcOraclePoller:
     return [CanData(FRC_TX, FRC_REQUESTS[did], FRC_BUS)]
 
 
-def configure_toyota_tss3_frc_oracle(params, is_release: bool, CP: structs.CarParams,
-                                      development_lateral: bool) -> ToyotaTSS3FrcOraclePoller | None:
+def configure_toyota_tss3_frc_oracle(params, is_release: bool,
+                                      CP: structs.CarParams) -> ToyotaTSS3FrcOraclePoller | None:
   """Build the exact-F33 read-only oracle only behind an explicit dev opt-in."""
   if not params.get_bool("ToyotaTSS3FrcOracleCapture") or params.get_bool("ControlsReady"):
     return None
-  if is_release or development_lateral or not CP.passive or not exact_f33_camry(CP):
+  if is_release or not CP.passive or not exact_f33_camry(CP):
     return None
   return ToyotaTSS3FrcOraclePoller()
