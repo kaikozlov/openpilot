@@ -1017,14 +1017,14 @@ def dashboard_payload() -> dict:
     }
 
   if exact_f33:
-    stage = "f33_upstream_request_chain"
+    stage = "f33_stock_lta_authority"
     next_action = {
       "id": stage,
-      "title": "Recover the 0x08A → B6 producer chain",
+      "title": "Recover F33 stock-LTA authority",
       "description": (
-        "0x08A on the Bus-4 capture carries Target Lateral ID, target angle, and sequence, but its producer, "
-        + "integrity/authentication trailer, and transform into protected B6 are unrecovered. "
-        + "VAR-081 proves zero stock B6 during factory LTA, so another blind B6-template drive is not the next step."
+        "Exact F33 can steer through a B6-independent internal assist path while retained factory LTA/LCA has zero B6. "
+        + "Trace the external/local state that selects or modulates that path; separately identify the secured 0x08A producer. "
+        + "Do not assume an 0x08A-to-B6 transform."
       ),
       "href": "",
       "label": "Open research",
@@ -1043,9 +1043,9 @@ def dashboard_payload() -> dict:
   if exact_f33:
     assert f33_status is not None
     gate_titles = (
-      "Upstream request chain",
-      "Authority / arbitration",
-      "ICU-S generation",
+      "0x08A producer / SecOC",
+      "F33 stock-LTA authority",
+      "Optional B6 actuation contract",
       "Override and current policy",
       "Live status transitions",
       "Volatile runtime pivot",

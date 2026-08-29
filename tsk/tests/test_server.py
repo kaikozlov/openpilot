@@ -179,11 +179,12 @@ class TestServer(unittest.TestCase):
     }
     f33_projection = projected(exact_f33)
     self.assertEqual(f33_projection["target"]["kind"], "camry_f33")
-    self.assertEqual(f33_projection["recovery"]["stage"], "f33_upstream_request_chain")
+    self.assertEqual(f33_projection["recovery"]["stage"], "f33_stock_lta_authority")
     self.assertEqual(f33_projection["recovery"]["next_action"]["action"], "research")
     self.assertEqual(f33_projection["recovery"]["next_action"]["href"], "")
-    self.assertIn("producer chain", f33_projection["recovery"]["next_action"]["title"])
-    self.assertIn("producer", f33_projection["recovery"]["next_action"]["description"])
+    self.assertIn("stock-LTA authority", f33_projection["recovery"]["next_action"]["title"])
+    self.assertIn("B6-independent", f33_projection["recovery"]["next_action"]["description"])
+    self.assertIn("Do not assume an 0x08A-to-B6 transform", f33_projection["recovery"]["next_action"]["description"])
     self.assertEqual(len(f33_projection["recovery"]["steps"]), 6)
     self.assertEqual(
       tuple(step["detail"] for step in f33_projection["recovery"]["steps"]),

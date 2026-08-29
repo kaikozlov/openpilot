@@ -130,16 +130,22 @@ CAMRY_F33_B6 = {
   "motor_q_current": {"did": 0x1151, "formula": "raw*100/0x80"},
 }
 
-# Upstream-of-EPS lateral request recovered from the two relay-correct drives
+# Secured-looking lateral request representation recovered from the two relay-correct drives
 # (ghidra_rh850_analysis VAR-081 / CORR-134).  This is observed representation
 # only: the producer is unknown and 0x08A is NOT exact-F33 ingress.
-CAMRY_F33_UPSTREAM_LATERAL_REQUEST = {
+CAMRY_F33_LATERAL_REQUEST = {
   "address": 0x08A,
   "length": 32,
   "target_steering_angle": {"bytes": (18, 19), "signed_bits": 16,
                             "scale_deg_per_count": 1024 / 17870},
   "target_lateral_id": {"byte": 21, "observed": (0, 11, 18)},
   "sequence": {"byte": 26, "modulus": 64},
+  "security_trailer": {
+    "candidate_layout": "B28[7:6]=message_low2, B28[5:4]=reset_low2, B28[3:0]+B29:B31=authenticator28",
+    "classification": "strong Toyota P5 ordinary-SecOC structural match; exact sender profile/key/CMAC not recovered",
+    "reset_low2_match": {"drive_a": (19868, 20615), "drive_b": (23093, 23996)},
+    "same_reset_sequence_pairs_message_plus1": {"drive_a": (18727, 18727), "drive_b": (21989, 21989)},
+  },
   "manual_id0_angle_scale_fit": {"drive_a": 0.05731251, "drive_b": 0.05731821,
                                  "scale_error_pct": (0.017046, 0.026993)},
   "observed_buses": {"panda_bus0": 44614, "relay_mirror_bus2": 44617, "panda_bus1": 0},
@@ -149,6 +155,9 @@ CAMRY_F33_UPSTREAM_LATERAL_REQUEST = {
   "producer": "unknown; every retained frame is on the Bus-4 Brake/EPS capture, "
               "not the Front-Camera Bus-1 topology segment",
   "eps_ingress": False,
+  "eps_generated_com_transmit": False,
+  "stock_lta_requires_b6": False,
+  "boundary": "0x08A ownership/security and exact-F33 stock-LTA authority selection are separate questions; no 0x08A-to-B6 transform is established or required",
 }
 
 CAMRY_F33_RAM_RECOVERY = {
@@ -240,7 +249,7 @@ CAMRY_F33_CHECKPOINT = {
   "state": "production-disabled-passive-only",
   "static_receiver_integration": "closed",
   "cpu_visible_key_recovery": "negative",
-  "principal_blocker": "upstream 0x08A producer/authentication chain into protected B6",
+  "principal_blocker": "separate 0x08A producer/SecOC ownership and exact-F33 B6-independent stock-LTA authority selection",
   "output": "production-disabled",
   "output_detail": "Default: SafetyModel.noOutput / zero CAN. Production TSS3 output unsupported.",
 }
@@ -248,9 +257,9 @@ CAMRY_F33_CHECKPOINT = {
 CAMRY_F33_DEVELOPMENT_LATERAL = {
   "available": False,
   "status": "removed",
-  "superseded_by": "VAR-081/CORR-134: zero stock B6 exists during factory LTA/LCA "
-                   "operation, so waiting for a stock-captured 28-byte B6 template "
-                   "is not a valid integration shape",
+  "superseded_by": "VAR-081/CORR-135: zero stock B6 exists during factory LTA/LCA and exact F33 "
+                   "has a B6-independent internal actuation path, so neither a stock-captured B6 template nor an "
+                   "assumed 0x08A-to-B6 transform is a valid stock-LTA prerequisite",
   "removed_in_root_commit": "abf3ca70a",
   "removed_in_opendbc_commit": "b9e86924",
   "historical_root_commit": "15f3550365e2eee54ca5645ae9c24d9d41ae4f31",
@@ -289,8 +298,8 @@ CAMRY_F33_PRODUCTION_ARCHITECTURE = {
 
 CAMRY_F33_OPENDBC = {
   "passive_port_baseline_root_commit": "d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04",
-  "opendbc_commit": "a2ad31f3",
-  "upstream_request_decode_commit": "b9e86924",
+  "opendbc_commit": "525ee987",
+  "lateral_request_decode_commit": "b9e86924",
   "platform": "TOYOTA_CAMRY_TSS3",
   "mode": "noOutput-default; passive analysis only",
   "safety": "noOutput-default",
@@ -298,13 +307,13 @@ CAMRY_F33_OPENDBC = {
   "development_sender_available": False,
   "production_output_supported": False,
   "exact_f181_binding": True,
-  "upstream_lateral_request_decoding": True,
+  "lateral_request_decoding": True,
 }
 
 CAMRY_F33_REMAINING_PRODUCTION_GATES = (
-  "0x08A producer identification, integrity/authentication trailer, and producer-side transform into protected B6 (SecOC signer/freshness owner)",
-  "exclusive stock lateral-authority suppression / relay arbitration at the shared command funnel",
-  "application-context ICU-S slot-4 command-5 general-generation permission and latency/jitter",
+  "0x08A producer identification plus exact SecOC profile/key-slot/freshness and request-arbitration ownership",
+  "exact external/local state that selects or modulates F33's B6-independent D0218/CC60/CC50 stock-LTA assist path",
+  "if protected B6 is chosen as the openpilot actuation interface: valid signer/freshness/suppression/arbitration contract",
   "validated driver-override and motor-current-response policy",
   "live 0x351/0x394/0x4A3 normal/inhibit/fault/recovery transitions",
   "reachable application XCP route plus a concrete reversible volatile control-transfer pivot, if using the RAM-only signer architecture",
@@ -328,7 +337,7 @@ def public_camry_f33_status() -> dict:
     "ram_recovery": CAMRY_F33_RAM_RECOVERY,
     "eps_394_state_candidates": CAMRY_F33_EPS_394_STATE_CANDIDATES,
     "application_runtime": CAMRY_F33_APPLICATION_RUNTIME,
-    "upstream_lateral_request": CAMRY_F33_UPSTREAM_LATERAL_REQUEST,
+    "lateral_request": CAMRY_F33_LATERAL_REQUEST,
     "checkpoint": CAMRY_F33_CHECKPOINT,
     "development_lateral": CAMRY_F33_DEVELOPMENT_LATERAL,
     "production_architecture": CAMRY_F33_PRODUCTION_ARCHITECTURE,

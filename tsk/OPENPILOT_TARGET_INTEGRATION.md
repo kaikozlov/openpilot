@@ -8,14 +8,14 @@ installation.
 ## 2026-08-29 Camry/F33 reverse-engineering sync status
 
 This fork is synchronized to the exact maintainer 2026 Camry/F33 evidence through
-`ghidra_rh850_analysis` VAR-051..VAR-058 plus the current application-runtime placement
+`ghidra_rh850_analysis` through VAR-087/CORR-135 plus the current application-runtime placement
 closure. The durable target summary is [`CAMRY_2026_FINDINGS.md`](CAMRY_2026_FINDINGS.md).
 Corolla H/F remains useful prior art, but the Camry port no longer depends on transferring
 Corolla addresses or guessing a platform from family similarity.
 
 The passive Camry port entered the root at baseline commit
 `d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04`; the checked-out opendbc now includes the exact F33 fault-state observer plus the
-passive upstream `0x08A` decoder; the current submodule cutover is `a2ad31f3`, with
+passive secured-looking `0x08A` request decoder and the corrected stock-LTA/B6 separation; the current submodule cutover is `525ee987`, with
 the request decoder introduced at `b9e86924`. The exact target is
 `TOYOTA_CAMRY_TSS3`, bound to EPS F181 `8965F3307000 / 8A3113303100`. It remains
 an evidence-acquisition checkpoint, not production steering authorization.
@@ -41,7 +41,7 @@ means no correct implementation primitive has yet been recovered.
 | F33 passive platform / DBC / CarState | **implemented-read-only** | `TOYOTA_CAMRY_TSS3` has exact F181 binding, generated TSS3 DBC, source-real Ready/gear replay, state parsing, passive `0x08A` Target Lateral ID/target-angle/sequence observation, explicit B6 analysis/freshness/signing interfaces and shadow safety. CarParams remains `dashcamOnly` / `SafetyModel.noOutput`; controller emits zero CAN |
 | F33 synchronized FRC operating-state capture | **implemented-read-only / live-pending** | DEVELOPMENT_ONLY `ToyotaTSS3FrcOracleCapture` stays passive and exact-F181-bound, reuses `card`'s sole `sendcan` publisher, requires ELM327 param1 + ControlsReady=false + controls disallowed, and emits only fixed relay-correct post-repin Panda-bus0 `0x792` SID-22 reads for `0x1601`/`0x1914`; a 2 s exact-response watchdog stops failed captures. Normal loggerd therefore retains request/response timing without a competing Panda process. |
 | F33 generated Tx/status + `0x394` classifier | **implemented-read-only** | exact `0x030/0x351/0x394/0x4A3/0x4C8` Tx/packer geometry is retained and the 17-row `0x394` table projection is decoded to candidate internal states; lossy tuples stay candidate sets and are deliberately not converted to openpilot temporary/permanent faults |
-| F33 lateral sender / safety | **not-yet-implementable** | exact F33 protected-B6 receiver limits/timing are closed, but the observed Bus-4 `0x08A` producer, its integrity/authentication trailer, the producer-side transform into protected B6, signer/freshness ownership, and authority/arbitration are still unresolved. The former stock-template B6 development sender is removed; default remains `SafetyModel.noOutput` |
+| F33 lateral sender / safety | **not-yet-implementable** | exact F33 protected-B6 receiver limits/timing are closed, but CORR-135 separates the remaining work: identify observed Bus-4 `0x08A` producer/SecOC ownership; identify the exact external/local state selecting/modulating F33's B6-independent stock-LTA assist path; and only if B6 is chosen as the openpilot actuation interface, recover its valid signer/freshness/suppression/arbitration contract. The former stock-template B6 development sender is removed; default remains `SafetyModel.noOutput` |
 | F33 application-retained RAM placement | **implemented-read-only** | low `FEBF0000` boot pocket is disproved as application-retained; live high tail `FEBFF9F0..FEBFFBFB` (524 bytes) survives stock startup and is executable |
 | F33 application XCP byte placement | **prepared-but-hardware-gated** | exact firmware exposes `0x7F7/0x7F8` XCP callbacks and writable `FEBF7C00..FEBFFBFF`; pre-repin normal `(Panda bus1,param1)` CONNECT timed out, so physical/session reachability remains open |
 | F33 application-mode volatile control transfer | **not-yet-implementable** | 312 computed-call sites plus fixed-DMAC census recovered no concrete reversible application callback/PC object in the writable high tail. TSK does not guess an execution pivot |
@@ -66,12 +66,13 @@ The exact Camry implementation deliberately separates **observability** from **c
 - `CarParams.dashcamOnly=True`, Panda uses `SafetyModel.noOutput`, longitudinal control is
   disabled, and `CarController.update()` sends **no CAN messages**.
 
-Exact firmware now closes the receiver-side command envelope: Target Lateral ID 11 selects
+Exact firmware closes the **external B6 receiver** command envelope: Target Lateral ID 11 selects
 LTA/LCA mode2; signed B4:B5 target angle uses `1024/17870 deg/count`; absolute envelope is
 ±1745 raw; delta is 78 raw per effective modulo-64 gap with cap 8; foreground is 5 ms and
 the seven-tick receive deadline is nominally 35 ms. These constraints are shadow-safety
-inputs only. They do not substitute for stock sender, driver override, current response,
-relay authority, signer permission/latency or live fault/recovery evidence.
+inputs only. They do not imply stock Camry LTA uses B6: retained factory LTA/LCA has zero
+B6 and exact F33 has a B6-independent internal assist path. B6 remains a separate possible
+openpilot actuation interface whose deployment contract must be proved independently.
 
 ## Why this gate exists
 

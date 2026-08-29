@@ -325,19 +325,19 @@ function renderEvidence(dashboard) {
   const exactF33 = dashboard.target?.kind === "camry_f33";
   if (exactF33) {
     els.evidenceCardTitle.textContent = "F33 lateral evidence";
-    els.evidenceCardSubtitle.textContent = "The upstream request representation is recovered; the producer/authentication chain into protected B6 is still open.";
+    els.evidenceCardSubtitle.textContent = "The secured request and F33 stock actuation path are separate; the authority selector is still open.";
     els.evidenceSummary.replaceChildren(
       evidenceBlock({
         name: "Upstream 0x08A request",
         statusLabel: "Recovered",
         tone: "green",
-        detail: "Bus-4 0x08A carries Target Lateral ID, target angle at the downstream B6 scale, and a modulo-64 sequence. Exact F33 does not accept 0x08A as EPS ingress.",
+        detail: "Bus-4 0x08A carries Target Lateral ID, target angle at a numerically matching F33 B6 scale, a modulo-64 sequence, and a trailer strongly matching Toyota ordinary-P5 SecOC. Exact F33 neither accepts 0x08A as normal ingress nor generated-COM-transmits it.",
       }),
       evidenceBlock({
-        name: "Producer → protected B6",
+        name: "F33 stock-LTA authority",
         statusLabel: "Open",
         tone: "amber",
-        detail: "Producer identity, integrity/authentication trailer, transformation into B6, signer/freshness ownership, and authority/arbitration remain unresolved. Steering output stays noOutput/zero CAN.",
+        detail: "Factory LTA steers with zero B6 through an exact B6-independent internal assist path. The external/local state selecting or modulating that path remains unresolved; 0x08A producer/SecOC ownership is tracked separately. Steering output stays noOutput/zero CAN.",
       }),
     );
     return;

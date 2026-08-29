@@ -8,7 +8,7 @@ field- or exact-firmware-evidenced and useful to the fork.
 Nothing in this document authorizes production steering output. The Camry path remains
 `dashcamOnly` / Panda `SafetyModel.noOutput` and emits zero controller CAN. The former exact-F33
 bus-0 B6 development sender has been removed from the runtime integration; only passive 0x08A
-observation plus analysis/test-only protected-B6 receiver/freshness/safety contracts remain.
+observation plus analysis/test-only protected-B6 receiver/freshness/safety contracts remain. CORR-135/VAR-087 are the controlling architecture boundary: factory LTA/LCA steers with zero B6 through an exact F33 B6-independent internal assist path, so `0x08A` producer/SecOC ownership must not be conflated with a presumed `0x08A -> B6` stock-LTA transform.
 
 ## Exact ECU identities and route
 
@@ -238,35 +238,25 @@ decoding of the recovered upstream lateral request:
 
 ## Upstream lateral request (0x08A)
 
-The two relay-correct drives recover `0x08A/32` as the upstream-of-EPS lateral request
-representation: B21 is Target Lateral ID (observed exactly `0` manual / `11` LTA-LCA /
-`18` SDG, matching the current GTS+ dictionary), B18:B19 is a signed big-endian angle at
-the exact downstream B6 scale, and B26 is a modulo-64 sequence. In manual state B18:B19
+The two relay-correct drives recover `0x08A/32` as a lateral-request representation: B21 is Target Lateral ID (observed exactly `0` manual / `11` LTA-LCA / `18` SDG, matching the current GTS+ dictionary), B18:B19 is a signed big-endian angle at the numerically matching exact-F33 B6 controller-equivalent scale, and B26 is a modulo-64 sequence. The shared numeric scale does not prove an `0x08A -> B6` conversion path. In manual state B18:B19
 tracks measured `0x025` angle within 0.027% fitted-scale error; under ID11 its
 correlation shifts forward toward future measured angle. Two caveats: B21/B26 upper two
 bits are zero in every retained frame while the GTS+ diagnostic field is 8-bit, so 6-bit
 field boundaries are encoding assumptions; and every retained frame is on the Bus-4
 Brake/EPS capture (Panda bus 0 / relay mirror bus 2, zero on bus 1), so the producer is
-unknown and the frame must not be labeled a Bus-1 camera message. Exact F33 does not
-accept `0x08A`; its recovered external steering ingress remains protected `0x0B6`.
+unknown and the frame must not be labeled a Bus-1 camera message. Exact F33 does not accept `0x08A` as normal ingress and does not list it among its five generated-COM Tx IDs. Its recovered protected `0x0B6` interface is a **separate external cooperative-control ingress**, not a required stock-LTA next hop. Exact F33's B6-inactive `D0218 -> CC48 -> CC60 -> CC50 -> CC62/CC66 -> CC64` path reaches physical steering, so the 73.303384 s of machine-identified factory LTA/LCA with zero B6 is architecturally consistent.
+
+The `0x08A` trailer is also now structurally bounded as Toyota ordinary-P5 SecOC: B28 candidate reset-low2 agrees with preceding authenticated `0x00F` on 19,868/20,615 drive-A frames and 23,093/23,996 eligible drive-B frames; on every same-reset, same-segment B26+1 pair (18,727 A / 21,989 B), candidate message-low2 advances +1. B27 is zero and the remaining 28 trailer bits are effectively frame-unique. This strongly supports `FV4 || MAC28` framing without recovering the exact sender profile, key, or CMAC implementation.
 
 ## Remaining production gates
 
-Static receiver discovery is no longer the principal blocker. Before lateral output can
-be enabled we still need all of the following live/architecture closures:
+Static receiver discovery is no longer the principal blocker, and the old `0x08A -> B6` stock-LTA model is explicitly retired. Before lateral output can be enabled we still need all of the following closures:
 
-1. the `0x08A` producer, its integrity/authentication trailer, and the producer-side
-   transform into protected B6 (SecOC signer and freshness owner). Two blind drives
-   already retained healthy protected traffic with zero B6, and VAR-081 proves zero
-   stock B6 throughout both complete factory LTA/LCA intervals, so another blind
-   B6-template drive is not a valid next step; the FRC `0x1601`/`0x1914` oracle remains
-   useful synchronized corroboration;
-2. proof of exclusive stock lateral-authority suppression / relay arbitration;
-3. application-context ICU-S slot-4 **general generation permission and latency/jitter**;
-4. validated driver-override and motor-Q-current response policy;
-5. live `0x351/0x394/0x4A3` normal/inhibit/fault/recovery transitions;
-6. for the preferred RAM-only signer architecture, a reachable application XCP route and
-   a concrete reversible volatile control-transfer primitive.
+1. identify the actual `0x08A` producer and its exact SecOC profile/key-slot/freshness/arbitration ownership;
+2. starting from the exact B6-inactive `D0218` path, identify the external/local mode, gain, authority, or state that selects/modulates stock LTA across Target Lateral ID `0/11/18`;
+3. choose the openpilot actuation interface. Protected B6 remains a plausible external interface, but if chosen its signer/freshness/suppression/arbitration contract must be recovered independently rather than inferred from stock LTA;
+4. validate driver override and motor-Q-current response policy;
+5. capture live `0x351/0x394/0x4A3` normal/inhibit/fault/recovery transitions;
+6. for the preferred RAM-only signer architecture, prove a reachable application XCP route and a concrete reversible volatile control-transfer primitive.
 
-Until those are closed, the passive implementation and shadow safety helpers are analysis
-infrastructure only.
+Do not repeat blind stock-B6-template drives and do not infer an `0x08A -> B6` transform from matching angle scale or bus topology. The FRC `0x1601`/`0x1914` oracle remains useful synchronized corroboration and can help attribute internal F33 state changes. Production output remains `SafetyModel.noOutput` / zero CAN.
