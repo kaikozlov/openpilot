@@ -204,22 +204,25 @@ Current production ranking therefore makes the volatile architecture first-class
 
 ## openpilot state
 
-The checked-out fork already contains the passive target-native implementation:
+The checked-out fork contains the passive target-native implementation plus passive
+decoding of the recovered upstream lateral request:
 
 - passive-port baseline root commit `d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04`;
-- exact F33 development gating is retained in root commit
-  `15f3550365e2eee54ca5645ae9c24d9d41ae4f31` and opendbc commit
-  `dde0fcf0fbaf875750c54a072b0dcb3857f8829b`;
+- upstream-request decoding (opendbc commit `b9e86924`) parses `0x08A` B18:B19
+  signed target angle at `1024/17870` deg/count, B21 Target Lateral ID, and the B26
+  modulo-64 sequence into read-only CarState observables;
+- the former exact-F33 **B6 development sender was removed** (root commit
+  `abf3ca70a`, opendbc commit `b9e86924`, historical commits `15f3550…` /
+  `dde0fcf0…`): VAR-081 proves zero stock B6 throughout complete factory
+  LTA/LCA-active intervals, so waiting for a stock-captured 28-byte B6 template is
+  not a valid integration shape, and the `ToyotaTSS3DevLateral` parameter,
+  `toyota_tss3_dev.py`, and their tests are gone;
 - exact `TOYOTA_CAMRY_TSS3` F181 binding and source-real P/R/N/D/B + Ready replay;
-- generated TSS3 PT DBC, B6 application/freshness/signing helpers, and shadow F33 limits;
+- generated TSS3 PT DBC, B6 application/freshness/signing analysis helpers, and
+  shadow F33 limits;
 - 179-ID Camry census deliberately excluded from legacy CAN fingerprinting because the
   Corolla TSS3 census is a strict subset;
-- default controller output remains **zero CAN** and CarParams uses `SafetyModel.noOutput`;
-- a DEVELOPMENT_ONLY exact-F33 path can opt into `TSS3_DEV_LATERAL` only on non-release builds after
-  an exact `8965F3307000` match, relay-correct bus-0 topology, a stock-validated 28-byte B6 template,
-  1–3 control-frame cadence, and explicit Gate-2-bypass plus exclusive-B6-authority attestations;
-- that development sender intentionally emits an invalid MAC and therefore does not constitute a
-  production SecOC signer or production TSS3 output support.
+- default controller output remains **zero CAN** and CarParams uses `SafetyModel.noOutput`.
 - an independent DEVELOPMENT_ONLY **read-only FRC oracle capture** can be armed with
   `ToyotaTSS3FrcOracleCapture`. It is exact-F33/F181-bound, requires passive CarParams,
   `ControlsReady=false`, one Panda reporting ELM327 parameter 1 with controls disallowed,
@@ -233,19 +236,32 @@ The checked-out fork already contains the passive target-native implementation:
   This capture path does not set `ControlsReady`, enable a Toyota control safety model,
   or emit any steering/vehicle-control frame.
 
+## Upstream lateral request (0x08A)
+
+The two relay-correct drives recover `0x08A/32` as the upstream-of-EPS lateral request
+representation: B21 is Target Lateral ID (observed exactly `0` manual / `11` LTA-LCA /
+`18` SDG, matching the current GTS+ dictionary), B18:B19 is a signed big-endian angle at
+the exact downstream B6 scale, and B26 is a modulo-64 sequence. In manual state B18:B19
+tracks measured `0x025` angle within 0.027% fitted-scale error; under ID11 its
+correlation shifts forward toward future measured angle. Two caveats: B21/B26 upper two
+bits are zero in every retained frame while the GTS+ diagnostic field is 8-bit, so 6-bit
+field boundaries are encoding assumptions; and every retained frame is on the Bus-4
+Brake/EPS capture (Panda bus 0 / relay mirror bus 2, zero on bus 1), so the producer is
+unknown and the frame must not be labeled a Bus-1 camera message. Exact F33 does not
+accept `0x08A`; its recovered external steering ingress remains protected `0x0B6`.
+
 ## Remaining production gates
 
 Static receiver discovery is no longer the principal blocker. Before lateral output can
 be enabled we still need all of the following live/architecture closures:
 
-1. a relay-correct synchronized factory-operating-state capture. Two blind drives already
-   retained healthy protected traffic with zero B6, so the next discriminator is FRC
-   `0x1601` (LTA Switch/Control) plus `0x1914` (ACC Control in Operation) in the normal
-   loggerd route. If that machine-proves the expected factory operating interval while B6
-   remains absent, the upstream FRC/Brake transformation or a non-COM/internal EPS path
-   becomes the next RE boundary rather than another blind B6 drive; if B6 appears, retain
-   its exact cadence/full 28-byte template/secondary fields, sequence restart and freshness;
-2. proof of exclusive stock-B6 producer suppression / relay authority;
+1. the `0x08A` producer, its integrity/authentication trailer, and the producer-side
+   transform into protected B6 (SecOC signer and freshness owner). Two blind drives
+   already retained healthy protected traffic with zero B6, and VAR-081 proves zero
+   stock B6 throughout both complete factory LTA/LCA intervals, so another blind
+   B6-template drive is not a valid next step; the FRC `0x1601`/`0x1914` oracle remains
+   useful synchronized corroboration;
+2. proof of exclusive stock lateral-authority suppression / relay arbitration;
 3. application-context ICU-S slot-4 **general generation permission and latency/jitter**;
 4. validated driver-override and motor-Q-current response policy;
 5. live `0x351/0x394/0x4A3` normal/inhibit/fault/recovery transitions;

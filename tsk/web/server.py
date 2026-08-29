@@ -1017,14 +1017,14 @@ def dashboard_payload() -> dict:
     }
 
   if exact_f33:
-    stage = "f33_stock_b6_capture"
+    stage = "f33_upstream_request_chain"
     next_action = {
       "id": stage,
-      "title": "Capture stock B6 off → active → off",
+      "title": "Recover the 0x08A → B6 producer chain",
       "description": (
-        "Use full 60-second windows to retain exact-F33 0x0B6/PDU44 traffic across stock LTA transitions. "
-        + "Close the 28-byte application template, sequence restart, freshness, and 0x351/0x394/0x4A3 status evidence; "
-        + "this is lateral bring-up evidence, not CPU-visible key recovery."
+        "0x08A on the Bus-4 capture carries Target Lateral ID, target angle, and sequence, but its producer, "
+        + "integrity/authentication trailer, and transform into protected B6 are unrecovered. "
+        + "VAR-081 proves zero stock B6 during factory LTA, so another blind B6-template drive is not the next step."
       ),
       "href": "/can-collector.html",
       "label": "Capture F33 CAN evidence",
@@ -1042,7 +1042,7 @@ def dashboard_payload() -> dict:
   if exact_f33:
     assert f33_status is not None
     gate_titles = (
-      "Stock B6 capture",
+      "Upstream request chain",
       "Relay authority",
       "ICU-S generation",
       "Override and current policy",

@@ -17,6 +17,7 @@ from tsk.lib.camry_f33 import (
   CAMRY_F33_READY,
   CAMRY_F33_REMAINING_PRODUCTION_GATES,
   CAMRY_F33_TX_STATUS,
+  CAMRY_F33_UPSTREAM_LATERAL_REQUEST,
   public_camry_f33_status,
 )
 
@@ -97,22 +98,34 @@ class TestCamryF33Evidence(unittest.TestCase):
     self.assertFalse(CAMRY_F33_PRODUCTION_ARCHITECTURE["ready"])
     self.assertEqual([row["rank"] for row in CAMRY_F33_PRODUCTION_ARCHITECTURE["ranking"]], [1, 2, 3, 4])
 
-  def test_passive_default_development_gate_and_production_boundary(self):
-    self.assertEqual(CAMRY_F33_OPENDBC["opendbc_commit"], "dde0fcf0fbaf875750c54a072b0dcb3857f8829b")
+  def test_passive_default_and_removed_development_sender(self):
+    self.assertEqual(CAMRY_F33_OPENDBC["opendbc_commit"], "b9e86924")
     self.assertIn("noOutput-default", CAMRY_F33_OPENDBC["safety"])
     self.assertFalse(CAMRY_F33_OPENDBC["controller_can_output"])
-    self.assertTrue(CAMRY_F33_OPENDBC["development_sender_available"])
+    self.assertFalse(CAMRY_F33_OPENDBC["development_sender_available"])
     self.assertFalse(CAMRY_F33_OPENDBC["production_output_supported"])
-    self.assertTrue(CAMRY_F33_DEVELOPMENT_LATERAL["available"])
-    self.assertFalse(CAMRY_F33_DEVELOPMENT_LATERAL["default_enabled"])
-    self.assertFalse(CAMRY_F33_DEVELOPMENT_LATERAL["release_allowed"])
-    self.assertEqual(CAMRY_F33_DEVELOPMENT_LATERAL["cadence_frames"], (1, 3))
-    self.assertEqual(CAMRY_F33_DEVELOPMENT_LATERAL["mac"], "intentionally-invalid-development-only")
-    self.assertFalse(CAMRY_F33_DEVELOPMENT_LATERAL["production_supported"])
+    self.assertTrue(CAMRY_F33_OPENDBC["upstream_lateral_request_decoding"])
+    self.assertFalse(CAMRY_F33_DEVELOPMENT_LATERAL["available"])
+    self.assertEqual(CAMRY_F33_DEVELOPMENT_LATERAL["status"], "removed")
+    self.assertIn("VAR-081", CAMRY_F33_DEVELOPMENT_LATERAL["superseded_by"])
+    self.assertEqual(CAMRY_F33_DEVELOPMENT_LATERAL["removed_in_root_commit"], "abf3ca70a")
+    self.assertEqual(CAMRY_F33_DEVELOPMENT_LATERAL["removed_in_opendbc_commit"], "b9e86924")
+    self.assertEqual(CAMRY_F33_CHECKPOINT["state"], "production-disabled-passive-only")
     status = public_camry_f33_status()
     self.assertFalse(status["production_output_allowed"])
     self.assertEqual(tuple(status["remaining_production_gates"]), CAMRY_F33_REMAINING_PRODUCTION_GATES)
     self.assertGreaterEqual(len(status["remaining_production_gates"]), 6)
+
+  def test_upstream_lateral_request_is_representation_not_ingress(self):
+    req = CAMRY_F33_UPSTREAM_LATERAL_REQUEST
+    self.assertEqual(req["address"], 0x08A)
+    self.assertEqual(req["target_lateral_id"]["observed"], (0, 11, 18))
+    self.assertEqual(req["sequence"]["modulus"], 64)
+    self.assertAlmostEqual(req["target_steering_angle"]["scale_deg_per_count"], 1024 / 17870)
+    self.assertFalse(req["eps_ingress"])
+    self.assertEqual(req["observed_buses"]["panda_bus1"], 0)
+    self.assertIn("encoding assumptions", req["encoding_caveat"])
+    self.assertIn("unknown", req["producer"])
 
 
 if __name__ == "__main__":

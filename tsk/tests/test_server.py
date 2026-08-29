@@ -179,10 +179,10 @@ class TestServer(unittest.TestCase):
     }
     f33_projection = projected(exact_f33)
     self.assertEqual(f33_projection["target"]["kind"], "camry_f33")
-    self.assertEqual(f33_projection["recovery"]["stage"], "f33_stock_b6_capture")
+    self.assertEqual(f33_projection["recovery"]["stage"], "f33_upstream_request_chain")
     self.assertEqual(f33_projection["recovery"]["next_action"]["href"], "/can-collector.html")
-    self.assertIn("lateral bring-up evidence", f33_projection["recovery"]["next_action"]["description"])
-    self.assertNotIn("DataFlash", f33_projection["recovery"]["next_action"]["description"])
+    self.assertIn("producer chain", f33_projection["recovery"]["next_action"]["title"])
+    self.assertIn("producer", f33_projection["recovery"]["next_action"]["description"])
     self.assertEqual(len(f33_projection["recovery"]["steps"]), 6)
     self.assertEqual(
       tuple(step["detail"] for step in f33_projection["recovery"]["steps"]),
