@@ -19,7 +19,7 @@ from opendbc.car.fw_versions import ObdCallback
 from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
-from openpilot.selfdrive.car.cruise import VCruiseHelper
+from opendbc.car.toyota.values import ToyotaFlags, ToyotaSafetyFlags
 from openpilot.selfdrive.car.toyota_tss3_oracle import configure_toyota_tss3_frc_oracle, elm327_diagnostic_ready
 
 REPLAY = "REPLAY" in os.environ
@@ -113,12 +113,6 @@ class Car:
 
     self.CP.alternativeExperience = 0
     openpilot_enabled_toggle = self.params.get_bool("OpenpilotEnabledToggle")
-    controller_available = self.CI.CC is not None and openpilot_enabled_toggle and not self.CP.dashcamOnly
-    self.CP.passive = not controller_available or self.CP.dashcamOnly
-    if self.CP.passive:
-      safety_config = structs.CarParams.SafetyConfig()
-      safety_config.safetyModel = structs.CarParams.SafetyModel.noOutput
-      self.CP.safetyConfigs = [safety_config]
 
     self.tss3_frc_oracle = configure_toyota_tss3_frc_oracle(
       self.params, is_release, self.CP,
@@ -175,9 +169,29 @@ class Car:
           cloudlog.warning("Ignoring Toyota ephemeral SecOC bridge: resident bridge does not cover secured ACC 0x183")
         else:
           self.CP.secOcKeyAvailable = True
+
+          # Development-only lateral actuation for the exact Camry F33
+          # zero-MAC28 bridge: select the ALLOW_DEBUG toyota safety mode
+          # with the TSS3 dev-lateral flag (B6-only TX whitelist) instead
+          # of the observation-only noOutput config. Never in release, and
+          # only for the one exact EPS calibration the bridge was built for.
+          if (self.params.get_bool("ToyotaTss3DevLateral") and bridge_f181 == "8965F3307000"
+              and self.CP.flags & ToyotaFlags.TSS3 and not is_release):
+            self.CP.dashcamOnly = False
+            safety_config = structs.CarParams.SafetyConfig()
+            safety_config.safetyModel = structs.CarParams.SafetyModel.toyota
+            safety_config.safetyParam = ToyotaSafetyFlags.TSS3_DEV_LATERAL.value
+            self.CP.safetyConfigs = [safety_config]
+            cloudlog.warning("Enabled exact-F33 TSS3 dev lateral (zero-MAC28 B6 via installed EPS bridge)")
+
+          controller_available = self.CI.CC is not None and openpilot_enabled_toggle and not self.CP.dashcamOnly
+          self.CP.passive = not controller_available
+          if self.CP.passive:
+            safety_config = structs.CarParams.SafetyConfig()
+            safety_config.safetyModel = structs.CarParams.SafetyModel.noOutput
+            self.CP.safetyConfigs = [safety_config]
           if controller_available:
             self.CI.CC.ephemeral_secoc_bridge = True
-          cloudlog.warning(f"Using target-bound Toyota ephemeral SecOC bridge for EPS {bridge_f181}")
 
     # Write previous route's CarParams
     prev_cp = self.params.get("CarParamsPersistent")
