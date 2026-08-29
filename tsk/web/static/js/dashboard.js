@@ -324,29 +324,20 @@ function evidenceBlock({ name, statusLabel, tone, detail, href }) {
 function renderEvidence(dashboard) {
   const exactF33 = dashboard.target?.kind === "camry_f33";
   if (exactF33) {
-    const can = dashboard.can || {};
-    const discovery = can.profile_discovery || {};
-    const b6 = (discovery.streams || []).find((stream) => Number(stream.addr_int) === 0x0B6);
-    const canProgress = Number(can.seconds || 0) > 0 || Number(b6?.samples || 0) > 0;
-    const canReady = Boolean(can.ready || can.status === "complete");
-    const canLabel = can.status === "running" ? "Capturing full window"
-      : canReady ? "Window retained"
-        : can.status === "failed" ? "Failed" : canProgress ? "Incomplete" : "Not captured";
-    els.evidenceCardTitle.textContent = "F33 bring-up evidence";
-    els.evidenceCardSubtitle.textContent = "Target-native B6, freshness, and status evidence; not a key-recovery workflow.";
+    els.evidenceCardTitle.textContent = "F33 lateral evidence";
+    els.evidenceCardSubtitle.textContent = "The upstream request representation is recovered; the producer/authentication chain into protected B6 is still open.";
     els.evidenceSummary.replaceChildren(
       evidenceBlock({
-        name: "Live B6 / status capture",
-        statusLabel: canLabel,
-        tone: evidenceTone(can.status, canReady, canProgress),
-        detail: `${Number(b6?.samples || 0)} B6 frames · ${Math.round(Number(can.seconds || 0))}/60s · retain 28-byte application, sequence/freshness, and 0x351/0x394/0x4A3 transitions`,
-        href: "/can-collector.html",
+        name: "Upstream 0x08A request",
+        statusLabel: "Recovered",
+        tone: "green",
+        detail: "Bus-4 0x08A carries Target Lateral ID, target angle at the downstream B6 scale, and a modulo-64 sequence. Exact F33 does not accept 0x08A as EPS ingress.",
       }),
       evidenceBlock({
-        name: "Static integration",
-        statusLabel: "Closed",
-        tone: "green",
-        detail: "Protected B6 receiver geometry is closed. Default operation remains noOutput/zero CAN; the exact-F33 development sender is opt-in, non-release, live-gated, and not production support.",
+        name: "Producer → protected B6",
+        statusLabel: "Open",
+        tone: "amber",
+        detail: "Producer identity, integrity/authentication trailer, transformation into B6, signer/freshness ownership, and authority/arbitration remain unresolved. Steering output stays noOutput/zero CAN.",
       }),
     );
     return;

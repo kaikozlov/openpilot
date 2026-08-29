@@ -289,7 +289,8 @@ CAMRY_F33_PRODUCTION_ARCHITECTURE = {
 
 CAMRY_F33_OPENDBC = {
   "passive_port_baseline_root_commit": "d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04",
-  "opendbc_commit": "b9e86924",
+  "opendbc_commit": "a2ad31f3",
+  "upstream_request_decode_commit": "b9e86924",
   "platform": "TOYOTA_CAMRY_TSS3",
   "mode": "noOutput-default; passive analysis only",
   "safety": "noOutput-default",
@@ -325,6 +326,8 @@ def public_camry_f33_status() -> dict:
     "codeflash": CAMRY_F33_CODEFLASH,
     "b6": CAMRY_F33_B6,
     "ram_recovery": CAMRY_F33_RAM_RECOVERY,
+    "eps_394_state_candidates": CAMRY_F33_EPS_394_STATE_CANDIDATES,
+    "application_runtime": CAMRY_F33_APPLICATION_RUNTIME,
     "upstream_lateral_request": CAMRY_F33_UPSTREAM_LATERAL_REQUEST,
     "checkpoint": CAMRY_F33_CHECKPOINT,
     "development_lateral": CAMRY_F33_DEVELOPMENT_LATERAL,

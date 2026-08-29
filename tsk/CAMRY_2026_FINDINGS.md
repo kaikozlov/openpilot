@@ -5,10 +5,10 @@ EPS application F181 **`8965F3307000 / 8A3113303100`**. The byte-level/static au
 remains `ghidra_rh850_analysis`; this document mirrors only findings that are already
 field- or exact-firmware-evidenced and useful to the fork.
 
-Nothing in this document authorizes production steering output. The default Camry path remains
-`dashcamOnly` / Panda `SafetyModel.noOutput` and emits zero controller CAN. The fork now also stages
-an exact-F33, non-release development sender behind explicit live gates; that sender is intentionally
-invalid-MAC and exists for the Gate-2 bypass experiment, not as production TSS3 support.
+Nothing in this document authorizes production steering output. The Camry path remains
+`dashcamOnly` / Panda `SafetyModel.noOutput` and emits zero controller CAN. The former exact-F33
+bus-0 B6 development sender has been removed from the runtime integration; only passive 0x08A
+observation plus analysis/test-only protected-B6 receiver/freshness/safety contracts remain.
 
 ## Exact ECU identities and route
 

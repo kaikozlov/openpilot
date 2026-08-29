@@ -1026,9 +1026,10 @@ def dashboard_payload() -> dict:
         + "integrity/authentication trailer, and transform into protected B6 are unrecovered. "
         + "VAR-081 proves zero stock B6 during factory LTA, so another blind B6-template drive is not the next step."
       ),
-      "href": "/can-collector.html",
-      "label": "Capture F33 CAN evidence",
-      "vehicle_state": "READY · relay pass-through",
+      "href": "",
+      "label": "Open research",
+      "action": "research",
+      "vehicle_state": "Any · static/producer RE first",
       "tone": "primary",
     }
 
@@ -1043,7 +1044,7 @@ def dashboard_payload() -> dict:
     assert f33_status is not None
     gate_titles = (
       "Upstream request chain",
-      "Relay authority",
+      "Authority / arbitration",
       "ICU-S generation",
       "Override and current policy",
       "Live status transitions",

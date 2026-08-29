@@ -99,7 +99,8 @@ class TestCamryF33Evidence(unittest.TestCase):
     self.assertEqual([row["rank"] for row in CAMRY_F33_PRODUCTION_ARCHITECTURE["ranking"]], [1, 2, 3, 4])
 
   def test_passive_default_and_removed_development_sender(self):
-    self.assertEqual(CAMRY_F33_OPENDBC["opendbc_commit"], "b9e86924")
+    self.assertEqual(CAMRY_F33_OPENDBC["opendbc_commit"], "a2ad31f3")
+    self.assertEqual(CAMRY_F33_OPENDBC["upstream_request_decode_commit"], "b9e86924")
     self.assertIn("noOutput-default", CAMRY_F33_OPENDBC["safety"])
     self.assertFalse(CAMRY_F33_OPENDBC["controller_can_output"])
     self.assertFalse(CAMRY_F33_OPENDBC["development_sender_available"])
@@ -112,6 +113,8 @@ class TestCamryF33Evidence(unittest.TestCase):
     self.assertEqual(CAMRY_F33_DEVELOPMENT_LATERAL["removed_in_opendbc_commit"], "b9e86924")
     self.assertEqual(CAMRY_F33_CHECKPOINT["state"], "production-disabled-passive-only")
     status = public_camry_f33_status()
+    self.assertEqual(status["eps_394_state_candidates"], CAMRY_F33_EPS_394_STATE_CANDIDATES)
+    self.assertEqual(status["application_runtime"], CAMRY_F33_APPLICATION_RUNTIME)
     self.assertFalse(status["production_output_allowed"])
     self.assertEqual(tuple(status["remaining_production_gates"]), CAMRY_F33_REMAINING_PRODUCTION_GATES)
     self.assertGreaterEqual(len(status["remaining_production_gates"]), 6)
