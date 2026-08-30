@@ -5,17 +5,24 @@ EPS application F181 **`8965F3307000 / 8A3113303100`**. The byte-level/static au
 remains `ghidra_rh850_analysis`; this document mirrors only findings that are already
 field- or exact-firmware-evidenced and useful to the fork.
 
-Nothing in this document authorizes production steering output. The Camry path remains
-`dashcamOnly` / Panda `SafetyModel.noOutput` and emits zero controller CAN. The former exact-F33
-bus-0 B6 development sender has been removed from the runtime integration; only passive 0x08A
-observation plus analysis/test-only protected-B6 receiver/freshness/safety contracts remain. CORR-135/VAR-087 are the controlling architecture boundary: factory LTA/LCA steers with zero B6 through an exact F33 B6-independent internal assist path, so `0x08A` producer/SecOC ownership must not be conflated with a presumed `0x08A -> B6` stock-LTA transform.
+Nothing in this document authorizes production steering output. Default and release Camry
+behavior remains `dashcamOnly` / Panda `SafetyModel.noOutput` with zero controller CAN. An
+exact-F181, non-release B6 development path is now present behind explicit bridge and lateral
+development parameters. It sends deliberately zero-MAC28 `0x0B6` on Panda bus 0 and still
+requires an installed EPS acceptance bypass plus stationary validation. CORR-135/VAR-087
+remain the stock-architecture boundary: factory LTA/LCA steers with zero B6 through an exact
+F33 B6-independent internal assist path, so `0x08A` producer/SecOC ownership must not be
+conflated with a presumed `0x08A -> B6` transform.
 
 ## Exact ECU identities and route
 
-Before the physical Toyota-B CAN0/CAN1 repin, all three relevant diagnostic endpoints
-were observed on **normal-harness routing, ELM327 parameter 1, Panda logical bus 1**.
-The post-repin 2026-08-27 DTC sweep reaches the same direct diagnostic family on Panda
-bus0; these are capture-topology labels, not Toyota/GTS+ Central-Gateway bus numbers:
+Before the physical Toyota-B repin, all three relevant diagnostic endpoints were observed on
+**normal-harness routing, ELM327 parameter 1, Panda logical bus 1**. The relay-correct layout
+moves the steering/chassis family onto the current **CAN0/CAN2 relay pair**: Panda bus 0 is
+the established development B6 TX path, Panda bus 2 is its byte-identical relay mirror, and
+Panda bus 1 is the native camera/radar plane. Toyota/GTS+ logical Bus 4 contains Brake
+Booster, Skid Control, EPS, SAS, and Airbag behind Central Gateway. These are distinct naming
+layers; no missing frame may be used to invent a private EPS stub or second EPS CAN interface.
 
 | ECU | request -> response | exact identity |
 |---|---|---|
@@ -161,9 +168,11 @@ GlobalRAM. The bounded CPU-visible key search was negative:
 - exhaustive raw 16-byte candidate scan against retained target SecOC traffic: **zero
   survivors**.
 
-This is consistent with the statically active **ICU-S slot 4** architecture. It does not
-prove absence of an application-only transient because the RAM snapshot is post
-application-to-boot transition.
+This is consistent with the statically active **ICU-S protected slot-4** architecture. The
+secret is not an ordinary DataFlash object and CPU-visible `00`/`FF` reads do not expose or
+characterize protected contents. The negative ordinary-memory census therefore cannot be
+turned into a DataFlash key-recovery plan. It also does not prove absence of an
+application-only transient because the RAM snapshot is post application-to-boot transition.
 
 ## Volatile application-runtime signer research
 
@@ -194,47 +203,73 @@ Application UDS has no SID `0x3D` arbitrary WriteMemoryByAddress path. A 312-sit
 call audit and the recovered fixed-DMAC descriptors have not found a reversible
 application-context PC/callback pivot into the XCP-writable tail.
 
-Current production ranking therefore makes the volatile architecture first-class:
+The exact-F33 zero-MAC28 receive resident is a separate, audited static candidate. It fits
+within the live-proven high-tail geometry before heartbeat `0xFEBFFBEC` and re-admits only B6
+frames that normal verification rejected and whose MAC28 bits are all zero. All other frames
+retain the stock verifier. Reset restores stock. What remains missing is automatic deployment,
+a concrete application-mode execution pivot, heartbeat confirmation, re-arm after EPS reset,
+and live behavior validation.
 
-1. **preferred production path:** RAM-only/reset-to-stock application runtime using XCP
-   `DOWNLOAD` plus a future concrete reversible volatile callback/control-transfer pivot;
-2. RID `0x100F` as a useful command-5 permission/hardware oracle, **not** a signer API;
-3. disruptive PROGRAMMING loader only for research/acquisition, not production startup;
-4. persistent flash hook **fallback-only**, not the preferred production architecture.
+For **development receiver acceptance**, the two viable paths are therefore:
+
+1. persistent exact-F33 Gate-2 CodeFlash compare/check disable with deterministic CRC repair—
+   tested on cars and frictionless after the one-time flash, but persistent;
+2. reset-to-stock RAM bridge—no persistent flash modification, but per-session deployment,
+   heartbeat, and re-arm friction.
+
+Neither path retrieves the protected key. The RAM route remains the preferred upstream-shaped
+research architecture; the persistent patch remains the proven practical fallback.
 
 ## openpilot state
 
-The checked-out fork contains the passive target-native implementation plus passive
-decoding of the recovered upstream lateral request:
+The checked-out fork contains a passive default plus an exact-F181 non-release development
+cutout:
 
 - passive-port baseline root commit `d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04`;
-- upstream-request decoding (opendbc commit `b9e86924`) parses `0x08A` B18:B19
-  signed target angle at `1024/17870` deg/count, B21 Target Lateral ID, and the B26
-  modulo-64 sequence into read-only CarState observables;
-- the former exact-F33 **B6 development sender was removed** (root commit
-  `abf3ca70a`, opendbc commit `b9e86924`, historical commits `15f3550…` /
-  `dde0fcf0…`): VAR-081 proves zero stock B6 throughout complete factory
-  LTA/LCA-active intervals, so waiting for a stock-captured 28-byte B6 template is
-  not a valid integration shape, and the `ToyotaTSS3DevLateral` parameter,
-  `toyota_tss3_dev.py`, and their tests are gone;
-- exact `TOYOTA_CAMRY_TSS3` F181 binding and source-real P/R/N/D/B + Ready replay;
-- generated TSS3 PT DBC, B6 application/freshness/signing analysis helpers, and
-  shadow F33 limits;
-- 179-ID Camry census deliberately excluded from legacy CAN fingerprinting because the
-  Corolla TSS3 census is a strict subset;
-- default controller output remains **zero CAN** and CarParams uses `SafetyModel.noOutput`.
-- an independent DEVELOPMENT_ONLY **read-only FRC oracle capture** can be armed with
-  `ToyotaTSS3FrcOracleCapture`. It is exact-F33/F181-bound, requires passive CarParams,
-  `ControlsReady=false`, one Panda reporting ELM327 parameter 1 with controls disallowed,
-  and uses `card`'s existing `sendcan` publisher (never a second Panda owner). It emits
-  only fixed 8-byte SID-`0x22` requests to the relay-correct post-repin FRC route
-  **Panda bus 0 / 0x792** for
-  DIDs `0x1601` and `0x1914`, alternated at 10 Hz per DID. The earlier normal-harness
-  pre-repin diagnostic route was Panda bus1; current-GTS+ “Bus 1” is a Central-Gateway
-  topology label and must not be read as a Panda bus number. If exact positive FRC responses
-  never appear or disappear for two seconds, polling stops for that process lifetime.
-  This capture path does not set `ControlsReady`, enable a Toyota control safety model,
-  or emit any steering/vehicle-control frame.
+- current hardened cutover root `6dd58cf5e`, nested opendbc `8da4bb9b`;
+- upstream-request decoding (opendbc `b9e86924`) parses `0x08A` B18:B19 target angle,
+  B21 Target Lateral ID, and B26 sequence into read-only CarState observables;
+- the zero-MAC28 B6 sender was reintroduced at root `5fee63cfc` / opendbc `c98872c6` and
+  hardened at the current cutover. It sends one DLC32 `0x0B6` per control cycle on Panda
+  bus 0, uses live `0x00F` freshness, ID11 while active, a slew-limited target, and
+  ramp-to-zero followed by ID0 release;
+- activation requires a non-release build, `ToyotaEphemeralSecOCBridge`, exact
+  `ToyotaEphemeralSecOCBridgeF181=8965F3307000`, `ToyotaTss3DevLateral`, a TSS3 platform,
+  and no conflicting key-backed or longitudinal SecOC path;
+- Panda safety is `ALLOW_DEBUG`, exact-F33, B6-only, and requires cruise-derived
+  `controls_allowed`, live steering-rate/sync observations, ±1745 raw target, ±78 raw step,
+  modulo-64 sequence, raw steering-rate ≤100, and a 35 ms active timeout;
+- exact `TOYOTA_CAMRY_TSS3` binding, source-real P/R/N/D/B + Ready replay, generated TSS3
+  DBC, and the 179-ID census/fingerprint separation remain intact;
+- **default/release output remains zero CAN / `SafetyModel.noOutput`**;
+- an independent DEVELOPMENT_ONLY read-only FRC capture remains available. It is exact-F181
+  bound and emits only diagnostic SID-`0x22` reads while controls are disallowed. It does not
+  arm steering or replace the still-missing Operation-FFD capture.
+
+The development sender being present does not prove the EPS acceptance bypass is installed.
+`card.py` currently consumes bridge parameters; TSK still ships the inert canary rather than a
+complete resident install/execution/heartbeat/arm flow.
+
+## What the FRC computes versus what leaves it
+
+FRC-hosted recorder/Operation-FFD vocabulary proves that the camera domain computes a lateral
+request object (`5282`/`5631`: Target Lateral ID, milliradian pinion request, assist, damping)
+and separately exposes arbitration/result quantities (`5285`, `57DE`, `5265`). No retained
+capture contains those four decisive quantities synchronized with CAN, so an ID11 interval is
+request-state evidence—not a proved winner/grant oracle.
+
+The native Panda-bus-1 camera/radar plane contains 22 periodic streams:
+`0x020`, `0x123`, `0x160`, `0x180..0x18C`, `0x1A0`, `0x200`, `0x201`, `0x230`,
+`0x440`, and `0x450`. The `0x180..0x182` family contains plaintext perception-object slots
+with 0.01 m forward range; the family uses ordinary counters/checksums, not the `0x08A`
+SecOC trailer. `0x160` remains structured but CORR-138 rejects its former standing
+steering-angle-echo identity.
+
+No consecutive `5282` serialization, 28-byte `0x08A` application copy, `0x08A`, or other
+proved lateral-command carrier appears on native Bus 1. Physical FRC-versus-radar ownership of
+individual Bus-1 IDs is not closed. Therefore we know what request state exists inside FRC,
+but **the actual FRC-to-chassis request transport is not identified**; a private gateway/service
+handoff remains possible. There is no established `0x08A -> B6` transform.
 
 ## Upstream lateral request (0x08A)
 
@@ -246,7 +281,16 @@ field boundaries are encoding assumptions; and every retained frame is on the Bu
 Brake/EPS capture (Panda bus 0 / relay mirror bus 2, zero on bus 1), so the producer is
 unknown and the frame must not be labeled a Bus-1 camera message. Exact F33 does not accept `0x08A` as normal ingress and does not list it among its five generated-COM Tx IDs. Its recovered protected `0x0B6` interface is a **separate external cooperative-control ingress**, not a required stock-LTA next hop. Exact F33's B6-inactive `D0218 -> CC48 -> CC60 -> CC50 -> CC62/CC66 -> CC64` path reaches physical steering, so the 73.303384 s of machine-identified factory LTA/LCA with zero B6 is architecturally consistent.
 
-The `0x08A` trailer is also now structurally bounded as Toyota ordinary-P5 SecOC: B28 candidate reset-low2 agrees with preceding authenticated `0x00F` on 19,868/20,615 drive-A frames and 23,093/23,996 eligible drive-B frames; on every same-reset, same-segment B26+1 pair (18,727 A / 21,989 B), candidate message-low2 advances +1. B27 is zero and the remaining 28 trailer bits are effectively frame-unique. This strongly supports `FV4 || MAC28` framing without recovering the exact sender profile, key, or CMAC implementation.
+The `0x08A` trailer is also structurally bounded as Toyota ordinary-P5 SecOC: B28 candidate
+reset-low2 agrees with preceding authenticated `0x00F` at the reported drive rates, B26/FV4
+progress coherently, and the remaining 28 trailer bits are effectively frame-unique. VAR-101
+adds the decisive lifecycle boundary: a stationary READY capture has 2,475 continuously
+signed `0x08A` frames at about 41 Hz with B21=0 in every frame, all 16 FV4 phases, 98.75%
+reset-low2 agreement with live `0x00F`, 99.96% B26 `+1 mod 64`, and frame-unique MAC28.
+The protected publisher is therefore an always-on chassis-side service, not an on-demand FRC
+request serializer. This does **not** uniquely distinguish Brake/Skid/Brake Booster from
+Central Gateway; exact publisher/key-owner identity still requires producer firmware,
+source-identifying measurement, or synchronized private-link evidence.
 
 ### Complete field census (VAR-088)
 
@@ -275,15 +319,40 @@ absent from exact F33's RDBI table, so the EPS-side cooperative target is not
 directly pollable. Bus-4 ECU dictionaries carry no lateral-request vocabulary,
 so GTS+ cannot name the producer.
 
-## Remaining production gates
+## Remaining gates
 
-Static receiver discovery is no longer the principal blocker, and the old `0x08A -> B6` stock-LTA model is explicitly retired. Before lateral output can be enabled we still need all of the following closures:
+### Development vehicle test
 
-1. identify the actual `0x08A` producer and its exact SecOC profile/key-slot/freshness/arbitration ownership;
-2. starting from the exact B6-inactive `D0218` path, identify the external/local mode, gain, authority, or state that selects/modulates stock LTA across Target Lateral ID `0/11/18`;
-3. choose the openpilot actuation interface. Protected B6 remains a plausible external interface, but if chosen its signer/freshness/suppression/arbitration contract must be recovered independently rather than inferred from stock LTA;
-4. validate driver override and motor-Q-current response policy;
-5. capture live `0x351/0x394/0x4A3` normal/inhibit/fault/recovery transitions;
-6. for the preferred RAM-only signer architecture, prove a reachable application XCP route and a concrete reversible volatile control-transfer primitive.
+The software sender and EPS receiver-acceptance mechanisms exist. The shortest honest path to
+an on-car result is now:
 
-Do not repeat blind stock-B6-template drives and do not infer an `0x08A -> B6` transform from matching angle scale or bus topology. The FRC `0x1601`/`0x1914` oracle remains useful synchronized corroboration and can help attribute internal F33 state changes. Production output remains `SafetyModel.noOutput` / zero CAN.
+1. install and positively verify either the persistent Gate-2 patch or the exact-F33 RAM
+   bridge; for RAM, require heartbeat/readback and fail closed across reset;
+2. verify no competing stock B6 source exists or can appear without the relay policy failing
+   closed;
+3. wheels unloaded and vehicle stationary: send ID0/zero, then ID11/zero, then one tiny command
+   within a single ±78-raw step;
+4. verify angle sign/scale, `0x030` motor-feedback response, EPS DTC state, ramp-down/ID0
+   release, 35 ms timeout, and driver override;
+5. only after those pass consider a low-speed bounded validation.
+
+Unresolved B6 companion bytes remain explicit candidates. The bypass turns this into an
+application-semantics test; it does not make zero/default fields Toyota stock behavior.
+
+### Production and factory-architecture research
+
+Production output remains unauthorized. Separately close:
+
+1. the actual private/public FRC request transport and synchronized `5282/5285/57DE/5265`
+   request/winner/grant state;
+2. exact `0x08A` physical publisher, protected key owner/profile, and source arbitration—now
+   bounded to an always-on chassis service, but not uniquely Brake-family versus Gateway;
+3. production-grade source suppression/coexistence, driver override, motor-current response,
+   and live `0x351/0x394/0x4A3` inhibit/fault/recovery policy;
+4. for a shippable volatile route, automatic resident install, execution pivot, heartbeat,
+   re-arm, and reset-to-stock lifecycle.
+
+Do not send `0x08A` to EPS, repeat blind stock-B6-template drives, or infer an
+`0x08A -> B6` transform from matching angle scale or topology. Protected key material resides
+in protected storage, not ordinary DataFlash. Default/release output remains
+`SafetyModel.noOutput` / zero CAN.

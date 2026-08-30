@@ -157,7 +157,10 @@ CAMRY_F33_LATERAL_REQUEST = {
   "eps_ingress": False,
   "eps_generated_com_transmit": False,
   "stock_lta_requires_b6": False,
-  "boundary": "0x08A ownership/security and exact-F33 stock-LTA authority selection are separate questions; no 0x08A-to-B6 transform is established or required",
+  "boundary": (
+    "0x08A ownership/security and exact-F33 stock-LTA authority selection are separate "
+    + "questions; no 0x08A-to-B6 transform is established or required"
+  ),
 }
 
 CAMRY_F33_RAM_RECOVERY = {
@@ -246,24 +249,53 @@ CAMRY_F33_APPLICATION_RUNTIME = {
 
 CAMRY_F33_CHECKPOINT = {
   "target": "2026 Camry / F33",
-  "state": "production-disabled-passive-only",
+  "state": "production-disabled-development-path-present",
   "static_receiver_integration": "closed",
   "cpu_visible_key_recovery": "negative",
-  "principal_blocker": "separate 0x08A producer/SecOC ownership and exact-F33 B6-independent stock-LTA authority selection",
+  "key_storage": "ICU-S-protected-slot-4-not-ordinary-dataflash",
+  "principal_blocker": "install and positively verify an exact-F33 receiver acceptance bypass, then validate the B6 application candidate stationary",
+  "factory_architecture_open": (
+    "FRC request transport and exact always-on 0x08A protected publisher remain unresolved "
+    + "but do not block direct development B6 actuation"
+  ),
   "output": "production-disabled",
-  "output_detail": "Default: SafetyModel.noOutput / zero CAN. Production TSS3 output unsupported.",
+  "output_detail": (
+    "Default/release: SafetyModel.noOutput / zero CAN. Exact-F181 non-release development "
+    + "output exists behind explicit parameters; production TSS3 output unsupported."
+  ),
 }
 
 CAMRY_F33_DEVELOPMENT_LATERAL = {
-  "available": False,
-  "status": "removed",
-  "superseded_by": "VAR-081/CORR-135: zero stock B6 exists during factory LTA/LCA and exact F33 "
-                   "has a B6-independent internal actuation path, so neither a stock-captured B6 template nor an "
-                   "assumed 0x08A-to-B6 transform is a valid stock-LTA prerequisite",
-  "removed_in_root_commit": "abf3ca70a",
-  "removed_in_opendbc_commit": "b9e86924",
+  "available": True,
+  "status": "present-default-off",
+  "historical_removed_in_root_commit": "abf3ca70a",
+  "historical_removed_in_opendbc_commit": "b9e86924",
   "historical_root_commit": "15f3550365e2eee54ca5645ae9c24d9d41ae4f31",
   "historical_opendbc_commit": "dde0fcf0fbaf875750c54a072b0dcb3857f8829b",
+  "reintroduced_in_root_commit": "5fee63cfc",
+  "reintroduced_in_opendbc_commit": "c98872c6",
+  "hardened_in_root_commit": "6dd58cf5e",
+  "hardened_in_opendbc_commit": "8da4bb9b",
+  "activation": (
+    "non-release exact F181 8965F3307000 + ToyotaEphemeralSecOCBridge + "
+    + "ToyotaEphemeralSecOCBridgeF181 + ToyotaTss3DevLateral; no protected ACC/longitudinal"
+  ),
+  "sender": (
+    "one zero-MAC28 0x0B6/DLC32 frame per control cycle on Panda bus 0; live 0x00F freshness; "
+    + "ID11 active; slew-limited angle; ramp-to-zero then ID0 release"
+  ),
+  "safety": "ALLOW_DEBUG exact-F33 B6-only hook; controls_allowed from 0x08A B3[3]; angle/step/rate/sequence/35-ms timeout checks",
+  "acceptance_options": (
+    "persistent exact-F33 Gate-2 CodeFlash compare-neutralization with deterministic CRC repair",
+    "reset-to-stock RAM bridge that re-admits only rejected deliberately zero-MAC28 B6",
+  ),
+  "principal_live_blocker": (
+    "deploy and positively verify one acceptance bypass, then prove ID0, ID11-zero, "
+    + "tiny-angle sign/scale, ramp-down, timeout, driver override, and fault behavior "
+    + "stationary"
+  ),
+  "companion_boundary": "no stock B6 was retained; unresolved application bytes remain explicit zero/default candidates rather than Toyota stock claims",
+  "production_output_authorized": False,
 }
 
 CAMRY_F33_PRODUCTION_ARCHITECTURE = {
@@ -298,13 +330,15 @@ CAMRY_F33_PRODUCTION_ARCHITECTURE = {
 
 CAMRY_F33_OPENDBC = {
   "passive_port_baseline_root_commit": "d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04",
-  "opendbc_commit": "525ee987",
+  "opendbc_commit": "8da4bb9b",
+  "root_commit": "6dd58cf5e",
   "lateral_request_decode_commit": "b9e86924",
   "platform": "TOYOTA_CAMRY_TSS3",
-  "mode": "noOutput-default; passive analysis only",
-  "safety": "noOutput-default",
+  "mode": "noOutput-default; exact-F181 non-release development output opt-in",
+  "safety": "noOutput-default; ALLOW_DEBUG TSS3_DEV_LATERAL opt-in",
   "controller_can_output": False,
-  "development_sender_available": False,
+  "development_sender_available": True,
+  "development_controller_can_output": True,
   "production_output_supported": False,
   "exact_f181_binding": True,
   "lateral_request_decoding": True,
