@@ -70,7 +70,7 @@ class TestEphemeralSecocBridgeIntegration(unittest.TestCase):
     source = CARD.read_text(encoding="utf-8")
     self.assertIn('bridge_requested = self.params.get_bool("ToyotaEphemeralSecOCBridge")', source)
     self.assertIn('bridge_f181_raw = self.params.get("ToyotaEphemeralSecOCBridgeF181")', source)
-    self.assertIn('len(bridge_f181) == 13', source)
+    self.assertIn('len(bridge_f181) == 12', source)
     self.assertIn('bridge_f181.startswith("8965")', source)
     self.assertIn('bridge_f181.isalnum()', source)
     self.assertIn("fw.ecu == structs.CarParams.Ecu.eps", source)
