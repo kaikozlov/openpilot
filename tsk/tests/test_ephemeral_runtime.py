@@ -95,7 +95,7 @@ class TestEphemeralRuntimePackage(unittest.TestCase):
 
   def test_bootstrap_protocol_builder_covers_old_new_and_cpu0_cpu1_without_authorizing_them(self):
     old0 = runtime.bootstrap_protocol_plan(uds_variant="old", cpu_index=0)
-    self.assertEqual(old0["did_0203"], bytes.fromhex("0100000000"))
+    self.assertEqual(old0["did_0203"], b"\x00" * 5)
     self.assertEqual(old0["memory_id"], 1)
     builtin = runtime.builtin_runtime_protocol_plan()
     self.assertEqual(builtin["did_0203"], b"\x00" * 5)  # preserve shipped B4512000 live bytes
@@ -106,6 +106,7 @@ class TestEphemeralRuntimePackage(unittest.TestCase):
     self.assertEqual(old0["execution_trigger"], bytes.fromhex("3101ff004500000e000000008000"))
 
     new0 = runtime.bootstrap_protocol_plan(uds_variant="new", cpu_index=0)
+    self.assertEqual(new0["did_0203"], bytes.fromhex("0100000000"))
     self.assertEqual(new0["routine_magic"], bytes.fromhex("4501"))
     self.assertEqual(new0["verify_data"][:2], bytes.fromhex("4501"))
     self.assertEqual(new0["execution_trigger"][4:6], bytes.fromhex("4501"))

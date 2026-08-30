@@ -115,7 +115,9 @@ def bootstrap_protocol_values(*, uds_variant: str, cpu_index: int) -> dict:
     "uds_variant": uds_variant,
     "cpu_index": cpu_index,
     "memory_id": 1 if cpu_index == 0 else 0,
-    "did_0203": b"\x01\x00\x00\x00\x00" if cpu_index == 0 else b"\x00" * 5,
+    # Exact F33 and the older Toyota stack use zero DID 0203. The CPU0
+    # 01 00 00 00 00 offset selector belongs to the new-stack grammar.
+    "did_0203": b"\x01\x00\x00\x00\x00" if uds_variant == "new" and cpu_index == 0 else b"\x00" * 5,
     "routine_magic": b"\x45\x01" if uds_variant == "new" else b"\x45\x00",
   }
 
