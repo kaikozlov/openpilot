@@ -19,7 +19,7 @@ from opendbc.car.fw_versions import ObdCallback
 from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
-from opendbc.car.toyota.values import ToyotaFlags, ToyotaSafetyFlags
+from opendbc.car.toyota.values import CAR as TOYOTA_CAR, ToyotaFlags, ToyotaSafetyFlags
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.car.toyota_tss3_oracle import configure_toyota_tss3_frc_oracle, elm327_diagnostic_ready
 
@@ -167,6 +167,17 @@ class Car:
       bridge_f181_valid = len(bridge_f181) == 13 and bridge_f181.startswith("8965") and bridge_f181.isalnum()
       eps_versions = [bytes(fw.fwVersion) for fw in self.CP.carFw if fw.ecu == structs.CarParams.Ecu.eps]
       bridge_target_matches = bool(bridge_f181_valid and any(bridge_f181.encode() in fw for fw in eps_versions))
+      # The exact F33 EPS does not reliably answer F181 while the car is in READY,
+      # but the normal comma CAN fingerprint now uniquely identifies this Camry.
+      # For the maintainer-only non-release dev path, accept the persisted exact
+      # calibration binding when that real CAN fingerprint selected the platform.
+      bridge_target_matches |= bool(
+        bridge_f181 == "8965F3307000"
+        and self.CP.carFingerprint == TOYOTA_CAR.TOYOTA_CAMRY_TSS3
+        and self.CP.fingerprintSource == structs.CarParams.FingerprintSource.can
+        and self.params.get_bool("ToyotaTss3DevLateral")
+        and not is_release
+      )
       if bridge_requested and not key_loaded:
         if not bridge_f181_valid:
           cloudlog.warning("Ignoring Toyota ephemeral SecOC bridge: validated F181 must be one exact 13-character 8965... software ID")
