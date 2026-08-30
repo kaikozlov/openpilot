@@ -1,3 +1,4 @@
+import ast
 import unittest
 from pathlib import Path
 
@@ -78,6 +79,26 @@ class TestEphemeralSecocBridgeIntegration(unittest.TestCase):
     self.assertIn("elif self.CP.openpilotLongitudinalControl", source)
     self.assertIn("self.CI.CC.ephemeral_secoc_bridge = True", source)
     self.assertIn("self.CP.secOcKeyAvailable = True", source)
+
+  def test_tss3_dev_lateral_enable_is_registered_development_only(self):
+    params = PARAM_KEYS.read_text(encoding="utf-8")
+    self.assertIn('{"ToyotaTss3DevLateral", {PERSISTENT | DEVELOPMENT_ONLY, BOOL}}', params)
+
+  def test_card_restores_global_controller_availability_after_secoc_setup(self):
+    source = CARD.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    car_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Car")
+    init = next(node for node in car_class.body if isinstance(node, ast.FunctionDef) and node.name == "__init__")
+    global_assignments = [
+      node for node in ast.walk(init)
+      if isinstance(node, ast.Assign) and node.col_offset == 4
+      and any(isinstance(target, ast.Name) and target.id == "controller_available" for target in node.targets)
+    ]
+    self.assertEqual(len(global_assignments), 1)
+
+  def test_card_imports_cruise_helper_it_constructs(self):
+    source = CARD.read_text(encoding="utf-8")
+    self.assertIn("from openpilot.selfdrive.car.cruise import VCruiseHelper", source)
 
   def test_tsk_does_not_arm_or_deploy_the_resident_bridge(self):
     operational_source = "\n".join((

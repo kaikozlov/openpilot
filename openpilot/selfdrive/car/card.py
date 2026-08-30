@@ -20,6 +20,7 @@ from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from opendbc.car.toyota.values import ToyotaFlags, ToyotaSafetyFlags
+from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.car.toyota_tss3_oracle import configure_toyota_tss3_frc_oracle, elm327_diagnostic_ready
 
 REPLAY = "REPLAY" in os.environ
@@ -113,6 +114,12 @@ class Car:
 
     self.CP.alternativeExperience = 0
     openpilot_enabled_toggle = self.params.get_bool("OpenpilotEnabledToggle")
+    controller_available = self.CI.CC is not None and openpilot_enabled_toggle and not self.CP.dashcamOnly
+    self.CP.passive = not controller_available or self.CP.dashcamOnly
+    if self.CP.passive:
+      safety_config = structs.CarParams.SafetyConfig()
+      safety_config.safetyModel = structs.CarParams.SafetyModel.noOutput
+      self.CP.safetyConfigs = [safety_config]
 
     self.tss3_frc_oracle = configure_toyota_tss3_frc_oracle(
       self.params, is_release, self.CP,
