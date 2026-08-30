@@ -159,7 +159,8 @@ class Car:
       # SecOC key always takes priority, and the current bridge covers lateral only.
       bridge_requested = self.params.get_bool("ToyotaEphemeralSecOCBridge")
       bridge_f181_raw = self.params.get("ToyotaEphemeralSecOCBridgeF181")
-      bridge_f181 = bridge_f181_raw.decode(errors="ignore").strip() if bridge_f181_raw is not None else ""
+      bridge_f181 = (bridge_f181_raw.decode(errors="ignore") if isinstance(bridge_f181_raw, bytes) else str(bridge_f181_raw)).strip() \
+        if bridge_f181_raw is not None else ""
       # This parameter is an exact calibration binding, never a prefix/family selector.
       # Toyota EPS F181 software IDs tracked here are 13 ASCII alphanumerics beginning
       # with 8965 (for example 8965B4512000). Reject short prefixes before searching
