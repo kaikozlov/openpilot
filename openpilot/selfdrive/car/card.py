@@ -19,9 +19,7 @@ from opendbc.car.fw_versions import ObdCallback
 from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
-from opendbc.car.toyota.values import CAR as TOYOTA_CAR, ToyotaFlags, ToyotaSafetyFlags
 from openpilot.selfdrive.car.cruise import VCruiseHelper
-from openpilot.selfdrive.car.toyota_tss3_oracle import configure_toyota_tss3_frc_oracle, elm327_diagnostic_ready
 
 REPLAY = "REPLAY" in os.environ
 
@@ -40,7 +38,6 @@ def obd_callback(params: Params) -> ObdCallback:
       params.get_bool("ObdMultiplexingChanged", block=True)
       cloudlog.warning("OBD multiplexing set successfully")
   return set_obd_multiplexing
-
 
 
 
@@ -121,12 +118,6 @@ class Car:
       safety_config.safetyModel = structs.CarParams.SafetyModel.noOutput
       self.CP.safetyConfigs = [safety_config]
 
-    self.tss3_frc_oracle = configure_toyota_tss3_frc_oracle(
-      self.params, is_release, self.CP,
-    )
-    if self.tss3_frc_oracle is not None:
-      cloudlog.warning("Enabled exact-F33 read-only FRC LTA/ACC oracle capture; vehicle controls remain disabled")
-
     if self.CP.secOcRequired:
       # Copy user key if available
       try:
@@ -137,7 +128,6 @@ class Car:
       except Exception:
         pass
 
-      key_loaded = False
       secoc_key = self.params.get("SecOCKey")
       if secoc_key is not None:
         try:
@@ -145,72 +135,12 @@ class Car:
         except ValueError:
           saved_secoc_key = b""
         if len(saved_secoc_key) == 16:
-          key_loaded = True
           self.CP.secOcKeyAvailable = True
           self.CI.CS.secoc_key = saved_secoc_key
           if controller_available:
             self.CI.CC.secoc_key = saved_secoc_key
         else:
           cloudlog.warning("Saved SecOC key is invalid")
-
-      # A resident EPS bridge is a separate SecOC transport mechanism, not a key.
-      # It is deliberately dormant unless a future evidence-gated deployment stores
-      # both the bridge flag and the exact EPS F181 it was validated against. A real
-      # SecOC key always takes priority, and the current bridge covers lateral only.
-      bridge_requested = self.params.get_bool("ToyotaEphemeralSecOCBridge")
-      bridge_f181_raw = self.params.get("ToyotaEphemeralSecOCBridgeF181")
-      bridge_f181 = (bridge_f181_raw.decode(errors="ignore") if isinstance(bridge_f181_raw, bytes) else str(bridge_f181_raw)).strip() \
-        if bridge_f181_raw is not None else ""
-      # This parameter is an exact calibration binding, never a prefix/family selector.
-      # Toyota EPS F181 software IDs tracked here are 12 ASCII alphanumerics beginning
-      # with 8965 (for example 8965B4512000). Reject short prefixes before searching
-      # the raw firmware-version response bytes.
-      bridge_f181_valid = len(bridge_f181) == 12 and bridge_f181.startswith("8965") and bridge_f181.isalnum()
-      eps_versions = [bytes(fw.fwVersion) for fw in self.CP.carFw if fw.ecu == structs.CarParams.Ecu.eps]
-      bridge_target_matches = bool(bridge_f181_valid and any(bridge_f181.encode() in fw for fw in eps_versions))
-      # The exact F33 EPS does not reliably answer F181 while the car is in READY,
-      # but the normal comma CAN fingerprint now uniquely identifies this Camry.
-      # For the maintainer-only non-release dev path, accept the persisted exact
-      # calibration binding when that real CAN fingerprint selected the platform.
-      bridge_target_matches |= bool(
-        bridge_f181 == "8965F3307000"
-        and self.CP.carFingerprint == TOYOTA_CAR.TOYOTA_CAMRY_TSS3
-        and self.CP.fingerprintSource == structs.CarParams.FingerprintSource.can
-        and self.params.get_bool("ToyotaTss3DevLateral")
-        and not is_release
-      )
-      if bridge_requested and not key_loaded:
-        if not bridge_f181_valid:
-          cloudlog.warning("Ignoring Toyota ephemeral SecOC bridge: validated F181 must be one exact 12-character 8965... software ID")
-        elif not bridge_target_matches:
-          cloudlog.warning("Ignoring Toyota ephemeral SecOC bridge: validated F181 does not match current EPS")
-        elif self.CP.openpilotLongitudinalControl:
-          cloudlog.warning("Ignoring Toyota ephemeral SecOC bridge: resident bridge does not cover secured ACC 0x183")
-        else:
-          self.CP.secOcKeyAvailable = True
-
-          # Development-only lateral actuation for the exact Camry F33
-          # zero-MAC28 bridge: select the ALLOW_DEBUG toyota safety mode
-          # with the TSS3 dev-lateral flag (B6-only TX whitelist) instead
-          # of the observation-only noOutput config. Never in release, and
-          # only for the one exact EPS calibration the bridge was built for.
-          if (self.params.get_bool("ToyotaTss3DevLateral") and bridge_f181 == "8965F3307000"
-              and self.CP.flags & ToyotaFlags.TSS3 and not is_release):
-            self.CP.dashcamOnly = False
-            safety_config = structs.CarParams.SafetyConfig()
-            safety_config.safetyModel = structs.CarParams.SafetyModel.toyota
-            safety_config.safetyParam = ToyotaSafetyFlags.TSS3_DEV_LATERAL.value
-            self.CP.safetyConfigs = [safety_config]
-            cloudlog.warning("Enabled exact-F33 TSS3 dev lateral (zero-MAC28 B6 via installed EPS bridge)")
-
-          controller_available = self.CI.CC is not None and openpilot_enabled_toggle and not self.CP.dashcamOnly
-          self.CP.passive = not controller_available
-          if self.CP.passive:
-            safety_config = structs.CarParams.SafetyConfig()
-            safety_config.safetyModel = structs.CarParams.SafetyModel.noOutput
-            self.CP.safetyConfigs = [safety_config]
-          if controller_available:
-            self.CI.CC.ephemeral_secoc_bridge = True
 
     # Write previous route's CarParams
     prev_cp = self.params.get("CarParamsPersistent")
@@ -236,9 +166,6 @@ class Car:
 
     can_strs = messaging.drain_sock_raw(self.can_sock, wait_for_one=True)
     can_list = can_capnp_to_list(can_strs)
-
-    if self.tss3_frc_oracle is not None:
-      self.tss3_frc_oracle.observe(can_list, time.monotonic_ns())
 
     # Update carState from CAN
     CS = self.CI.update(can_list)
@@ -298,14 +225,6 @@ class Car:
       tracks_msg.radarTracks = RD
       self.pm.send('radarTracks', tracks_msg)
 
-  def tss3_frc_oracle_update(self, CS: car.CarState) -> None:
-    if self.tss3_frc_oracle is None:
-      return
-    diagnostics_allowed = CS.canValid and elm327_diagnostic_ready(self.sm['pandaStates'])
-    can_sends = self.tss3_frc_oracle.poll(time.monotonic_ns(), diagnostics_allowed=diagnostics_allowed)
-    if can_sends:
-      self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=True))
-
   def controls_update(self, CS: car.CarState, CC: car.CarControl):
     """control update loop, driven by carControl"""
 
@@ -328,8 +247,6 @@ class Car:
     CS, RD = self.state_update()
 
     self.state_publish(CS, RD)
-    self.tss3_frc_oracle_update(CS)
-
     initialized = (not any(e.name == EventName.selfdriveInitializing for e in self.sm['onroadEvents']) and
                    self.sm.seen['onroadEvents'])
     if not self.CP.passive and initialized:

@@ -278,15 +278,14 @@ existing `0xFF00` callback path, proves the application heartbeat advances, then
 the EPS and proves the heartbeat stops. It requires explicit isolated-bench acknowledgement.
 TSK ships **no steering-bridge binary and no bridge-deployment endpoint** in this change.
 
-Openpilot proper is nevertheless prepared for the eventual bridge: the old one-off MAC28
-ablation (which corrupted forwarded stock camera frames and suppressed openpilot's own
-commands) is removed. A dormant, exact-F181-bound `ToyotaEphemeralSecOCBridge` mode can
-mark openpilot's own secured lateral `0x2E4/0x131` frames with an all-zero MAC28 while
-preserving the transmitted freshness nibble. Stock conflicting frames return to normal
-static blocking. A real `SecOCKey` takes priority, and the bridge mode refuses
-openpilot-longitudinal targets because the resident bridge does not cover protected
-`0x183`. TSK does not arm this parameter until a future bridge deployment is separately
-validated.
+The historical "dormant `ToyotaEphemeralSecOCBridge` openpilot mode" is **superseded and
+removed**: openpilot no longer carries any private bridge/lateral parameters, oracle
+capture, or `ALLOW_DEBUG` development safety mode. The exact-F33 Camry instead uses the
+ordinary Toyota/openpilot port shape on `TOYOTA_CAMRY_TSS3` — normal CarParams,
+CarController, and Panda safety with a `TSS3` flag — whose B6 sender marks only its own
+generated `0x0B6` frame with an all-zero MAC28 and live freshness. That frame is accepted
+because this maintainer EPS carries the persistent Gate-2 patch; no key and no RAM bridge
+are involved. See [`OPENPILOT_TARGET_INTEGRATION.md`](OPENPILOT_TARGET_INTEGRATION.md).
 
 ## SecurityAccess domains are separate
 
@@ -504,7 +503,8 @@ replay/future-sync/tag-guess trials automatically; those remain isolated-bench e
    retained NRTD collector can reacquire the known 2 MiB transport range and normalized
    1 MiB image. For a callback-free route, run the semantic resolver and import its SHA-bound target manifest,
    and execute only the inert canary on an isolated bench. A foreign target additionally
-   needs its own post-auth substitution evidence. Do not deploy the steering bridge yet.
+   needs its own post-auth substitution evidence. The inert canary stays bench-only research;
+   no steering-resident deployment exists in TSK, and the F33 port does not depend on one.
 9. **Cryptographic key recovery** — when a readable key route exists, verify the candidate
    against the discovered target streams and persist it privately; do not install it yet.
 10. **Target integration review** — fill every openpilot/DBC/safety/control field with an
@@ -514,11 +514,10 @@ replay/future-sync/tag-guess trials automatically; those remain isolated-bench e
     [`OPENPILOT_TARGET_INTEGRATION.md`](OPENPILOT_TARGET_INTEGRATION.md).
 12. **Stationary/bench acceptance** — capture a zero-actuation signed-command session and
     validate target-specific status feedback plus before/after fault state.
-13. **Operational install** — only after the profile-bound gates pass, install the already
-    recovered key through `/api/install-recovered-key`. The future ephemeral-bridge path has
-    a separate deployment/validation gate and does not masquerade as a key.
-14. **Evidence export** — download the bundle before clearing data or moving to another
-    target/session.
+13. **Operational install (key-backed targets only)** — only after the profile-bound gates
+    pass, install the already recovered key through `/api/install-recovered-key`. This path
+    never masquerades as a key and is irrelevant to the keyless exact-F33 port, whose gate is
+    the stationary validation ladder.
 
 ## DataFlash payload variants
 

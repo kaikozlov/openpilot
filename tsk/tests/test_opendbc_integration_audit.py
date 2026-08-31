@@ -88,7 +88,7 @@ FW_VERSIONS = {{
       exact = next(check for check in result["checks"] if check["name"] == "exact_eps_f181_present")
       self.assertFalse(exact["passed"])
 
-  def test_tss3_exact_identity_is_recognized_but_nooutput_stays_blocking(self):
+  def test_tss3_exact_identity_with_wrong_safety_manifest_stays_blocked(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)
       toyota = root / "opendbc" / "car" / "toyota"
@@ -118,10 +118,19 @@ TSS3_EXACT_FW_VERSIONS = {
 }
 """.lstrip(), encoding="utf-8")
       (toyota / "fingerprints.py").write_text("FW_VERSIONS = {}\n", encoding="utf-8")
-      (toyota / "interface.py").write_text(
-        "ToyotaFlags.TSS3\nSafetyModel.noOutput\nEPS_SCALE[candidate]\nToyotaSafetyFlags.SECOC\n" +
-        "ToyotaSafetyFlags.LTA\nToyotaSafetyFlags.STOCK_LONGITUDINAL\nret.openpilotLongitudinalControl\n",
-        encoding="utf-8")
+      (toyota / "interface.py").write_text("\n".join([
+        "if ret.flags & ToyotaFlags.TSS3:",
+        "  candidate == CAR.TOYOTA_CAMRY_TSS3",
+        "  get_safety_config(structs.CarParams.SafetyModel.toyota)",
+        "  ret.openpilotLongitudinalControl = False",
+        "else:",
+        "  SafetyModel.noOutput",
+        "EPS_SCALE[candidate]",
+        "ToyotaSafetyFlags.SECOC",
+        "ToyotaSafetyFlags.LTA",
+        "ToyotaSafetyFlags.STOCK_LONGITUDINAL",
+        "",
+      ]))
       (toyota / "carcontroller.py").write_text(
         "create_steer_command\ncreate_lta_steer_command_2\ncreate_accel_command_2\nadd_mac\n",
         encoding="utf-8")
@@ -137,7 +146,8 @@ TSS3_EXACT_FW_VERSIONS = {
       self.assertTrue(checks["fingerprint_platform_present"]["passed"])
       self.assertIn("TSS3_EXACT_FW_VERSIONS", checks["fingerprint_platform_present"]["detail"])
       self.assertTrue(checks["exact_eps_f181_present"]["passed"])
-      self.assertFalse(checks["production_output_enabled"]["passed"])
+      self.assertTrue(checks["production_output_enabled"]["passed"])
+      self.assertFalse(checks["longitudinal_control_matches"]["passed"])
       self.assertFalse(checks["safety_param_matches"]["passed"])
 
   def test_longitudinal_and_safety_mismatch_are_detected(self):
@@ -151,6 +161,68 @@ TSS3_EXACT_FW_VERSIONS = {
       failures = {check["name"] for check in result["checks"] if not check["passed"]}
       self.assertIn("longitudinal_control_matches", failures)
       self.assertIn("safety_param_matches", failures)
+
+  def test_tss3_platform_branch_enables_output_and_derives_param(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      toyota = root / "opendbc" / "car" / "toyota"
+      toyota.mkdir(parents=True)
+      generator = root / "opendbc" / "dbc" / "generator" / "toyota"
+      generator.mkdir(parents=True)
+      (generator / "toyota_tss3_pt.dbc").write_text("VERSION \"unit\"\n", encoding="utf-8")
+      (toyota / "values.py").write_text("""
+from enum import IntFlag
+class ToyotaSafetyFlags(IntFlag):
+  ALT_BRAKE = (1 << 8)
+  STOCK_LONGITUDINAL = (2 << 8)
+  LTA = (4 << 8)
+  SECOC = (8 << 8)
+  TSS3 = (16 << 8)
+class ToyotaFlags(IntFlag):
+  TSS3 = 4096
+  SECOC = 2048
+class ToyotaTSS3PlatformConfig(PlatformConfig):
+  dbc_dict: dict = field(default_factory=lambda: {Bus.pt: 'toyota_tss3_pt_generated'})
+class CAR(Platforms):
+  TOYOTA_CAMRY_TSS3 = ToyotaTSS3PlatformConfig([], CarSpecs(mass=1, wheelbase=1, steerRatio=1, tireStiffnessFactor=1))
+EPS_SCALE = defaultdict(lambda: 73, {})
+""".lstrip(), encoding="utf-8")
+      (toyota / "fingerprints.py").write_text("""
+FW_VERSIONS = {
+  CAR.TOYOTA_CAMRY_TSS3: {
+    (Ecu.eps, 0x7A1, None): [b'8965F3307000'],
+  },
+}
+""".lstrip(), encoding="utf-8")
+      (toyota / "interface.py").write_text("\n".join([
+        "if ret.flags & ToyotaFlags.TSS3:",
+        "  candidate == CAR.TOYOTA_CAMRY_TSS3",
+        "  get_safety_config(structs.CarParams.SafetyModel.toyota)",
+        "  ret.openpilotLongitudinalControl = False",
+        "else:",
+        "  SafetyModel.noOutput",
+        "EPS_SCALE[candidate]",
+        "ToyotaSafetyFlags.SECOC",
+        "ToyotaSafetyFlags.LTA",
+        "ToyotaSafetyFlags.STOCK_LONGITUDINAL",
+        "",
+      ]))
+      (toyota / "carcontroller.py").write_text(
+        "create_steer_command\ncreate_lta_steer_command_2\ncreate_accel_command_2\nadd_mac\n",
+        encoding="utf-8")
+      identity = {"app_sw_id": "8965F3307000"}
+      integration = {"ready": True, "fields": {
+        "platform_name": "TOYOTA_CAMRY_TSS3", "dbc_pt": "toyota_tss3_pt_generated",
+        "safety_flags": "0x1249", "steer_control_type": "angle", "eps_scale": "73",
+        "longitudinal_control": "stock_default",
+      }}
+      result = audit_opendbc_implementation(identity, integration, opendbc_root=root)
+      checks = {row["name"]: row for row in result["checks"]}
+      self.assertTrue(checks["production_output_enabled"]["passed"])
+      self.assertTrue(checks["longitudinal_control_matches"]["passed"])
+      self.assertTrue(checks["safety_param_matches"]["passed"])
+      self.assertEqual(result["source_safety_param"], 0x1249)
+      self.assertTrue(result["ready"])
 
 
 if __name__ == "__main__":

@@ -801,7 +801,7 @@ def dashboard_payload() -> dict:
       key: value
       for key, value in public_camry_f33_status().items()
       if key
-      in ("secondary_software_id", "checkpoint", "development_lateral", "production_architecture", "remaining_production_gates", "production_output_allowed")
+      in ("secondary_software_id", "checkpoint", "lateral_port", "production_architecture", "remaining_research_boundaries", "supported_output")
     }
     if exact_f33
     else None
@@ -1017,14 +1017,14 @@ def dashboard_payload() -> dict:
     }
 
   if exact_f33:
-    stage = "f33_stock_lta_authority"
+    stage = "f33_stock_acc_cancel"
     next_action = {
       "id": stage,
-      "title": "Recover F33 stock-LTA authority",
+      "title": "Recover stock-ACC cancel transmit contract",
       "description": (
-        "Exact F33 can steer through a B6-independent internal assist path while retained factory LTA/LCA has zero B6. "
-        + "Trace the external/local state that selects or modulates that path; separately identify the secured 0x08A producer. "
-        + "Do not assume an 0x08A-to-B6 transform."
+        "The exact patched-F33 lateral port is supported through the normal openpilot path. "
+        + "The remaining standard feature gap is system-generated stock-ACC cancel; physical CANCEL is decoded, "
+        + "but no safe TSS3 transmit PDU is recovered. Do not spoof 0x0FE or reinterpret 0x0C9/0x0CA as cancel."
       ),
       "href": "",
       "label": "Open research",
@@ -1043,12 +1043,11 @@ def dashboard_payload() -> dict:
   if exact_f33:
     assert f33_status is not None
     gate_titles = (
-      "0x08A producer / SecOC",
-      "F33 stock-LTA authority",
-      "Optional B6 actuation contract",
-      "Override and current policy",
-      "Live status transitions",
-      "Volatile runtime pivot",
+      "Stock-ACC cancel TX",
+      "Driver-override policy",
+      "EPS fault classification",
+      "0x08A / stock-authority attribution",
+      "Volatile signer replacement",
     )
     steps = [
       {
@@ -1060,7 +1059,7 @@ def dashboard_payload() -> dict:
       for index, (title, gate) in enumerate(
         zip(
           gate_titles,
-          f33_status["remaining_production_gates"],
+          f33_status["remaining_research_boundaries"],
           strict=True,
         )
       )

@@ -7,7 +7,7 @@ from tsk.lib.camry_f33 import (
   CAMRY_F33_CHECKPOINT,
   CAMRY_F33_CODEFLASH,
   CAMRY_F33_CRUISE,
-  CAMRY_F33_DEVELOPMENT_LATERAL,
+  CAMRY_F33_LATERAL_PORT,
   CAMRY_F33_EPS_394_STATE_CANDIDATES,
   CAMRY_F33_GEAR,
   CAMRY_F33_MODULES,
@@ -15,7 +15,7 @@ from tsk.lib.camry_f33 import (
   CAMRY_F33_RAM_RECOVERY,
   CAMRY_F33_PRODUCTION_ARCHITECTURE,
   CAMRY_F33_READY,
-  CAMRY_F33_REMAINING_PRODUCTION_GATES,
+  CAMRY_F33_REMAINING_RESEARCH_BOUNDARIES,
   CAMRY_F33_TX_STATUS,
   CAMRY_F33_LATERAL_REQUEST,
   public_camry_f33_status,
@@ -100,29 +100,47 @@ class TestCamryF33Evidence(unittest.TestCase):
     self.assertFalse(CAMRY_F33_PRODUCTION_ARCHITECTURE["ready"])
     self.assertEqual([row["rank"] for row in CAMRY_F33_PRODUCTION_ARCHITECTURE["ranking"]], [1, 2, 3, 4])
 
-  def test_passive_default_and_present_development_sender(self):
-    self.assertEqual(CAMRY_F33_OPENDBC["opendbc_commit"], "8da4bb9b")
-    self.assertEqual(CAMRY_F33_OPENDBC["lateral_request_decode_commit"], "b9e86924")
-    self.assertIn("noOutput-default", CAMRY_F33_OPENDBC["safety"])
-    self.assertFalse(CAMRY_F33_OPENDBC["controller_can_output"])
-    self.assertTrue(CAMRY_F33_OPENDBC["development_sender_available"])
-    self.assertFalse(CAMRY_F33_OPENDBC["production_output_supported"])
+  def test_exact_f33_uses_normal_port_shape(self):
+    self.assertIn("SafetyModel.toyota", CAMRY_F33_OPENDBC["safety"])
+    self.assertIn("TSS3", CAMRY_F33_OPENDBC["safety"])
+    self.assertNotIn("ALLOW_DEBUG", CAMRY_F33_OPENDBC["safety"])
+    self.assertNotIn("noOutput-default", CAMRY_F33_OPENDBC["mode"])
+    self.assertTrue(CAMRY_F33_OPENDBC["controller_can_output"])
+    self.assertNotIn("development_sender_available", CAMRY_F33_OPENDBC)
+    self.assertNotIn("development_controller_can_output", CAMRY_F33_OPENDBC)
+    self.assertTrue(CAMRY_F33_OPENDBC["supported_output"])
     self.assertTrue(CAMRY_F33_OPENDBC["lateral_request_decoding"])
-    self.assertTrue(CAMRY_F33_DEVELOPMENT_LATERAL["available"])
-    self.assertEqual(CAMRY_F33_DEVELOPMENT_LATERAL["status"], "present-default-off")
-    self.assertEqual(CAMRY_F33_DEVELOPMENT_LATERAL["reintroduced_in_root_commit"], "5fee63cfc")
-    self.assertEqual(CAMRY_F33_DEVELOPMENT_LATERAL["reintroduced_in_opendbc_commit"], "c98872c6")
-    self.assertIn("ToyotaEphemeralSecOCBridge", CAMRY_F33_DEVELOPMENT_LATERAL["activation"])
-    self.assertIn("acceptance bypass", CAMRY_F33_DEVELOPMENT_LATERAL["principal_live_blocker"])
-    self.assertEqual(CAMRY_F33_CHECKPOINT["state"], "production-disabled-development-path-present")
+
+    self.assertTrue(CAMRY_F33_LATERAL_PORT["available"])
+    self.assertEqual(CAMRY_F33_LATERAL_PORT["status"], "native-port-gate2-patched-eps")
+    self.assertIn("removed", CAMRY_F33_LATERAL_PORT["superseded"])
+    self.assertIn("ToyotaEphemeralSecOCBridge", CAMRY_F33_LATERAL_PORT["superseded"])
+    self.assertIn("CC.latActive", CAMRY_F33_LATERAL_PORT["engagement"])
+    self.assertNotIn("ToyotaEphemeralSecOCBridge", CAMRY_F33_LATERAL_PORT["engagement"])
+    self.assertIn("not ALLOW_DEBUG", CAMRY_F33_LATERAL_PORT["safety"])
+    self.assertIn("0x08A bit 27", CAMRY_F33_LATERAL_PORT["safety"])
+    self.assertIn("Gate-2", CAMRY_F33_LATERAL_PORT["receiver_acceptance"])
+    self.assertIn("protected key", CAMRY_F33_LATERAL_PORT["receiver_acceptance"])
+    self.assertIn("stock-ACC cancel", CAMRY_F33_LATERAL_PORT["unsupported_features"])
+    self.assertIn("driver-override", CAMRY_F33_LATERAL_PORT["unsupported_features"])
+    self.assertTrue(CAMRY_F33_LATERAL_PORT["supported_output"])
+
+    self.assertEqual(CAMRY_F33_CHECKPOINT["state"], "normal-port-supported-patched-eps")
+    self.assertIn("Gate-2", CAMRY_F33_CHECKPOINT["output_detail"])
+    self.assertIn("stock-ACC cancel", CAMRY_F33_CHECKPOINT["unsupported_feature"])
+
     status = public_camry_f33_status()
+    self.assertNotIn("development_lateral", status)
+    self.assertIn("lateral_port", status)
+    self.assertEqual(status["lateral_port"], CAMRY_F33_LATERAL_PORT)
     self.assertEqual(status["eps_394_state_candidates"], CAMRY_F33_EPS_394_STATE_CANDIDATES)
     self.assertEqual(status["application_runtime"], CAMRY_F33_APPLICATION_RUNTIME)
-    self.assertFalse(status["production_output_allowed"])
-    self.assertEqual(tuple(status["remaining_production_gates"]), CAMRY_F33_REMAINING_PRODUCTION_GATES)
-    self.assertEqual(len(status["remaining_production_gates"]), 6)
-    self.assertIn("B6-independent", status["remaining_production_gates"][1])
-    self.assertIn("if protected B6 is chosen", status["remaining_production_gates"][2])
+    self.assertTrue(status["supported_output"])
+    self.assertEqual(tuple(status["remaining_research_boundaries"]), CAMRY_F33_REMAINING_RESEARCH_BOUNDARIES)
+    self.assertEqual(len(status["remaining_research_boundaries"]), 5)
+    self.assertIn("stock-ACC cancel", status["remaining_research_boundaries"][0])
+    self.assertIn("driver-override", status["remaining_research_boundaries"][1])
+    self.assertIn("RAM-only", status["remaining_research_boundaries"][4])
 
   def test_lateral_request_is_representation_not_ingress(self):
     req = CAMRY_F33_LATERAL_REQUEST

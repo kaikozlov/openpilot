@@ -104,7 +104,7 @@ def _safety_flag_values(values_source: str) -> dict[str, int]:
   if match is None:
     return {}
   out: dict[str, int] = {}
-  for name, left, shift in re.findall(r"^\s+([A-Z_]+)\s*=\s*\((\d+)\s*<<\s*(\d+)\)", match.group("body"), re.M):
+  for name, left, shift in re.findall(r"^\s+([A-Z_][A-Z0-9_]*)\s*=\s*\((\d+)\s*<<\s*(\d+)\)", match.group("body"), re.M):
     out[name] = int(left) << int(shift)
   return out
 
@@ -208,31 +208,49 @@ def audit_opendbc_implementation(identity: dict, integration: dict,
         f"reviewed={fields.get('eps_scale', '')!r} source={source_eps_scale}")
 
   radar_acc = "ToyotaFlags.RADAR_ACC" in block
+  # A TSS3 platform that the interface handles with its own branch (the exact-F33
+  # shape) configures the ordinary Toyota safety model and forces stock longitudinal;
+  # research-only TSS3 platforms fall through to the shared noOutput branch.
+  tss3_platform_branch = tss3_platform and f"candidate == CAR.{platform_name}" in interface_source
   long_valid = longitudinal_control in ALLOWED_LONGITUDINAL_CONTROL
-  long_matches = (
-    (longitudinal_control == "openpilot_default" and not radar_acc) or
-    (longitudinal_control == "stock_default" and radar_acc) or
-    (longitudinal_control == "openpilot_alpha" and radar_acc)
-  )
+  if tss3_platform_branch:
+    long_matches = long_valid and longitudinal_control == "stock_default"
+  else:
+    long_matches = (
+      (longitudinal_control == "openpilot_default" and not radar_acc) or
+      (longitudinal_control == "stock_default" and radar_acc) or
+      (longitudinal_control == "openpilot_alpha" and radar_acc)
+    )
   check("longitudinal_control_valid", long_valid,
         longitudinal_control or "empty; expected openpilot_default, stock_default, or openpilot_alpha")
+  source_longitudinal = (
+    "TSS3-forced stock longitudinal" if tss3_platform_branch
+    else ("RADAR_ACC" if radar_acc else "camera/default-openpilot-long")
+  )
   check("longitudinal_control_matches", long_valid and long_matches,
-        f"reviewed={longitudinal_control or 'empty'} source={'RADAR_ACC' if radar_acc else 'camera/default-openpilot-long'}")
+        f"reviewed={longitudinal_control or 'empty'} source={source_longitudinal}")
 
   safety_flags = _safety_flag_values(values_source)
   computed_safety = source_eps_scale
   if computed_safety is not None and secoc_platform:
-    computed_safety |= safety_flags.get("SECOC", 0)
-    if angle_source:
-      computed_safety |= safety_flags.get("LTA", 0)
-    if longitudinal_control == "stock_default":
+    if tss3_platform_branch:
+      # The TSS3 branch of the ordinary Toyota safety mode is selected with the
+      # stock-longitudinal flag; the SECOC/LTA panda flags do not apply to it.
       computed_safety |= safety_flags.get("STOCK_LONGITUDINAL", 0)
-    if effective_dbc == "toyota_new_mc_pt_generated":
-      computed_safety |= safety_flags.get("ALT_BRAKE", 0)
+      computed_safety |= safety_flags.get("TSS3", 0)
+    else:
+      computed_safety |= safety_flags.get("SECOC", 0)
+      if angle_source:
+        computed_safety |= safety_flags.get("LTA", 0)
+      if longitudinal_control == "stock_default":
+        computed_safety |= safety_flags.get("STOCK_LONGITUDINAL", 0)
+      if effective_dbc == "toyota_new_mc_pt_generated":
+        computed_safety |= safety_flags.get("ALT_BRAKE", 0)
   else:
     computed_safety = None
 
-  tss3_no_output = bool(tss3_platform and "ToyotaFlags.TSS3" in interface_source and "SafetyModel.noOutput" in interface_source)
+  tss3_no_output = bool(tss3_platform and not tss3_platform_branch and "SafetyModel.noOutput" in interface_source)
+
   production_output_enabled = not tss3_no_output
   check("production_output_enabled", production_output_enabled,
         "Toyota production safety/output path enabled" if production_output_enabled else

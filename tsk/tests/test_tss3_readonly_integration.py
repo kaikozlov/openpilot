@@ -2,10 +2,11 @@ import unittest
 
 from opendbc.can import CANParser
 from opendbc.car import Bus, CanData, structs
-from opendbc.car.toyota.fingerprints import FINGERPRINTS
+from opendbc.car.toyota.fingerprints import FINGERPRINTS, FW_VERSIONS
 from opendbc.car.toyota.interface import CarInterface
-from opendbc.car.toyota.tss3 import decode_eps_394_state_candidates
-from opendbc.car.toyota.values import CAR, DBC, TSS3_EXACT_FW_VERSIONS, ToyotaFlags
+from opendbc.car.toyota.values import CAR, DBC, ToyotaSafetyFlags, ToyotaFlags
+
+from tsk.lib.camry_f33 import CAMRY_F33_EPS_394_STATE_CANDIDATES
 
 
 class TestTSS3ReadOnlyIntegration(unittest.TestCase):
@@ -21,31 +22,42 @@ class TestTSS3ReadOnlyIntegration(unittest.TestCase):
     self.assertTrue(cp.flags & ToyotaFlags.TSS3)
     self.assertTrue(cp.flags & ToyotaFlags.SECOC)
     self.assertFalse(cp.flags & ToyotaFlags.TSS2)
-    self.assertTrue(cp.flags & ToyotaFlags.TSS3_PT_BUS1)
     self.assertEqual(DBC[CAR.TOYOTA_COROLLA_TSS3][Bus.pt], "toyota_tss3_pt_generated")
     self.assertTrue(cp.dashcamOnly)
     self.assertEqual(cp.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.noOutput)
     self.assertTrue(cp.radarUnavailable)
     self.assertFalse(cp.openpilotLongitudinalControl)
 
-  def test_checked_out_opendbc_has_exact_passive_camry_f33(self):
+  def test_checked_out_opendbc_has_normal_port_exact_camry_f33(self):
     cp = CarInterface.get_params(CAR.TOYOTA_CAMRY_TSS3, self._fingerprint(1), [], False, False, False)
     self.assertTrue(cp.flags & ToyotaFlags.TSS3)
     self.assertTrue(cp.flags & ToyotaFlags.SECOC)
-    self.assertTrue(cp.flags & ToyotaFlags.TSS3_PT_BUS1)
+    self.assertFalse(cp.flags & ToyotaFlags.TSS2)
     self.assertEqual(DBC[CAR.TOYOTA_CAMRY_TSS3][Bus.pt], "toyota_tss3_pt_generated")
-    self.assertTrue(cp.dashcamOnly)
-    self.assertEqual(cp.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.noOutput)
+    # Exact F33 uses the ordinary Toyota/openpilot port shape: normal CarParams,
+    # controller, and Panda safety. No private parameters or ALLOW_DEBUG dev mode,
+    # and no SecOC-key availability state (the Gate-2-patched EPS accepts zero-MAC28 B6).
+    self.assertFalse(cp.dashcamOnly)
+    self.assertFalse(cp.passive)
+    self.assertEqual(cp.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.toyota)
+    self.assertTrue(cp.safetyConfigs[0].safetyParam & ToyotaSafetyFlags.TSS3)
+    self.assertTrue(cp.safetyConfigs[0].safetyParam & ToyotaSafetyFlags.STOCK_LONGITUDINAL)
+    self.assertFalse(cp.secOcRequired)
+    self.assertFalse(cp.secOcKeyAvailable)
+    self.assertTrue(cp.radarUnavailable)
     self.assertFalse(cp.openpilotLongitudinalControl)
 
-    exact = TSS3_EXACT_FW_VERSIONS[CAR.TOYOTA_CAMRY_TSS3]
+    # Identity lives in the standard production firmware table.
+    exact = FW_VERSIONS[CAR.TOYOTA_CAMRY_TSS3]
     eps = exact[(structs.CarParams.Ecu.eps, 0x7A1, None)]
     self.assertIn(bytes.fromhex("023839363546333330373030300000000038413331313333303331303000000000"), eps)
 
   def test_checked_out_camry_394_projection_preserves_ambiguity(self):
-    self.assertEqual(decode_eps_394_state_candidates((0, 0, 0, 0)), (0,))
-    self.assertEqual(decode_eps_394_state_candidates((0, 3, 0, 0)), (1, 3, 4))
-    self.assertEqual(decode_eps_394_state_candidates((0, 7, 0, 0)), (2, 16))
+    # The lossy 0x394 projection candidates are retained TSK-side evidence; the
+    # runtime-side decoder was removed with the oracle capture path.
+    self.assertEqual(CAMRY_F33_EPS_394_STATE_CANDIDATES[(0, 0, 0, 0)], (0,))
+    self.assertEqual(CAMRY_F33_EPS_394_STATE_CANDIDATES[(0, 3, 0, 0)], (1, 3, 4))
+    self.assertEqual(CAMRY_F33_EPS_394_STATE_CANDIDATES[(0, 7, 0, 0)], (2, 16))
 
   def test_provisional_span_fingerprint_is_present(self):
     fp = FINGERPRINTS[CAR.TOYOTA_COROLLA_TSS3][0]
@@ -66,21 +78,19 @@ class TestTSS3ReadOnlyIntegration(unittest.TestCase):
     self.assertEqual(eps["STEERING_FAULT_INHIBIT_STATUS"], 0)
     self.assertEqual(eps["DRIVER_TORQUE_INVALID"], 0)
 
-  def test_controller_never_emits_tss3_can(self):
-    for candidate in (CAR.TOYOTA_COROLLA_TSS3, CAR.TOYOTA_CAMRY_TSS3):
-      with self.subTest(candidate=candidate):
-        cp = CarInterface.get_params(candidate, self._fingerprint(1), [], False, False, False)
-        ci = CarInterface(cp)
-        cc = structs.CarControl()
-        cc.enabled = True
-        cc.latActive = True
-        cc.longActive = True
-        cc.actuators.torque = 1.0
-        cc.actuators.steeringAngleDeg = 500.0
-        cc.actuators.accel = 2.0
+  def test_passive_corolla_controller_never_emits_tss3_can(self):
+    cp = CarInterface.get_params(CAR.TOYOTA_COROLLA_TSS3, self._fingerprint(1), [], False, False, False)
+    ci = CarInterface(cp)
+    cc = structs.CarControl()
+    cc.enabled = True
+    cc.latActive = True
+    cc.longActive = True
+    cc.actuators.torque = 1.0
+    cc.actuators.steeringAngleDeg = 500.0
+    cc.actuators.accel = 2.0
 
-        _, can_sends = ci.apply(cc.as_reader(), 1_000_000_000)
-        self.assertEqual(can_sends, [])
+    _, can_sends = ci.apply(cc.as_reader(), 1_000_000_000)
+    self.assertEqual(can_sends, [])
 
 
 if __name__ == "__main__":

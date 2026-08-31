@@ -15,13 +15,17 @@ continuity result. The durable target summary is
 art, but the Camry port does not depend on transferred addresses or family matching.
 
 The passive Camry port entered the root at baseline commit
-`d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04`. The checked-out development cutover is
-root `6dd58cf5e` with nested opendbc `8da4bb9b`; the request decoder entered at
-`b9e86924`, and the current zero-MAC28 B6 development sender was reintroduced at
-root `5fee63cfc` / opendbc `c98872c6`. The exact target is `TOYOTA_CAMRY_TSS3`,
-bound to EPS F181 `8965F3307000 / 8A3113303100`. Default and release behavior remain
-passive. The explicitly armed non-release path is an evidence-acquisition and stationary
-actuation checkpoint, **not production steering authorization**.
+`d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04`. The current cutover is root `2cfa9274c`
+("opendbc: use native F33 lateral authority") with nested opendbc `21d165da` ("toyota: use
+native lateral authority for F33"); final native-shape cleanup is opendbc `ae284aaf` and
+Panda `4130c4a9`; the request decoder entered at `b9e86924`, and the
+interim private-parameter/ephemeral-bridge/`ALLOW_DEBUG` development path — root
+`5fee63cfc`/opendbc `c98872c6`, hardened at root `6dd58cf5e`/opendbc `8da4bb9b` — is
+**superseded and removed**. The exact target is `TOYOTA_CAMRY_TSS3`, bound to EPS F181
+`8965F3307000 / 8A3113303100`. The port now follows the ordinary Toyota/openpilot shape:
+normal CarParams/CarController/Panda safety, no private parameters, and zero-MAC28 B6
+accepted by the Gate-2-patched maintainer EPS. It remains a fork-local development
+checkpoint, **not production steering authorization** and not upstream.
 
 The status vocabulary below is deliberate: **implemented** means the code path is present;
 **implemented-read-only** means only evidence acquisition/inspection is exposed;
@@ -29,10 +33,8 @@ The status vocabulary below is deliberate: **implemented** means the code path i
 cannot be promoted operationally without the named live proof; **intentionally-not-applicable**
 means current firmware evidence disproves that transfer for the named target; and
 **blocked-by-live-policy** means the target-native static contract is sufficiently recovered
-but production behavior still requires live authority/safety evidence; **development-only**
-means an exact-target, non-release, explicit-opt-in path exists while default/release output
-remains disabled; and **not-yet-implementable** means no correct implementation primitive
-has yet been recovered.
+but production behavior still requires live authority/safety evidence; **not-yet-implementable**
+means no correct implementation primitive has yet been recovered.
 
 | RE result / capability | status | OpenPilot/TSK implementation boundary |
 |---|---|---|
@@ -43,46 +45,53 @@ has yet been recovered.
 | F33 Ready / full gear state | **implemented-read-only** | source-real `0x51E B0[7]` NRTD/READY and `0x127` `P/R/N/D/B = 0/1/2/3/4` are parsed and replay-tested |
 | F33 cruise switch observation | **implemented-read-only** | FRC P5 DIDs and the pre-repin Panda-bus1 `0x0FE/32` MAIN/RES+/SET-/CANCEL carrier are retained; following-distance `0x251/0x5AF` joins remain candidates |
 | F33 protected B6 receiver / SecOC geometry | **implemented** | exact PDU44, 28-byte application + FV4/CMAC28, FV46/CMAC128, slot4/command7, Target Lateral ID, signed target angle, sequence, companion fields and exact target limits/timing are represented in opendbc helpers/DBC; exact-F33 Gate-2 compare neutralization plus CRC repair admits deliberately zero-MAC28 development frames |
-| F33 passive default / DBC / CarState | **implemented-read-only** | `TOYOTA_CAMRY_TSS3` has exact F181 binding, generated TSS3 DBC, source-real Ready/gear replay, state parsing, passive `0x08A` observation, explicit B6 interfaces and shadow safety. Ordinary/release CarParams remains `dashcamOnly` / `SafetyModel.noOutput`; the default controller emits zero CAN |
-| F33 synchronized FRC operating-state capture | **implemented-read-only / live-pending** | DEVELOPMENT_ONLY `ToyotaTSS3FrcOracleCapture` stays passive and exact-F181-bound, reuses `card`'s sole `sendcan` publisher, requires ELM327 param1 + ControlsReady=false + controls disallowed, and emits only fixed relay-correct post-repin Panda-bus0 `0x792` SID-22 reads for `0x1601`/`0x1914`; the decisive Operation-FFD `5282/5285/57DE/5265` capture is still absent |
+| F33 port / DBC / CarState | **implemented** | `TOYOTA_CAMRY_TSS3` is a normal platform: exact F181 in production `FW_VERSIONS` plus the exact CAN census in `FINGERPRINTS` (identifies in READY without an EPS F181 reply), generated TSS3 DBC, source-real Ready/gear/cruise-state replay, live `SECOC_SYNCHRONIZATION`, physical `0x030` N·m driver torque, and camera-bus `TSS3_LATERAL_REQUEST` cruise state. The raw torque-invalid/fault-inhibit bits remain DBC observables; no guessed `steeringPressed` threshold or temporary/permanent fault mapping is promoted into CarState. Other research TSS3 platforms (Corolla) remain passive `noOutput`/`dashcamOnly` |
+| F33 synchronized FRC operating-state capture | **superseded-removed** | the root `ToyotaTSS3FrcOracleCapture` param and `toyota_tss3_oracle.py` capture path were removed with the private-parameter architecture; the decisive Operation-FFD `5282/5285/57DE/5265` synchronized capture is still absent and must be re-acquired with separate read-only tooling when needed |
 | FRC public-output boundary | **implemented-read-only** | native Panda bus 1 carries the 22-stream `0x020/0x123/0x160/0x180..0x18C/0x1A0/0x200/0x201/0x230/0x440/0x450` camera/radar census and plaintext perception records; no consecutive `5282`, no `0x08A`, and no proved public lateral-request carrier. Internal FRC request ownership does not identify its private handoff to the chassis signer |
-| F33 generated Tx/status + `0x394` classifier | **implemented-read-only** | exact `0x030/0x351/0x394/0x4A3/0x4C8` Tx/packer geometry is retained and the 17-row `0x394` table projection is decoded to candidate internal states; lossy tuples stay candidate sets and are deliberately not converted to openpilot temporary/permanent faults |
-| F33 lateral sender / safety | **development-only** | exact-F181, non-release `ToyotaEphemeralSecOCBridge` + matching `ToyotaEphemeralSecOCBridgeF181` + `ToyotaTss3DevLateral` arms one zero-MAC28 `0x0B6`/DLC32 frame per control cycle on Panda bus 0. It uses live `0x00F` freshness, ID11 while active, slew-limited target angle, ramp-to-zero/ID0 release, and the `ALLOW_DEBUG` B6-only Panda gate with cruise-derived `controls_allowed`, limits, sequence, and 35 ms timeout. No longitudinal output |
-| F33 application-retained RAM bridge | **implemented-static / live-deployment-pending** | exact-F33 resident re-admits only rejected zero-MAC28 B6, fits before heartbeat `0xFEBFFBEC`, and resets to stock; TSK still lacks an automatic install/execution-pivot/heartbeat/arm path, so setting bridge parameters alone is not sufficient proof |
-| persistent Gate-2 patching | **implemented-receiver-side / operational-policy-pending** | exact-F33 compare/check disable and deterministic CRC repair are tested on cars and provide the frictionless acceptance option after one flash. Persistent flash risk and upstream acceptability remain separate policy questions; this route does not recover the protected key |
+| F33 generated Tx/status + `0x394` classifier | **implemented-read-only / analysis-only** | exact `0x030/0x351/0x394/0x4A3/0x4C8` Tx/packer geometry and the 17-row `0x394` classifier remain in the analysis evidence. The native runtime port does not promote the unresolved classifier into CarState temporary/permanent faults. |
+| F33 lateral sender / safety | **implemented (fork-local)** | ordinary openpilot lateral engagement (`CC.latActive`): CarController sends one zero-MAC28 `0x0B6`/DLC32 frame per scheduled control frame on Panda bus 0 with live `SECOC_SYNCHRONIZATION` freshness, ID11 while active, ID0 with zeroed companions on release, and a standard angle-rate-limited target. Panda safety is the ordinary `toyota` model with the `TSS3` flag — TX whitelist is only `0x0B6` bus 0 DLC32 with a relay check, `controls_allowed` is cruise-derived from `0x08A` bit 27 on bus 2, and the TX hook enforces target ID 0/11, companion bounds, and `steer_angle_cmd_checks`. No longitudinal output |
+| F33 application-retained RAM bridge | **implemented-static / research-only** | exact-F33 resident re-admits only rejected zero-MAC28 B6, fits before heartbeat `0xFEBFFBEC`, and resets to stock; no automatic install/execution-pivot/heartbeat/arm path was ever built, and the openpilot port no longer references it in any way |
+| persistent Gate-2 patching | **installed on the maintainer EPS / policy-open** | the exact-F33 compare/check disable with deterministic CRC repair is present on this maintainer car, which is why the ordinary port's zero-MAC28 B6 frames are accepted. Persistent flash risk and upstream acceptability remain separate policy questions; this route does not recover the protected key |
 
-### Passive default and explicit development cutout
+### Normal port shape
 
-The exact Camry implementation deliberately separates **default observability** from
-**explicit non-release control**:
+The exact Camry implementation is now an ordinary openpilot platform — the interim
+"passive default plus explicit development cutout" split is gone:
 
 - `ToyotaFlags.TSS3` and `ToyotaFlags.SECOC` are both set without inheriting TSS2.
-- `TSS3_EXACT_FW_VERSIONS` binds the exact EPS F181 and corroborating FRC/Brake identities
-  without polluting production `FW_VERSIONS` with an incomplete research ECU inventory.
-- `toyota_tss3_pt_generated` includes target-evidenced state/status and B6 fields. Passive
-  `0x08A` decoding remains observation-only; there is no `0x08A -> B6` transform.
-- CarState consumes source-real steering angle/rate, wheel speed, brake/gas, `0x030` physical
-  driver torque, full P/R/N/D/B, and Ready. Internal `0x394` states remain candidate-decoded.
-- The 179-ID Camry CAN census is excluded from legacy fingerprinting because the Corolla
-  TSS3 census is a strict subset; selection is exact-F181-bound.
-- **Default/release:** `dashcamOnly`, `SafetyModel.noOutput`, no controller CAN output.
-- **Development only:** a non-release build plus `ToyotaEphemeralSecOCBridge`, exact
-  `ToyotaEphemeralSecOCBridgeF181=8965F3307000`, and `ToyotaTss3DevLateral` selects the
-  `ALLOW_DEBUG` F33 safety mode and B6 sender. A real SecOC key path takes priority; openpilot
-  longitudinal is rejected because the bridge does not cover protected ACC `0x183`.
+- Exact identity uses the standard pipeline: the exact EPS F181 and corroborating
+  camera/ABS entries live in production `FW_VERSIONS`, and the exact Camry CAN census is
+  registered in `FINGERPRINTS`, so identification also works in READY when the EPS does not
+  answer F181.
+- `toyota_tss3_pt_generated` includes target-evidenced state/status and B6 fields. `0x08A`
+  decoding remains observation/state-input only; there is no `0x08A -> B6` transform.
+- CarState consumes live `SECOC_SYNCHRONIZATION`, source-real steering angle/rate, wheel
+  speed, brake/gas, `0x030` physical N·m driver torque, full P/R/N/D/B, Ready, and cruise
+  state from the camera-bus `TSS3_LATERAL_REQUEST` (`0x08A`
+  `CRUISE_OPERATING_LATCH`/`SET_SPEED`). The raw torque-invalid/fault-inhibit signals remain
+  in the DBC, but the port deliberately leaves `steeringPressed` and temporary/permanent
+  steering-fault policy neutral because those mappings are not recovered.
+- Interface for `TOYOTA_CAMRY_TSS3`: angle control, `radarUnavailable`, stock longitudinal,
+  `dashcamOnly=False`, `secOcRequired=False`. No SecOC-key availability state is involved in
+  engagement — the local EPS Gate-2 patch makes B6 authentication keyless for this platform.
+  Other research TSS3 platforms (Corolla) stay passive `noOutput`/`dashcamOnly`.
+- There are no private parameters and no `ALLOW_DEBUG` development mode; engagement follows
+  the standard openpilot path. Stock longitudinal remains excluded from openpilot control,
+  and no `0x183` output exists.
 
 Exact firmware closes the **external B6 receiver** command envelope: Target Lateral ID 11
 selects LTA/LCA mode2; signed B4:B5 target angle uses `1024/17870 deg/count`; absolute
 envelope is ±1745 raw; delta is 78 raw per effective modulo-64 gap with cap 8; foreground
 is 5 ms and the seven-tick receive deadline is nominally 35 ms. Retained factory LTA/LCA
-has zero B6 and exact F33 has a B6-independent stock assist path, so the development sender
-is a separate external actuation interface—not a reconstruction of stock LTA.
+has zero B6 and exact F33 has a B6-independent stock assist path, so the B6 sender is a
+separate external actuation interface—not a reconstruction of stock LTA.
 
-The practical next gate is receiver acceptance deployment, not FRC attribution: install and
-positively verify either the persistent Gate-2 patch or the RAM bridge, then prove ID0,
-ID11-zero, a tiny bounded angle, sign/scale, ramp-down, timeout, override, and DTC behavior
-stationary. No stock B6 was retained, so unresolved companion bytes remain explicit candidate
-defaults and cannot be labeled Toyota stock behavior.
+The practical next test is the ordinary openpilot drive path, not another custom arming
+ladder: deploy the exact committed revisions, engage through stock ACC/openpilot's normal
+`controls_allowed` path, and compare transmitted B6 targets with measured steering response
+and EPS/DTC state. The recovered receiver timeout/sequence behavior remains diagnostic
+information, not extra Panda permission policy. No stock B6 was retained, so unresolved
+factory arbitration remains an evidence boundary rather than a request-plane engage veto.
 
 ## Why this gate exists
 
@@ -126,12 +135,12 @@ LTA angle actuation.
 
 For H/F Corolla and exact F33 Camry, the TSS3 DBC models protected FD `0x0B6`
 receiver fields recovered target-natively. F33 closes PDU44, Target Lateral ID, signed target
-angle, modulo-64 sequence, FV46/FV4/CMAC28, and receiver limits. The **default** TSS3
-controller remains passive. The exact-F181 non-release development branch is deliberately
-narrower than a stock sender contract: it sends zero-MAC28 B6 on Panda bus 0 only when the
-explicit EPS-bridge parameters and development safety mode are armed. It does not claim a
-Toyota stock template, a real CMAC key, a solved FRC transport, or production source
-arbitration. Protected `0x183` longitudinal output remains excluded.
+angle, modulo-64 sequence, FV46/FV4/CMAC28, and receiver limits. For the exact Camry, the
+normal TSS3 controller sends zero-MAC28 B6 on Panda bus 0 as part of the ordinary port —
+accepted through the installed Gate-2 patch, with no EPS-bridge parameters and no development
+safety mode. It does not claim a Toyota stock template, a real CMAC key, a solved FRC
+transport, or production source arbitration. Protected `0x183` longitudinal output remains
+excluded. The Corolla TSS3 platform stays read-only/passive.
 
 ## Recovery compatibility is split into independent evidence gates
 
@@ -190,33 +199,31 @@ boot/runtime primitive does not select a DBC, safetyParam, steering mode, or lon
 topology, and proving a target's openpilot profile does not authorize a payload/runtime
 from another calibration.
 
-### Key-backed SecOC versus the exact-F33 zero-MAC28 bridge
+### Key-backed SecOC versus the exact-F33 zero-MAC28 path
 
 Normal openpilot SecOC remains key-backed. The old broad MAC28-ablation experiment is
 retired: Panda does not corrupt forwarded stock MACs, and ordinary Toyota forwarding stays
-stock. The F33 development path is instead exact and receiver-side.
+stock. The exact-F33 path is instead receiver-side and keyless.
 
-When explicitly armed for F181 `8965F3307000`, opendbc builds its own protected-FD B6
-application, retains live `0x00F`-derived freshness, and marks only that generated B6 with an
-all-zero MAC28. The exact-F33 EPS acceptance bypass then handles it after normal verification
-rejects it. The mode is not a key and is not selected by Toyota platform identity alone. Root
-openpilot requires persistent `ToyotaEphemeralSecOCBridge`, exact matching
-`ToyotaEphemeralSecOCBridgeF181`, `ToyotaTss3DevLateral`, and a non-release build. A real
-`SecOCKey` path takes priority, and the bridge is refused with openpilot longitudinal because
-it does not cover protected ACC `0x183`.
+opendbc builds its own protected-FD B6 application for `TOYOTA_CAMRY_TSS3`, retains live
+`SECOC_SYNCHRONIZATION`-derived freshness, and marks only that generated B6 with an all-zero
+MAC28. The Gate-2 patch installed on this maintainer EPS accepts it after normal verification
+rejects it. This is not a key and involves no private parameters, no `SecOCKey` state, and no
+non-release gating beyond the fork itself. No longitudinal output exists, so protected ACC
+`0x183` is untouched. On any other EPS — including another F33 without the patch — the
+zero-MAC frames would be rejected by the stock verifier and the port must not be assumed to
+work.
 
-There are two receiver-side deployment classes:
+Historically there were two receiver-side deployment classes:
 
-1. the tested persistent CodeFlash Gate-2 compare/check disable with deterministic CRC repair;
-2. the reset-to-stock exact-F33 RAM resident that re-admits only rejected zero-MAC28 B6.
+1. the persistent CodeFlash Gate-2 compare/check disable with deterministic CRC repair —
+   now installed on this maintainer car and load-bearing for the port;
+2. the reset-to-stock exact-F33 RAM resident that re-admits only rejected zero-MAC28 B6 —
+   still an audited static research candidate with no install/execution-pivot/heartbeat/arm
+   flow ever built; the port no longer references it.
 
-TSK currently ships only the audited **inert canary**. It does not automatically deploy the
-F33 steering resident, establish the missing application-mode execution pivot, confirm the
-heartbeat, or set the bridge parameters. Therefore the sender being present does not make the
-RAM route operational. Automatic install/heartbeat/arm and fail-closed reset handling remain
-required, followed by isolated stationary validation. The persistent flash route avoids that
-per-session deployment friction but retains the one-time flash risk and upstream-policy problem.
-Neither route retrieves the protected key.
+TSK ships only the audited **inert canary** for bench research. It does not deploy any F33
+steering resident. Neither route retrieves the protected key.
 
 ## Manifest required before operational implementation
 
@@ -250,8 +257,12 @@ or executing it. A reviewed manifest remains **not code-ready** unless all check
 4. Its effective PT DBC equals the reviewed `dbc_pt`, and the DBC generator source exists.
 5. `ANGLE_CONTROL` agrees exactly with reviewed `steer_control_type`.
 6. `EPS_SCALE` resolves to the reviewed integer.
-7. `RADAR_ACC`/default-long behavior agrees with `longitudinal_control`.
-8. The source-derived Toyota `safetyParam` equals reviewed `safety_flags`.
+7. `RADAR_ACC`/default-long behavior agrees with `longitudinal_control`; a TSS3 platform
+   handled by its own interface branch is checked against the forced stock-longitudinal
+   contract instead.
+8. The source-derived Toyota `safetyParam` equals reviewed `safety_flags`; for a TSS3
+   platform with its own interface branch the audit derives EPS scale + `STOCK_LONGITUDINAL`
+   + `TSS3` bits.
 9. the exact target EPS F181 is present either in production `FW_VERSIONS` or the
    explicitly research-only `TSS3_EXACT_FW_VERSIONS` identity map.
 10. The Toyota interface still contains the safety/longitudinal derivation contract.
@@ -262,43 +273,47 @@ the target profile. `Re-audit opendbc` on the target-profile page re-verifies th
 key against the current oracle and reruns the source checks after an opendbc patch/submodule
 update.
 
-The exact Camry TSS3 research identity satisfies the audit's F181 source check through
-`TSS3_EXACT_FW_VERSIONS`. It still **must not** satisfy the production operational audit:
-ordinary/release configuration selects `SafetyModel.noOutput`. The audit must distinguish
-that passive default from the separate exact-F181 `ALLOW_DEBUG` development sender rather
-than reporting the sender as absent. Passing opendbc platform and safety tests means the
-guarded development mechanism matches its static contract; it does not authorize road use,
-prove the EPS bypass is installed, or close production signer/source-arbitration policy.
+The exact Camry TSS3 identity satisfies the audit's F181 source check through production
+`FW_VERSIONS`, and — as a TSS3 platform handled by its own interface branch — the audit now
+resolves the real output contract: ordinary `toyota` safety, angle control, stock
+longitudinal, and safetyParam = EPS scale (73) + `STOCK_LONGITUDINAL` + `TSS3` bits. Passing
+opendbc platform and safety tests means the port matches its static contract; it does not
+authorize road use on any other EPS (the Gate-2 patch is this car's acceptance mechanism), or
+close production signer/source-arbitration policy.
 
 As a sanity check during development, the audit resolves the existing
 `TOYOTA_SIENNA_4TH_GEN` / F181 `8965B4509100` configuration as source-ready with
 `toyota_secoc_pt_generated`, torque control, EPS scale `73`, default openpilot
 longitudinal, and safetyParam `0x849`.
 
-## What the eventual production-control patch must contain
+## Supported exact-F33 port boundary and remaining research
 
-The passive Camry TSS3 platform now supplies exact identity, platform/DBC/CarState,
-receiver limits/timing, shadow B6 packing/freshness and source-real Ready/gear state. Before
-it can become a production-control port, the corresponding opendbc change still needs:
+The exact Gate-2-patched maintainer Camry has a normal fork-local lateral-control port:
+identity/DBC/CarState, B6 packing/freshness, ordinary Toyota Panda safety, fixed relay-open
+forwarding, and source-real Ready/gear/cruise state are implemented through standard
+openpilot interfaces. That support does not generalize to unpatched F33 software or other
+TSS3 platforms.
 
-- synchronized factory operating-state evidence using FRC `0x1601` + `0x1914`; only if B6
-  appears in that interval does the port still need its stock 28-byte template/cadence, sequence
-  restart and freshness behavior. Repeated relay-correct blind drives already retained zero B6;
-- relay-correct stock producer location and exclusive suppression behavior;
-- application-context ICU-S slot-4 general-generation permission and measured latency/jitter;
-- a validated physical driver-override threshold for the decoded `0x030` torque plus
-  motor-Q-current response policy and live `0x351/0x394/0x4A3` fault/recovery transitions;
-- a production TSS3 Toyota safety model/parameter rather than `noOutput`;
-- controller packing/signing only after the sender contract is complete;
-- radar/longitudinal ownership only when those separate architectures are recovered; and
-- transition/route tests covering stock LTA/B6, cruise engage/cancel and failure cases.
-  P/R/N/D/B and NRTD/READY are already source-real validated on this exact Camry.
+The bounded follow-ups are not lateral-output gates:
 
-Until those values exist, the dedicated TSS3 platform remains intentionally passive rather
-than aliasing the target to `TOYOTA_CAMRY_TSS2`, `TOYOTA_COROLLA_TSS2`, or
-`TOYOTA_SIENNA_4TH_GEN`.
+- **System-generated stock-ACC cancel is unsupported.** Physical CANCEL is decoded, but no
+  safe TSS3 transmit PDU is recovered; do not spoof protected `0x0FE` or reinterpret
+  longitudinal `0x0C9`/`0x0CA` values as a cancel bit.
+- A physical driver-torque value is decoded, but no exact driver-override threshold is
+  recovered, so openpilot `steeringPressed` is intentionally not synthesized from a guessed
+  number.
+- F33 fault/inhibit observables are decoded, but temporary/permanent openpilot fault classes
+  remain unmapped until asserted/recovery dynamics prove the classification.
+- `0x08A` producer/private-middle stock-authority attribution remains architecture research;
+  VAR-104 proves it is not an EPS ingress/grant and therefore not a Panda/CarController veto.
+- A RAM-only/reset-to-stock signer remains desirable future research to eliminate the
+  persistent Gate-2 development patch; it is not part of the current driving stack.
 
-## Stationary gate after the code patch
+No private arming Params, runtime diagnostic oracle, fake SecOC-key state, ALLOW_DEBUG steering
+mode, Python shadow safety, dynamic harness switch, request-plane coexistence veto, or custom
+Panda receiver timing/sequence policy belongs in the supported port.
+
+## Generic key-backed stationary gate (not the current F33 port)
 
 Code-ready is still not operational-ready. The reviewed opendbc target must next produce a
 profile-bound stationary/bench session artifact containing:
@@ -316,3 +331,9 @@ exist.
 Only after key recovery + reviewed manifest + opendbc source audit + stationary verification
 does `/api/install-recovered-key` copy the recovered private key into the existing
 `SecOCKey` interface used by openpilot.
+
+The key-backed path above does not apply to the exact-F33 port: `TOYOTA_CAMRY_TSS3`
+engagement involves no `SecOCKey` (`secOcRequired=False`). Its persistent Gate-2 patch was
+independently preflighted, applied, reboot-verified, and subsequently exercised in live
+openpilot routes. TSK therefore does not impose a second private stationary-install gate on
+the supported F33 port.

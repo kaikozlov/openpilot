@@ -5,14 +5,18 @@ EPS application F181 **`8965F3307000 / 8A3113303100`**. The byte-level/static au
 remains `ghidra_rh850_analysis`; this document mirrors only findings that are already
 field- or exact-firmware-evidenced and useful to the fork.
 
-Nothing in this document authorizes production steering output. Default and release Camry
-behavior remains `dashcamOnly` / Panda `SafetyModel.noOutput` with zero controller CAN. An
-exact-F181, non-release B6 development path is now present behind explicit bridge and lateral
-development parameters. It sends deliberately zero-MAC28 `0x0B6` on Panda bus 0 and still
-requires an installed EPS acceptance bypass plus stationary validation. CORR-135/VAR-087
-remain the stock-architecture boundary: factory LTA/LCA steers with zero B6 through an exact
-F33 B6-independent internal assist path, so `0x08A` producer/SecOC ownership must not be
-conflated with a presumed `0x08A -> B6` transform.
+The exact Gate-2-patched maintainer Camry is supported by this fork for lateral output; this
+does not authorize upstream inclusion or generalize to an unpatched/other F33. The port follows
+the ordinary Toyota/openpilot shape on `TOYOTA_CAMRY_TSS3`:
+ordinary CarParams, CarController, and Panda safety — no private parameters, no
+ephemeral-bridge arming, and no `ALLOW_DEBUG` development mode. It sends deliberately
+zero-MAC28 `0x0B6` on Panda bus 0, which this maintainer EPS accepts because it carries the
+persistent exact-F33 Gate-2 patch (CodeFlash compare neutralization with deterministic CRC
+repair). CORR-135/VAR-087 remain the stock-architecture boundary: factory LTA/LCA steers
+with zero B6 through an exact F33 B6-independent internal assist path, so `0x08A`
+producer/SecOC ownership must not be conflated with a presumed `0x08A -> B6` transform. No stock-lateral frame block is justified by the exact-F33 accepted surface; request-plane
+`0x08A` therefore remains observational rather than an authority veto. System-generated stock
+ACC cancel is the one normal feature still unsupported because its TSS3 transmit contract is unrecovered.
 
 ## Exact ECU identities and route
 
@@ -210,45 +214,64 @@ retain the stock verifier. Reset restores stock. What remains missing is automat
 a concrete application-mode execution pivot, heartbeat confirmation, re-arm after EPS reset,
 and live behavior validation.
 
-For **development receiver acceptance**, the two viable paths are therefore:
-
-1. persistent exact-F33 Gate-2 CodeFlash compare/check disable with deterministic CRC repair—
-   tested on cars and frictionless after the one-time flash, but persistent;
-2. reset-to-stock RAM bridge—no persistent flash modification, but per-session deployment,
-   heartbeat, and re-arm friction.
-
-Neither path retrieves the protected key. The RAM route remains the preferred upstream-shaped
-research architecture; the persistent patch remains the proven practical fallback.
+For **receiver acceptance** the historical option list was: (1) the persistent exact-F33
+Gate-2 CodeFlash compare/check disable with deterministic CRC repair, or (2) a reset-to-stock
+RAM bridge. This is now **resolved on the maintainer car by option 1**: the EPS carries the
+persistent Gate-2 patch, which is why the ordinary port's zero-MAC28 B6 frames are accepted.
+The RAM-bridge resident remains an audited static research candidate only — it never became a
+deployable runtime (no automatic install, execution pivot, heartbeat, or re-arm flow was
+built), and the openpilot port no longer references it. Neither path retrieves the protected
+key.
 
 ## openpilot state
 
-The checked-out fork contains a passive default plus an exact-F181 non-release development
-cutout:
+The checked-out fork implements the exact-F33 port through the normal Toyota/openpilot
+architecture — ordinary CarParams, CarController, and Panda safety on `TOYOTA_CAMRY_TSS3`,
+with no private arming parameters:
 
-- passive-port baseline root commit `d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04`;
-- current hardened cutover root `6dd58cf5e`, nested opendbc `8da4bb9b`;
+- passive-port baseline root commit `d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04`; the
+  native-authority cutover is root `2cfa9274c` ("opendbc: use native F33 lateral authority")
+  with nested opendbc `21d165da` ("toyota: use native lateral authority for F33"); final
+  native-shape cleanup is opendbc `ae284aaf` plus Panda `4130c4a9`; the same
+  cutover removed the private params (`ToyotaEphemeralSecOCBridge`,
+  `ToyotaEphemeralSecOCBridgeF181`, `ToyotaTss3DevLateral`, `ToyotaTSS3FrcOracleCapture`)
+  from `params_keys.h` and all bridge/oracle arming from `card.py`;
 - upstream-request decoding (opendbc `b9e86924`) parses `0x08A` B18:B19 target angle,
   B21 Target Lateral ID, and B26 sequence into read-only CarState observables;
-- the zero-MAC28 B6 sender was reintroduced at root `5fee63cfc` / opendbc `c98872c6` and
-  hardened at the current cutover. It sends one DLC32 `0x0B6` per control cycle on Panda
-  bus 0, uses live `0x00F` freshness, ID11 while active, a slew-limited target, and
-  ramp-to-zero followed by ID0 release;
-- activation requires a non-release build, `ToyotaEphemeralSecOCBridge`, exact
-  `ToyotaEphemeralSecOCBridgeF181=8965F3307000`, `ToyotaTss3DevLateral`, a TSS3 platform,
-  and no conflicting key-backed or longitudinal SecOC path;
-- Panda safety is `ALLOW_DEBUG`, exact-F33, B6-only, and requires cruise-derived
-  `controls_allowed`, live steering-rate/sync observations, ±1745 raw target, ±78 raw step,
-  modulo-64 sequence, raw steering-rate ≤100, and a 35 ms active timeout;
+- platform identity is the standard pipeline: exact F181 in production `FW_VERSIONS`
+  (EPS `0x7A1`, corroborating camera/ABS) plus the exact Camry CAN census in `FINGERPRINTS`,
+  so identification works in READY even when the EPS does not answer F181;
+- CarState consumes live `SECOC_SYNCHRONIZATION`, `0x025` steering, `0x030` physical N·m
+  driver torque plus its validity/fault-inhibit observables, `0x51E` Ready, `0x127`
+  P/R/N/D/B, and cruise state from the camera-bus `TSS3_LATERAL_REQUEST` (`0x08A`
+  `CRUISE_OPERATING_LATCH`/`SET_SPEED`);
+- CarController sends one zero-MAC28 `0x0B6`/DLC32 frame per scheduled control frame on
+  Panda bus 0 with live `0x00F` TRIP/RESET freshness, ID11 while `latActive`, ID0 with
+  zeroed companions on release, and a standard angle-rate-limited target;
+- Panda safety is the ordinary `toyota` model with the `TSS3` flag (not `ALLOW_DEBUG`):
+  TX whitelist is only `0x0B6` bus 0 DLC32 with a relay check, `controls_allowed` is
+  cruise-derived from `0x08A` bit 27 on bus 2, and the TX hook enforces target ID 0/11,
+  companion percentage bounds, and `steer_angle_cmd_checks` at ±1745 raw with the standard
+  rate limits;
+- interface: angle control, `radarUnavailable`, stock longitudinal, `dashcamOnly=False`,
+  `secOcRequired=False` — no SecOC-key availability state is involved in engagement; other
+  research TSS3 platforms (Corolla) stay passive `noOutput`/`dashcamOnly`;
 - exact `TOYOTA_CAMRY_TSS3` binding, source-real P/R/N/D/B + Ready replay, generated TSS3
-  DBC, and the 179-ID census/fingerprint separation remain intact;
-- **default/release output remains zero CAN / `SafetyModel.noOutput`**;
-- an independent DEVELOPMENT_ONLY read-only FRC capture remains available. It is exact-F181
-  bound and emits only diagnostic SID-`0x22` reads while controls are disallowed. It does not
-  arm steering or replace the still-missing Operation-FFD capture.
+  DBC, and the 179-ID census/fingerprint separation remain intact.
 
-The development sender being present does not prove the EPS acceptance bypass is installed.
-`card.py` currently consumes bridge parameters; TSK still ships the inert canary rather than a
-complete resident install/execution/heartbeat/arm flow.
+Zero-MAC28 B6 is accepted because this maintainer EPS carries the persistent Gate-2 patch —
+no key and no RAM bridge are involved. Factory stock-lateral arbitration remains a research question but is not a runtime gate: no
+frame block is justified and `0x08A` Target Lateral ID remains request-plane state, not an
+authority grant/veto. System-generated stock ACC cancel remains unsupported until its exact
+TSS3 transmit contract is recovered.
+
+The latest failed drive, route `0000002a--c5647fd694`, is useful specifically because it
+closes two old bring-up failures rather than creating new safety policy. The deployed build
+generated 13,410 active ID11 B6 attempts; 5,359 were rejected by the old custom Panda policy,
+and every active B6 attempt carried application byte 6 = `0x04`, asserting signal 265's
+additive-contribution suppression bit. The current tree fixes both: active B6 uses byte 6 =
+`0x00` with 100/100 contribution fields, and Panda uses ordinary Toyota angle-command safety
+without the old sequence/35-ms/stock-request/steering-rate development gates.
 
 ## What the FRC computes versus what leaves it
 
@@ -319,27 +342,23 @@ absent from exact F33's RDBI table, so the EPS-side cooperative target is not
 directly pollable. Bus-4 ECU dictionaries carry no lateral-request vocabulary,
 so GTS+ cannot name the producer.
 
-## Remaining gates
+## Supported-port validation and remaining research
 
-### Development vehicle test
+### Exact maintainer vehicle validation
 
-The software sender and EPS receiver-acceptance mechanisms exist. The shortest honest path to
-an on-car result is now:
+The software sender exists and receiver acceptance is in place on this car via the installed
+persistent Gate-2 patch. The next test is the normal openpilot one: deploy the exact committed
+build, engage through stock ACC/openpilot's ordinary `controls_allowed` path, and drive while
+checking the transmitted B6 target against measured steering response and EPS/DTC state. No
+special Target-Lateral-ID arming rule, stationary sequence ritual, receiver-timeout permission
+gate, or guessed driver-override threshold belongs in the implementation.
 
-1. install and positively verify either the persistent Gate-2 patch or the exact-F33 RAM
-   bridge; for RAM, require heartbeat/readback and fail closed across reset;
-2. verify no competing stock B6 source exists or can appear without the relay policy failing
-   closed;
-3. wheels unloaded and vehicle stationary: send ID0/zero, then ID11/zero, then one tiny command
-   within a single ±78-raw step;
-4. verify angle sign/scale, `0x030` motor-feedback response, EPS DTC state, ramp-down/ID0
-   release, 35 ms timeout, and driver override;
-5. only after those pass consider a low-speed bounded validation.
+The recovered ±1745 target envelope, sequence handling, seven-tick receiver loss behavior and
+other F33 receiver facts remain useful for diagnosis if the EPS rejects or faults; they are not
+extra Panda/openpilot authority rules unless an upstream-style safety semantic independently
+requires them. Stock ACC cancel remains unresolved and is not implemented by the port.
 
-Unresolved B6 companion bytes remain explicit candidates. The bypass turns this into an
-application-semantics test; it does not make zero/default fields Toyota stock behavior.
-
-### Production and factory-architecture research
+### Factory-architecture and unsupported-feature research
 
 Production output remains unauthorized. Separately close:
 
@@ -354,5 +373,6 @@ Production output remains unauthorized. Separately close:
 
 Do not send `0x08A` to EPS, repeat blind stock-B6-template drives, or infer an
 `0x08A -> B6` transform from matching angle scale or topology. Protected key material resides
-in protected storage, not ordinary DataFlash. Default/release output remains
-`SafetyModel.noOutput` / zero CAN.
+in protected storage, not ordinary DataFlash. The exact-F33 port is a fork-local development
+checkpoint on a Gate-2-patched EPS; it is not upstreamed, and production output remains
+unauthorized.

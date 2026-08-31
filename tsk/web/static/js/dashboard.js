@@ -228,16 +228,16 @@ function renderTargetCheckpoint(dashboard) {
   const status = dashboard.target.status || {};
   const checkpoint = status.checkpoint || {};
   const architecture = status.production_architecture || {};
-  const development = status.development_lateral || {};
-  const blockers = status.remaining_production_gates || [];
+  const lateral = status.lateral_port || {};
+  const boundaries = status.remaining_research_boundaries || [];
   els.targetCheckpoint.replaceChildren(
     checkpointItem("Static checkpoint", "B6 receiver + integration closed", "success"),
     checkpointItem("CPU-visible recovery", checkpoint.cpu_visible_key_recovery || "negative"),
     checkpointItem("Production architecture", architecture.runtime_model || "RAM-only / reset-to-stock", "primary"),
     checkpointItem("Persistent flash", architecture.persistent_flash || "fallback-only"),
-    checkpointItem("Development path", development.available ? "Staged · non-release · live-gated" : "Not staged", "warning"),
-    checkpointItem("Live blockers", `${blockers.length} production gates open`, "warning"),
-    checkpointItem("Output", checkpoint.output_detail || "Production output disabled", "danger"),
+    checkpointItem("Lateral path", lateral.available ? "Native zero-MAC28 B6 · Gate-2 patched EPS" : "Not implemented", "warning"),
+    checkpointItem("Research boundaries", `${boundaries.length} bounded follow-ups`, "warning"),
+    checkpointItem("Output", status.supported_output ? "Supported on verified patched F33" : (checkpoint.output_detail || "Not supported"), status.supported_output ? "success" : "danger"),
   );
 }
 
@@ -281,9 +281,9 @@ function renderNextAction(dashboard) {
 function renderWorkflow(dashboard) {
   const steps = dashboard.recovery?.steps || [];
   const exactF33 = dashboard.target?.kind === "camry_f33";
-  els.workflowCardTitle.textContent = exactF33 ? "Six remaining production gates" : "Recovery progress";
+  els.workflowCardTitle.textContent = exactF33 ? "Remaining research boundaries" : "Recovery progress";
   els.workflowCardSubtitle.textContent = exactF33
-    ? "Static receiver integration is closed; every live or architecture gate remains blocking."
+    ? "The patched-F33 lateral port is supported; these are bounded unsupported features or future research."
     : "The generic recovery path stays intentionally explicit.";
   els.workflow.replaceChildren();
 
