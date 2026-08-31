@@ -1011,6 +1011,21 @@ def cmd_scan(args, profile: Profile) -> int:
   return 1 if document["fault_status_records"] else 0
 
 
+def _raw_uds_target(profile: Profile, ref: str, *, mutating: bool):
+  try:
+    return profile.lookup_ecu(ref)
+  except registry.RegistryError as lookup_error:
+    try:
+      address = registry.parse_int(ref, "ECU address")
+    except registry.RegistryError:
+      raise SystemExit(str(lookup_error)) from lookup_error
+    if not 0 <= address <= 0x7FF:
+      raise SystemExit(f"read-only raw UDS numeric address must be an 11-bit CAN ID, got {address:#x}") from lookup_error
+    if mutating:
+      raise SystemExit(f"refusing mutating raw UDS to unregistered address {address:#05x}; add a registry ECU/identity guard before mutation") from lookup_error
+    return registry.EcuSpec(key=f"raw_{address:03x}", name=f"ECU {address:#05x}", address=address)
+
+
 def cmd_uds_raw(args, profile: Profile) -> int:
   service = _cli_int(args.service, "service")
   if not 0 < service <= 0xFF:
@@ -1018,14 +1033,14 @@ def cmd_uds_raw(args, profile: Profile) -> int:
   subfunction = None if args.subfunction is None else _cli_int(args.subfunction, "subfunction")
   if subfunction is not None and not 0 <= subfunction <= 0xFF:
     raise SystemExit("subfunction must be one byte")
-  try:
-    data = registry.parse_bytes(args.data, "data") if args.data else b""
-    ecu = profile.lookup_ecu(args.ecu)
-  except registry.RegistryError as e:
-    raise SystemExit(str(e)) from e
   mutating = service not in READ_ONLY_UDS_SERVICES
   if mutating and not args.force:
     raise SystemExit(f"refusing mutating service 0x{service:02X}; pass --force (identity guard still applies)")
+  try:
+    data = registry.parse_bytes(args.data, "data") if args.data else b""
+  except registry.RegistryError as e:
+    raise SystemExit(str(e)) from e
+  ecu = _raw_uds_target(profile, args.ecu, mutating=mutating)
 
   transport = _live_transport()
   panda = transport.connect(profile)

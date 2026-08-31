@@ -421,6 +421,20 @@ class TestLiveCli(unittest.TestCase):
     self.assertEqual(panda.sent, [])
     self.assertFalse([call for call in scripted.calls if call[1] == "clear"])
 
+  def test_raw_read_only_accepts_unregistered_numeric_address(self):
+    scripted = support.ScriptedUds()
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted, raw_response=bytes.fromhex("621033" + "00" * 25)):
+      rc, output = run_cli(["uds", "raw", "0x763", "0x22", "1033"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("request:  221033", output)
+    self.assertIn("response: 621033", output)
+
+  def test_raw_mutation_rejects_unregistered_numeric_address_even_with_force(self):
+    with mock.patch("tools.toyota_diag.transport.connect", side_effect=AssertionError("must not connect")):
+      with self.assertRaisesRegex(SystemExit, "unregistered address 0x763"):
+        run_cli(["uds", "raw", "0x763", "0x2E", "103500", "--force"])
+
   def test_raw_and_functional_mutations_require_force_and_guard(self):
     with mock.patch("tools.toyota_diag.transport.connect", side_effect=AssertionError("must not connect")):
       with self.assertRaisesRegex(SystemExit, "pass --force"):

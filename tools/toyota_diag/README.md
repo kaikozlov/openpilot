@@ -43,7 +43,14 @@ Live commands have two transport modes. If `pandad` is stopped, the CLI takes di
 ./tools/toyota scan --json > car-snapshot.json
 ./tools/toyota vehicle detect
 ./tools/toyota uds raw eps 0x22 F181
+./tools/toyota uds raw 0x763 0x22 1033       # read-only unregistered endpoint
 ```
+
+Read-only `uds raw` also accepts an explicit unregistered 11-bit request address,
+which is useful for recovered Toyota utility endpoints such as the MACKey-registration
+master `0x763` that are not asserted as installed vehicle-profile ECUs. Mutation to an
+unregistered address remains forbidden even with `--force`; add a registry identity
+guard before any write/session/routine use.
 
 `monitor` is the human-facing Data List view: broad signal-name terms expand to matching DIDs, signals sharing a DID are coalesced, interactive terminals redraw a compact value table, and `--changed` suppresses unchanged rows. Under registry v4 it also uses the recovered current-P5 `DiagnosticSession` lifecycle for wire-proven categories: inspect/poll F186, D1 `10 01` → D2 `10 03` when needed, periodic `22 F1 86` session polling, and deterministic D1 cleanup. Categories outside the registry's `wire_proven_categories` stay on the conservative default-session read path rather than inheriting an unproven lifecycle. `--jsonl` emits one structured sample group per line and `--csv` emits one row per decoded signal sample. `scan` produces a read-only vehicle inventory with responding ECUs, F181/F18C/0105 identity reads where supported, DTC status, active-fault summaries, transport state, and profile identity.
 
