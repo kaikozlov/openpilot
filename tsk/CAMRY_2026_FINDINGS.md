@@ -5,16 +5,18 @@ EPS application F181 **`8965F3307000 / 8A3113303100`**. The byte-level/static au
 remains `ghidra_rh850_analysis`; this document mirrors only findings that are already
 field- or exact-firmware-evidenced and useful to the fork.
 
-The exact Gate-2-patched maintainer Camry is supported by this fork for lateral output; this
-does not authorize upstream inclusion or generalize to an unpatched/other F33. The port follows
+The exact Gate-2-patched maintainer Camry is the fork's lateral-output target; no wheel
+response to openpilot B6 has ever been observed (VAR-124/126), and this does not authorize
+upstream inclusion or generalize to an unpatched/other F33. The port follows
 the ordinary Toyota/openpilot shape on `TOYOTA_CAMRY_TSS3`:
 ordinary CarParams, CarController, and Panda safety — no private parameters, no
 ephemeral-bridge arming, and no `ALLOW_DEBUG` development mode. It sends deliberately
-zero-MAC28 `0x0B6` on Panda bus 0, which this maintainer EPS accepts because it carries the
-persistent exact-F33 Gate-2 patch (CodeFlash compare neutralization with deterministic CRC
-repair). CORR-135/VAR-087 remain the stock-architecture boundary: factory LTA/LCA steers
+zero-MAC28 `0x0B6` on Panda bus 0, for which the maintainer EPS's persistent exact-F33
+Gate-2 patch (CodeFlash compare neutralization with deterministic CRC repair) was the
+enabling development prerequisite — receiver admission itself remains unproven (see
+receiver acceptance below). CORR-135/VAR-087 remain the stock-architecture boundary: factory LTA/LCA steers
 with zero B6 through an exact F33 B6-independent internal assist path, so `0x08A`
-producer/SecOC ownership must not be conflated with a presumed `0x08A -> B6` transform. No stock-lateral frame block is justified by the exact-F33 accepted surface; request-plane
+producer/SecOC ownership must not be conflated with a presumed `0x08A -> B6` transform. No stock-lateral frame block is justified by the exact-F33 patched-verifier surface; request-plane
 `0x08A` therefore remains observational rather than an authority veto. System-generated stock
 ACC cancel is the one normal feature still unsupported because its TSS3 transmit contract is unrecovered.
 
@@ -267,8 +269,9 @@ with no private arming parameters:
 - exact `TOYOTA_CAMRY_TSS3` binding, source-real P/R/N/D/B + Ready replay, generated TSS3
   DBC, and the 179-ID census/fingerprint separation remain intact.
 
-Zero-MAC28 B6 is accepted because this maintainer EPS carries the persistent Gate-2 patch —
-no key and no RAM bridge are involved. Factory stock-lateral arbitration remains a research question but is not a runtime gate: no
+Zero-MAC28 B6 admission is expected to depend on this maintainer EPS's persistent Gate-2
+patch and remains unproven (VAR-124/125/126 silent non-admission) — no key and no RAM bridge
+are involved. Factory stock-lateral arbitration remains a research question but is not a runtime gate: no
 frame block is justified and `0x08A` Target Lateral ID remains request-plane state, not an
 authority grant/veto. System-generated stock ACC cancel remains unsupported until its exact
 TSS3 transmit contract is recovered.
