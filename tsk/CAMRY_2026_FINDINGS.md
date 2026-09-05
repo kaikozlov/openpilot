@@ -216,12 +216,20 @@ and live behavior validation.
 
 For **receiver acceptance** the historical option list was: (1) the persistent exact-F33
 Gate-2 CodeFlash compare/check disable with deterministic CRC repair, or (2) a reset-to-stock
-RAM bridge. This is now **resolved on the maintainer car by option 1**: the EPS carries the
-persistent Gate-2 patch, which is why the ordinary port's zero-MAC28 B6 frames are accepted.
-The RAM-bridge resident remains an audited static research candidate only — it never became a
-deployable runtime (no automatic install, execution pivot, heartbeat, or re-arm flow was
-built), and the openpilot port no longer references it. Neither path retrieves the protected
-key.
+RAM bridge. Option 1 is installed on the maintainer EPS (cumulative stage 5,
+persistence-verified). That patch neutralizes the Gate-2 compare **verdict path**; it does
+**not** establish that the ordinary port's zero-MAC28 B6 frames are accepted: the
+2026-09-04 highway corpus (analysis-repo VAR-124/125/126) shows 751,664 wire-exact B6
+frames with no measurable wheel response, the wheel tracking the stock `0x08A`/`0x081`
+request when the requests diverge, Panda-level transport exonerated, and no observable
+EPS objection — i.e. silent non-admission upstream of any observable application
+reaction. Admission therefore remains **unproven**; the non-bypassing queue/freshness
+observer is the designated discriminator, and one wire-geometry divergence from the
+stock protected sender (first-in-epoch message-low2 phase) remains the cheap A/B
+variable. The RAM-bridge resident remains an audited static research candidate only —
+it never became a deployable runtime (no automatic install, execution pivot, heartbeat,
+or re-arm flow was built), and the openpilot port no longer references it. Neither path
+retrieves the protected key.
 
 ## openpilot state
 
