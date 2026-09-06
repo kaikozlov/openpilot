@@ -25,7 +25,7 @@ function agnos_init {
       sudo reboot
     fi
     while true; do
-      $DIR/openpilot/common/hardware/comma/updater $AGNOS_PY $MANIFEST
+      PYTHONPATH="$DIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m openpilot.system.ui.updater $AGNOS_PY $MANIFEST
     done
   fi
 }
