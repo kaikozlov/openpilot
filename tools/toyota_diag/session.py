@@ -8,11 +8,12 @@ or managed pandad via `transport.connect`) and models the recovered lifecycle:
   factory honors them when constructed from a Panda.
 - current-P5 TMS-077 SendProc: entering the extended session is the recovered D1
   (default `10 01`) then D2 (extended `10 03`) sequence, never a direct `10 03`.
-  When the metadata declares the `22 F1 86` session poll, the ECU's reported
+  When a category's DD selector is the `22 F1 86` session poll, the ECU's reported
   session state is preferred and an already-extended ECU skips the transition.
   Cleanup sends D1 (`10 01`).
-- Keepalive/session polling: the current-P5 registry metadata declares a poll
-  (`22 F1 86` -> `62 F1 86` session byte) or tester-present cadence.
+- Keepalive/session polling comes from each category's actual DD selector. Current
+  GTS categories use `22 F1 86`, other DID polls such as `22 D1 00`, or a `10 03`
+  extended-session refresh; the runtime does not project the Camry/F186 form onto them.
 - Deterministic cleanup: context exit returns the ECU to the default session
   after extended-session operation, best-effort, never masking an in-flight
   exception. `__enter__` itself never transmits; callers enter the Toyota lifecycle
@@ -36,7 +37,11 @@ SUPPORTED_SESSION_GENERATIONS = frozenset({"current-p5"})
 SESSION_DID_DEFAULT = 0xF186  # active diagnostic session, the current-P5 22 F1 86 poll
 KEEPALIVE_TESTER_PRESENT = "tester_present"
 KEEPALIVE_SESSION_DID_POLL = "session_did_poll"
-SUPPORTED_KEEPALIVE_KINDS = frozenset({KEEPALIVE_TESTER_PRESENT, KEEPALIVE_SESSION_DID_POLL})
+KEEPALIVE_DID_POLL = "did_poll"
+KEEPALIVE_EXTENDED_SESSION_REFRESH = "extended_session_refresh"
+SUPPORTED_KEEPALIVE_KINDS = frozenset({
+  KEEPALIVE_TESTER_PRESENT, KEEPALIVE_SESSION_DID_POLL, KEEPALIVE_DID_POLL, KEEPALIVE_EXTENDED_SESSION_REFRESH,
+})
 DIAGNOSTIC_SESSION_CONTROL_SERVICE = 0x10
 
 
@@ -81,7 +86,7 @@ def _dsc_request(value: Any, what: str) -> tuple[bytes, int]:
   return request, request[1]
 
 
-def parse_lifecycle(profile: Profile) -> SessionLifecycle | None:
+def parse_lifecycle(profile: Profile, ecu: EcuSpec | None = None) -> SessionLifecycle | None:
   """Validate recovered `profile.session_control` metadata; None when the registry supplies none.
 
   Raises RegistryError for malformed metadata and LifecycleUnsupported for metadata
@@ -91,12 +96,36 @@ def parse_lifecycle(profile: Profile) -> SessionLifecycle | None:
   if raw is None:
     return None
 
+  # Universal bundles resolve D1/D2/DD independently per Toyota category. Use
+  # the category row when it carries the new lifecycle classification; legacy
+  # single-vehicle registries retain the historical global shape below.
+  category_row = None
+  if ecu is not None and ecu.category_id is not None:
+    per_category = raw.get("per_category")
+    candidate = per_category.get(str(ecu.category_id)) if isinstance(per_category, dict) else None
+    if isinstance(candidate, dict) and "lifecycle_supported" in candidate:
+      category_row = candidate
+      if not candidate.get("lifecycle_supported"):
+        return None
+
   generation = raw.get("generation")
   if not isinstance(generation, str) or not generation:
     raise registry.RegistryError("session_control.generation: expected a non-empty string")
   if generation not in SUPPORTED_SESSION_GENERATIONS:
     supported = ", ".join(sorted(SUPPORTED_SESSION_GENERATIONS))
     raise LifecycleUnsupported(f"session_control generation {generation!r} is not supported (supported: {supported})")
+
+  if category_row is not None:
+    d1 = category_row.get("default_session")
+    d2 = category_row.get("extended_session")
+    if not isinstance(d1, dict) or not isinstance(d2, dict):
+      raise LifecycleUnsupported(f"category {ecu.category_id} does not publish complete D1/D2 session frames")
+    raw = {
+      **raw,
+      "enter_sequence": [d1.get("send"), d2.get("send")],
+      "return_default": d1.get("send"),
+      "keepalive": category_row.get("keepalive"),
+    }
 
   for key in ("default_session", "extended_session", "return_default"):
     if key not in raw:
@@ -133,10 +162,15 @@ def parse_lifecycle(profile: Profile) -> SessionLifecycle | None:
       raise registry.RegistryError("session_control.keepalive.interval_s: required")
     interval = registry.parse_seconds(spec["interval_s"], "session_control.keepalive.interval_s")
     did = SESSION_DID_DEFAULT
-    if kind == KEEPALIVE_SESSION_DID_POLL:
+    if kind in {KEEPALIVE_SESSION_DID_POLL, KEEPALIVE_DID_POLL}:
       did = registry.parse_hex_key(str(spec.get("did", f"0x{SESSION_DID_DEFAULT:04X}")),
                                    "session_control.keepalive.did")
-      _validate_session_poll_wire(spec, did)
+      _validate_did_poll_wire(spec, did)
+    elif kind == KEEPALIVE_EXTENDED_SESSION_REFRESH:
+      request, session = _dsc_request(spec.get("request"), "session_control.keepalive.request")
+      if request != bytes((DIAGNOSTIC_SESSION_CONTROL_SERVICE, extended_session)) or session != extended_session:
+        raise LifecycleUnsupported(
+          f"session_control.keepalive.request {request.hex()} is not the declared extended-session refresh")
     keepalive = KeepaliveSpec(kind=kind, interval_s=interval, did=did)
 
   return SessionLifecycle(
@@ -166,8 +200,8 @@ def validate_lifecycle_for_ecu(profile: Profile, ecu: EcuSpec, lifecycle: Sessio
   return lifecycle
 
 
-def _validate_session_poll_wire(spec: dict[str, Any], did: int) -> None:
-  """Reject recovered session-poll wire hints that disagree with the declared DID.
+def _validate_did_poll_wire(spec: dict[str, Any], did: int) -> None:
+  """Reject recovered DID-poll wire hints that disagree with the declared DID.
 
   UdsClient validates the `22`/`62` service and DID echo at runtime; this catches
   inconsistent metadata at parse time instead of silently ignoring those fields.
@@ -224,7 +258,7 @@ class DiagnosticSession:
   """Per-ECU recovered session lifecycle; deterministic default-session cleanup on exit."""
 
   def __init__(self, profile: Profile, ecu: EcuSpec, *, panda=None,
-               client_factory: Callable[[int], UdsClient] | None = None,
+               client_factory: Callable[[int, int | None], UdsClient] | None = None,
                operation_row: dict[str, Any] | None = None) -> None:
     if (panda is None) == (client_factory is None):
       raise ValueError("pass exactly one of panda or client_factory")
@@ -239,7 +273,7 @@ class DiagnosticSession:
     self._lifecycle: SessionLifecycle | None | None = None  # parsed lazily; None means absent
     self._active_session: int | None = None  # session byte when this session established it
     self._extended = False  # operating in the extended session (transitioned or confirmed by poll)
-    self._clients: dict[int, UdsClient] = {}
+    self._clients: dict[tuple[int, int | None], UdsClient] = {}
     if client_factory is not None:
       self._factory = client_factory  # caller-owned; timeouts are advisory for prebuilt clients
     else:
@@ -247,17 +281,19 @@ class DiagnosticSession:
       self._factory = transport.uds_client_factory(panda, profile, self.timeouts)
 
   # -- transport surface ---------------------------------------------------------
-  def client(self, address: int | None = None) -> UdsClient:
+  def client(self, address: int | None = None, sub_addr: int | None = None) -> UdsClient:
     addr = self.ecu.address if address is None else address
-    if addr not in self._clients:
-      self._clients[addr] = self._factory(addr)
-    return self._clients[addr]
+    extension = self.ecu.sub_addr if address is None and sub_addr is None else sub_addr
+    endpoint = (addr, extension)
+    if endpoint not in self._clients:
+      self._clients[endpoint] = self._factory(addr, extension)
+    return self._clients[endpoint]
 
   # -- lifecycle -------------------------------------------------------------------
   @property
   def lifecycle(self) -> SessionLifecycle | None:
     if self._lifecycle is None:
-      self._lifecycle = parse_lifecycle(self.profile)
+      self._lifecycle = parse_lifecycle(self.profile, self.ecu)
     return self._lifecycle
 
   @property
@@ -323,7 +359,7 @@ class DiagnosticSession:
     self._extended = False
 
   def keepalive(self) -> None:
-    """One recovered keepalive step: tester present or the `22 F1 86` session-DID poll."""
+    """Execute the category's recovered DD keepalive family."""
     lifecycle = self.require_lifecycle_supported()
     if lifecycle.keepalive is None:
       raise LifecycleUnsupported("registry supplies no recovered keepalive metadata")
@@ -331,10 +367,13 @@ class DiagnosticSession:
     if spec.kind == KEEPALIVE_TESTER_PRESENT:
       self.client().tester_present()
       return
+    if spec.kind == KEEPALIVE_EXTENDED_SESSION_REFRESH:
+      self.client().diagnostic_session_control(lifecycle.extended_session)
+      return
     value = self.client().read_data_by_identifier(spec.did)
     if not value:
-      raise LifecycleError(f"keepalive poll DID {spec.did:#06x} returned no session byte")
-    if self._active_session is not None and value[0] != self._active_session:
+      raise LifecycleError(f"keepalive poll DID {spec.did:#06x} returned no data")
+    if spec.kind == KEEPALIVE_SESSION_DID_POLL and self._active_session is not None and value[0] != self._active_session:
       raise LifecycleError(
         f"keepalive poll: ECU reports session {value[0]:#04x}, expected {self._active_session:#04x}")
 

@@ -9,7 +9,7 @@ from tools.toyota_diag.tests import support
 class TestVehicleResolver(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
-    cls.profile = registry.load_registry()
+    cls.profile = registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)
 
   def test_current_camry_vin_decision_wildcards_and_branches(self):
     raw = self.profile.vehicle_resolution["vin_decision"]
@@ -73,7 +73,7 @@ class TestVehicleResolver(unittest.TestCase):
     self.assertEqual(next(row for row in rows if row["category_id"] == 452)["live_state"], "responding")
     self.assertEqual(next(row for row in rows if row["category_id"] == 409)["live_state"], "no_response")
     master = next(row for row in rows if row["category_id"] == 148)
-    self.assertEqual((master["live_state"], master["transport_responded"]), ("not_current_p5", None))
+    self.assertEqual((master["live_state"], master["transport_responded"]), ("unsupported_generation", None))
     self.assertIn(((0x750, 0x2A), "read_did", 0x0101), scripted.calls)
     self.assertEqual([call for call in scripted.calls if call[0] == 0x7C0], [(0x7C0, "read_did", 0x0101)])
 

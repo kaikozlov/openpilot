@@ -1,12 +1,8 @@
-"""Exact 2026 Camry DTC scan/clear semantics behind the unified Toyota CLI.
+"""Toyota DTC scan/clear primitives over logical diagnostic endpoints.
 
-Every frame, UDS call, ordering, print, and exit-code decision is preserved:
-
-  * physical UDS 0x14 FF FF FF for ECUs that support ClearDiagnosticInformation
-  * functional legislated OBD Mode 04 on 0x7DF (exact validated frame 0104000000000000)
-  * final DTC status sweep; nonzero fault-status bits under the profile mask fail the command
-
-The ECU set, names, guards, and legislated responders come from the registry.
+Physical UDS operations preserve Toyota logical addressing (`request ID + optional
+address extension`). Functional legislated OBD remains the standard 0x7DF path.
+Vehicle/category selection and responder sets come from the resolved Toyota profile.
 """
 
 from __future__ import annotations
@@ -24,7 +20,7 @@ from opendbc.car.uds import (
   get_dtc_num_as_str,
 )
 
-from tools.toyota_diag.registry import decode_status_bits
+from tools.toyota_diag.registry import EcuSpec, decode_status_bits
 
 FUNCTIONAL_OBD_REQUEST_ADDR = 0x7DF
 
@@ -38,47 +34,68 @@ def parse_dtc_response(data: bytes) -> list[tuple[str, int]]:
   return [(get_dtc_num_as_str(payload[i:i + 3]), payload[i + 3]) for i in range(0, len(payload), 4)]
 
 
-def read_ecu_dtcs(client_factory: Callable[[int], UdsClient], address: int) -> list[tuple[str, int]] | None:
+DtcTarget = EcuSpec | tuple[int, str] | int
+
+
+def _target_parts(target: DtcTarget) -> tuple[int, int | None, str]:
+  if isinstance(target, EcuSpec):
+    return target.address, target.sub_addr, target.name
+  if isinstance(target, int):
+    return target, None, f"ECU {target:#05x}"
+  return int(target[0]), None, str(target[1])
+
+
+def _result_key(target: DtcTarget):
+  return target if isinstance(target, EcuSpec) else _target_parts(target)[0]
+
+
+def read_ecu_dtcs(client_factory: Callable[[int, int | None], UdsClient], target: DtcTarget) -> list[tuple[str, int]] | None:
+  address, sub_addr, _ = _target_parts(target)
   try:
-    data = client_factory(address).read_dtc_information(DTC_REPORT_TYPE.DTC_BY_STATUS_MASK, DTC_STATUS_MASK_TYPE.ALL)
+    data = client_factory(address, sub_addr).read_dtc_information(DTC_REPORT_TYPE.DTC_BY_STATUS_MASK, DTC_STATUS_MASK_TYPE.ALL)
     return parse_dtc_response(data)
   except (MessageTimeoutError, NegativeResponseError):
     return None
 
 
-def scan(client_factory: Callable[[int], UdsClient], ecus: Sequence[tuple[int, str]], fault_status_mask: int, *,
+def scan(client_factory: Callable[[int, int | None], UdsClient], ecus: Sequence[DtcTarget], fault_status_mask: int, *,
          show_all: bool = False, echo: Callable[[str], None] = print) \
-        -> tuple[dict[int, list[tuple[str, int]]], list[tuple[int, str, int]]]:
-  """Walk ECUs in order; return (responding records, fault-status records)."""
-  responding: dict[int, list[tuple[str, int]]] = {}
-  faults: list[tuple[int, str, int]] = []
-  for address, name in ecus:
-    records = read_ecu_dtcs(client_factory, address)
+        -> tuple[dict[DtcTarget, list[tuple[str, int]]], list[tuple[DtcTarget, str, int]]]:
+  """Walk logical ECU endpoints in order; return (responding records, fault-status records)."""
+  responding: dict[DtcTarget, list[tuple[str, int]]] = {}
+  faults: list[tuple[DtcTarget, str, int]] = []
+  for target in ecus:
+    address, sub_addr, name = _target_parts(target)
+    endpoint = f"{address:#05x}" + (f"/{sub_addr:#04x}" if sub_addr is not None else "")
+    records = read_ecu_dtcs(client_factory, target)
     if records is None:
       if show_all:
-        echo(f"{address:#05x} {name}: no response")
+        echo(f"{endpoint} {name}: no response")
       continue
-    responding[address] = records
-    active = [(dtc, status) for dtc, status in records if status & fault_status_mask]
-    faults.extend((address, dtc, status) for dtc, status in active)
+    result_key = _result_key(target)
+    responding[result_key] = records
+    active = [(code, status) for code, status in records if status & fault_status_mask]
+    faults.extend((result_key, code, status) for code, status in active)
     if show_all or active:
-      echo(f"{address:#05x} {name}: {len(records)} DTC record(s), {len(active)} fault-status record(s)")
-      for dtc, status in active:
-        echo(f"  {dtc} status={status:#04x} {' '.join(decode_status_bits(status))}")
+      echo(f"{endpoint} {name}: {len(records)} DTC record(s), {len(active)} fault-status record(s)")
+      for code, status in active:
+        echo(f"  {code} status={status:#04x} {' '.join(decode_status_bits(status))}")
   return responding, faults
 
 
-def clear_physical_uds(client_factory: Callable[[int], UdsClient], responders: Mapping[int, str], *,
+def clear_physical_uds(client_factory: Callable[[int, int | None], UdsClient], responders: Mapping[DtcTarget, str], *,
                        echo: Callable[[str], None] = print) -> None:
   echo("\nphysical UDS clear (14 FF FF FF):")
-  for address, name in responders.items():
+  for target, name in responders.items():
+    address, sub_addr, _ = _target_parts(target)
+    endpoint = f"{address:#05x}" + (f"/{sub_addr:#04x}" if sub_addr is not None else "")
     try:
-      client_factory(address).clear_diagnostic_information(DTC_GROUP_TYPE.ALL)
-      echo(f"  {address:#05x} {name}: cleared")
+      client_factory(address, sub_addr).clear_diagnostic_information(DTC_GROUP_TYPE.ALL)
+      echo(f"  {endpoint} {name}: cleared")
     except NegativeResponseError as e:
-      echo(f"  {address:#05x} {name}: not supported ({e})")
+      echo(f"  {endpoint} {name}: not supported ({e})")
     except MessageTimeoutError:
-      echo(f"  {address:#05x} {name}: timeout")
+      echo(f"  {endpoint} {name}: timeout")
 
 
 def functional_obd_request(panda, mode: int, payload: bytes = b"", responders: frozenset[int] | set[int] = frozenset(),

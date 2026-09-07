@@ -29,11 +29,67 @@ def _cli_int(value: str, what: str) -> int:
     raise SystemExit(str(e)) from e
 
 
+LIVE_VEHICLE_CONTEXT_FUNCS = frozenset({
+  "cmd_vehicle_mounted", "cmd_scan", "cmd_monitor", "cmd_observe",
+  "cmd_did_read", "cmd_did_support", "cmd_did_watch", "cmd_dtc_scan", "cmd_dtc_clear",
+  "cmd_ffd_operation_list", "cmd_ffd_operation_records", "cmd_ffd_operation_read",
+  "cmd_ffd_image_info", "cmd_ffd_image_list", "cmd_ffd_image_read",
+  "cmd_uds_raw", "cmd_functional_obd", "cmd_active_test_run", "cmd_active_test_stop", "cmd_utility_run",
+})
+
+
 def _profile(args) -> Profile:
   try:
-    return registry.load_registry(args.registry)
+    return registry.load_registry(
+      args.registry,
+      region=getattr(args, "region", None),
+      vehicle=getattr(args, "vehicle_select", None),
+      bus=getattr(args, "panda_bus", None),
+    )
   except registry.RegistryError as e:
     raise SystemExit(f"invalid registry {args.registry}: {e}") from e
+
+
+def _resolve_live_vehicle_context(args, profile: Profile) -> Profile:
+  """Select the Toyota vehicle from VIN before vehicle-scoped live operations."""
+  if profile.database is None or profile.vehicle_type is not None:
+    return profile
+  if args.func.__name__ not in LIVE_VEHICLE_CONTEXT_FUNCS:
+    return profile
+  if args.func.__name__ == "cmd_uds_raw":
+    ref = str(getattr(args, "ecu", ""))
+    try:
+      numeric = int(ref, 0)
+    except ValueError:
+      numeric = None
+    if numeric is not None:
+      return profile  # an explicit numeric endpoint needs no Toyota vehicle/category route
+
+  live = _live_transport()
+  panda = None
+  try:
+    panda = live.connect(profile)
+    can_recv, can_send = live.can_query_callbacks(panda)
+    vin_info = resolver.read_vehicle_vin(can_recv, can_send, profile.bus)
+    matches = profile.database.resolve_vin(
+      profile.region or profile.database.default_region,
+      vin_info["vin"],
+      rx_address=vin_info.get("rx_address"),
+    )
+  except Exception as e:
+    raise SystemExit(f"Toyota vehicle auto-resolution failed: {e}; use --vehicle TYPE_OR_NAME to select explicitly") from e
+  finally:
+    close = getattr(panda, "close", None)
+    if callable(close):
+      close()
+
+  if len(matches) != 1:
+    names = ", ".join(f"{row['vehicle_type']} {row.get('name') or '(unnamed)'}" for row in matches[:12]) or "none"
+    raise SystemExit(
+      f"Toyota VIN {vin_info['vin']} resolved {len(matches)} vehicle candidates ({names}); "
+      + "use --vehicle TYPE_OR_NAME to select the intended Toyota DB vehicle"
+    )
+  return profile.database.profile(profile.region, int(matches[0]["vehicle_type"]), bus=profile.bus)
 
 
 def _live_transport():
@@ -94,90 +150,119 @@ def cmd_vehicle_show(args, profile: Profile) -> int:
       "install_set_ids": vehicle_resolution.get("install_set_ids"),
       "mount_candidate_count": len(profile.mount_candidates()),
     }
+  database_summary = None
+  if profile.database is not None:
+    region = profile.database.region_index(profile.region)
+    database_summary = {
+      "release": profile.database.index.get("release"),
+      "region": profile.region,
+      "vehicle_count": region.get("counts", {}).get("vehicle_count"),
+      "supported_p5_category_count": region.get("counts", {}).get("supported_p5_category_count"),
+    }
+  identity_witness = None
+  if profile.guard is not None:
+    identity_witness = {
+      "ecu": profile.guard.ecu_key,
+      "did": profile.guard.did,
+      "contains_ascii": profile.guard.contains_ascii,
+    }
   document = {
     "profile": profile.name,
     "vehicle": profile.vehicle,
     "panda_bus": profile.bus,
     "registry": str(profile.path),
+    "database": database_summary,
     "vehicle_resolution": resolver_summary,
-    "identity_witness": {
-      "ecu": profile.guard.ecu_key,
-      "did": profile.guard.did,
-      "contains_ascii": profile.guard.contains_ascii,
-    },
+    "identity_witness": identity_witness,
   }
-  lines = [
-    profile.vehicle,
-    f"profile:  {profile.name}",
-    f"registry: {profile.path}",
-    f"Panda bus: {profile.bus}",
-  ]
+  lines = [profile.vehicle, f"profile:  {profile.name}", f"registry: {profile.path}", f"Panda bus: {profile.bus}"]
+  if database_summary is not None:
+    lines.append(
+      f"Toyota DB: GTS+ {database_summary['release']} region {database_summary['region']}; "
+      + f"{database_summary['vehicle_count']} vehicles, {database_summary['supported_p5_category_count']} current-P5 catalogs"
+    )
   if resolver_summary is not None:
     install_sets = ",".join(str(value) for value in resolver_summary["install_set_ids"])
-    summary = f"Toyota resolver: type {resolver_summary['vehicle_type']} {resolver_summary['vehicle_name']}; install sets {install_sets}; "
-    summary += f"{resolver_summary['mount_candidate_count']} logical ECU candidates"
-    lines.append(summary)
-  lines.append(f"identity witness: {profile.guard.ecu_key} DID 0x{profile.guard.did:04X} contains {profile.guard.contains_ascii}")
+    lines.append(
+      f"Toyota resolver: type {resolver_summary['vehicle_type']} {resolver_summary['vehicle_name']}; "
+      + f"install sets {install_sets}; {resolver_summary['mount_candidate_count']} logical ECU candidates"
+    )
+  if identity_witness is not None:
+    lines.append(
+      f"legacy identity witness: {profile.guard.ecu_key} DID 0x{profile.guard.did:04X} contains {profile.guard.contains_ascii}"
+    )
   return _json_or_text(args, document, "\n".join(lines))
 
 
 def cmd_vehicle_list(args, profile: Profile) -> int:
+  if profile.database is not None:
+    rows = profile.database.vehicle_rows(profile.region)
+    if args.json:
+      print(json.dumps(rows, sort_keys=True))
+    else:
+      for row in rows:
+        print(f"{int(row['vehicle_type']):>6}  {row.get('name') or '(unnamed Toyota vehicle)'}")
+    return 0
+
   rows = []
   for path in registry.available_registries(profile.path.parent):
+    if path.suffix.casefold() != ".json":
+      continue
     try:
       item = registry.load_registry(path)
     except registry.RegistryError:
       continue
     rows.append({"profile": item.name, "vehicle": item.vehicle, "path": str(path), "default": path.resolve() == profile.path.resolve()})
-  if args.json:
-    print(json.dumps(rows, sort_keys=True))
-  else:
-    for row in rows:
-      mark = "*" if row["default"] else " "
-      print(f"{mark} {row['profile']:<22} {row['vehicle']}")
-  return 0
+  return _json_or_text(args, rows, "\n".join(f"{'*' if row['default'] else ' '} {row['profile']:<22} {row['vehicle']}" for row in rows))
 
 
 def cmd_vehicle_detect(args, profile: Profile) -> int:
-  """Resolve the live VIN through Toyota's recovered current vehicle-decision rows."""
+  """Resolve one live VIN through Toyota's recovered regional vehicle-decision table."""
   live = _live_transport()
+  panda = None
   try:
     panda = live.connect(profile)
     can_recv, can_send = live.can_query_callbacks(panda)
     vin_info = resolver.read_vehicle_vin(can_recv, can_send, profile.bus)
   except Exception as e:
-    # Keep one clear command-level failure; vehicle detection is read-only and has
-    # no reason to fall back to the old profile-by-profile F181 discriminator.
     raise SystemExit(f"vehicle detection failed: {e}") from e
+  finally:
+    close = getattr(panda, "close", None)
+    if callable(close):
+      close()
 
-  matches = []
-  errors = []
-  for path in registry.available_registries(profile.path.parent):
-    try:
-      candidate = registry.load_registry(path)
-      if candidate.bus != profile.bus:
-        continue
-      match = resolver.resolve_profile_vin(candidate, vin_info["vin"])
-      if match is not None:
-        matches.append(match)
-    except (registry.RegistryError, resolver.ResolverError) as e:
-      errors.append({"registry": str(path), "error": str(e)})
-
-  document = {**vin_info, "matches": matches, "errors": errors}
-  if args.json:
-    print(json.dumps(document, sort_keys=True))
-  else:
-    print(f"VIN: {vin_info['vin']}  RX={vin_info['rx_address']:#x} bus={vin_info['rx_bus']}")
-    if matches:
+  if profile.database is not None:
+    matches = profile.database.resolve_vin(
+      profile.region or profile.database.default_region,
+      vin_info["vin"],
+      rx_address=vin_info.get("rx_address"),
+    )
+    document = {**vin_info, "region": profile.region, "matches": matches}
+    if args.json:
+      print(json.dumps(document, sort_keys=True))
+    else:
+      print(f"VIN: {vin_info['vin']}  RX={vin_info['rx_address']:#x} bus={vin_info['rx_bus']} region={profile.region}")
       for row in matches:
         sets = ",".join(str(value) for value in row["install_set_ids"])
-        print(f"✓ {row['profile']}: {row['vehicle']} — Toyota type {row['vehicle_type']} {row['vehicle_name']}; install sets {sets}")
-    else:
-      print("no bundled registry matched Toyota's VIN-decision rows")
-    for row in errors:
-      if args.verbose:
-        print(f"  {row['registry']}: {row['error']}")
-  return 0 if matches else 1
+        print(f"✓ Toyota type {row['vehicle_type']} {row.get('name') or '(unnamed)'}; install sets {sets}")
+      if not matches:
+        print("no Toyota DB vehicle matched the recovered VIN-decision rows")
+    return 0 if matches else 1
+
+  match = resolver.resolve_profile_vin(profile, vin_info["vin"])
+  matches = [] if match is None else [match]
+  document = {**vin_info, "matches": matches}
+  return _json_or_text(
+    args, document,
+    "\n".join(
+      [f"VIN: {vin_info['vin']}  RX={vin_info['rx_address']:#x} bus={vin_info['rx_bus']}"]
+      + [
+        f"✓ {row['profile']}: {row['vehicle']} — Toyota type {row['vehicle_type']} {row['vehicle_name']}; "
+        + f"install sets {','.join(str(value) for value in row['install_set_ids'])}"
+        for row in matches
+      ]
+    ),
+  ) if matches else 1
 
 
 def cmd_vehicle_mounted(args, profile: Profile) -> int:
@@ -198,7 +283,7 @@ def cmd_vehicle_mounted(args, profile: Profile) -> int:
     "candidate_count": len(rows),
     "responding": sum(row.get("transport_responded") is True for row in rows),
     "no_response": sum(row.get("live_state") == "no_response" for row in rows),
-    "not_current_p5": sum(row.get("live_state") == "not_current_p5" for row in rows),
+    "unsupported_generation": sum(row.get("live_state") == "unsupported_generation" for row in rows),
     "candidates": rows,
   }
   if args.json:
@@ -208,21 +293,35 @@ def cmd_vehicle_mounted(args, profile: Profile) -> int:
     for row in rows:
       state = row["live_state"]
       mark = "✓" if state == "responding" else ("·" if state == "no_response" else "-")
-      route = resolver.route_for_candidate(row)
-      endpoint = f"0x{route.request_address:03X}"
-      if route.sub_addr is not None:
-        endpoint += f"/0x{route.sub_addr:02X}"
-      description = f"{mark} cat {route.category_id:<5} {route.name:<42} {endpoint:<14} "
-      description += f"set={row['install_set_id']} gen={route.generation} phase=0x{route.phase_type:02X} {state}"
+      if isinstance(row.get("transport_route"), dict):
+        route = resolver.route_for_candidate(row)
+        endpoint = f"0x{route.request_address:03X}" + (f"/0x{route.sub_addr:02X}" if route.sub_addr is not None else "")
+        category_id, name, generation, phase_type = route.category_id, route.name, route.generation, route.phase_type
+      else:
+        endpoint = "(generation route not implemented)"
+        category_id = int(row["category_id"])
+        name = str(row.get("name") or f"Category {category_id}")
+        generation = row.get("generation")
+        phase_type = int(row.get("connection_phase_type") or 0)
+      description = f"{mark} cat {category_id:<5} {name:<42} {endpoint:<34} "
+      description += f"set={row['install_set_id']} gen={generation} phase=0x{phase_type:02X} {state}"
       print(description)
-    print("Timeouts are live observations only; they are not absence claims. Non-current-P5 generations are listed without inventing a P5 probe.")
+    print(
+      "Timeouts are live observations only; they are not absence claims. Unsupported diagnostic generations remain visible "
+      + "without projecting current-P5 routing onto them."
+    )
   return 0
 
 
 def _ecu_document(ecu) -> dict[str, Any]:
   return {
-    "key": ecu.key, "name": ecu.name, "address": ecu.address,
-    "category_id": ecu.category_id, "functional_response": ecu.functional_response,
+    "key": ecu.key,
+    "name": ecu.name,
+    "address": ecu.address if ecu.route_resolved else None,
+    "sub_addr": ecu.sub_addr if ecu.route_resolved else None,
+    "route_resolved": ecu.route_resolved,
+    "category_id": ecu.category_id,
+    "functional_response": ecu.functional_response if ecu.route_resolved else None,
   }
 
 
@@ -327,16 +426,16 @@ def cmd_ecu_info(args, profile: Profile) -> int:
       "gts_category": category.get("category") if category is not None else None,
       "identity_witness": ({
         "did": profile.guard.did, "contains_ascii": profile.guard.contains_ascii,
-      } if ecu.key == profile.guard.ecu_key else None),
+      } if profile.guard is not None and ecu.key == profile.guard.ecu_key else None),
     }
     print(json.dumps(document, sort_keys=True))
     return 0
   print(f"key:       {ecu.key}")
   print(f"name:      {ecu.name}")
-  print(f"address:   {ecu.address:#05x}")
+  print(f"address:   {ecu.address:#05x}" if ecu.route_resolved else "address:   (select a Toyota vehicle to resolve route)")
   print(f"Panda bus: {profile.bus}")
   print(f"category:  {ecu.category_id if ecu.category_id is not None else '(unresolved)'}")
-  if ecu.functional_response is not None:
+  if ecu.route_resolved and ecu.functional_response is not None:
     print(f"OBD rx:    {ecu.functional_response:#05x}")
   if category is not None:
     meta = category["category"]
@@ -354,7 +453,7 @@ def cmd_ecu_info(args, profile: Profile) -> int:
     print(f"F18C:      {identity['f18c_serial']}")
     print(f"obs route: Panda bus {identity['panda_bus_at_observation']}, ELM327 param {identity['elm327_param']}")
     print(f"route note: {identity['route_note']}")
-  if ecu.key == profile.guard.ecu_key:
+  if profile.guard is not None and ecu.key == profile.guard.ecu_key:
     print(f"identity witness: DID 0x{profile.guard.did:04X} contains {profile.guard.contains_ascii}")
   return 0
 
@@ -783,14 +882,13 @@ def cmd_can_sniff(args, profile: Profile) -> int:
 
 
 # Live -----------------------------------------------------------------------
-def _scan_set(profile: Profile, refs: list[str] | None) -> list[tuple[int, str]]:
+def _scan_set(profile: Profile, refs: list[str] | None) -> list[registry.EcuSpec]:
   if not refs:
-    return [(ecu.address, ecu.name) for ecu in profile.scanned_ecus()]
+    return list(profile.scanned_ecus())
   try:
-    ecus = [profile.lookup_ecu(ref) for ref in refs]
+    return [profile.lookup_ecu(ref) for ref in refs]
   except registry.RegistryError as e:
     raise SystemExit(str(e)) from e
-  return [(ecu.address, ecu.name) for ecu in ecus]
 
 
 def cmd_dtc_scan(args, profile: Profile) -> int:
@@ -804,15 +902,12 @@ def cmd_dtc_scan(args, profile: Profile) -> int:
   )
   if args.json:
     ecus = []
-    for address, records in responding.items():
-      try:
-        ecu = profile.lookup_ecu(address)
-        ecu_key, ecu_name = ecu.key, ecu.name
-      except registry.RegistryError:
-        ecu_key, ecu_name = None, profile.name_for(address)
+    for target, records in responding.items():
+      ecu = target if isinstance(target, registry.EcuSpec) else profile.lookup_ecu(target)
+      ecu_key, ecu_name = ecu.key, ecu.name
       items = []
       for code, status in records:
-        descriptions = profile.describe_dtc(address, code)
+        descriptions = profile.describe_dtc(ecu, code)
         items.append({
           "code": code,
           "status": status,
@@ -820,7 +915,10 @@ def cmd_dtc_scan(args, profile: Profile) -> int:
           "fault_status": bool(status & profile.fault_status_mask),
           "descriptions": descriptions,
         })
-      ecus.append({"key": ecu_key, "name": ecu_name, "address": address, "dtcs": items})
+      ecus.append({
+        "key": ecu_key, "name": ecu_name, "address": ecu.address, "sub_addr": ecu.sub_addr, "category_id": ecu.category_id,
+        "dtcs": items,
+      })
     print(json.dumps({
       "profile": profile.name,
       "fault_status_mask": profile.fault_status_mask,
@@ -830,11 +928,8 @@ def cmd_dtc_scan(args, profile: Profile) -> int:
     }, sort_keys=True))
   else:
     print(f"responding ECUs: {len(responding)}; fault-status records: {len(faults)}")
-    for address, code, _ in faults:
-      try:
-        ecu = profile.lookup_ecu(address)
-      except registry.RegistryError:
-        continue
+    for target, code, _ in faults:
+      ecu = target if isinstance(target, registry.EcuSpec) else profile.lookup_ecu(target)
       for info in profile.describe_dtc(ecu, code):
         print(f"  {ecu.name} {code}: {info.get('description') or ''} — {info.get('failure') or ''}")
   return 1 if faults else 0
@@ -851,7 +946,7 @@ def cmd_dtc_clear(args, profile: Profile) -> int:
   responders, faults = dtc.scan(client_factory, scan_set, profile.fault_status_mask)
   print(f"responding ECUs: {len(responders)}; fault-status records: {len(faults)}")
 
-  dtc.clear_physical_uds(client_factory, {address: profile.name_for(address) for address in responders})
+  dtc.clear_physical_uds(client_factory, {target: (target.name if isinstance(target, registry.EcuSpec) else str(target)) for target in responders})
   positives = dtc.functional_obd_mode04(panda, profile.legislated_responders, profile.bus)
   if positives != set(profile.legislated_responders):
     print("warning: not all live-validated legislated responders acknowledged Mode 04")
@@ -957,7 +1052,7 @@ def cmd_did_read(args, profile: Profile) -> int:
     raise SystemExit(str(e)) from e
   transport = _live_transport()
   panda = transport.connect(profile)
-  client = transport.uds_client_factory(panda, profile)(ecu.address)
+  client = transport.uds_client_factory(panda, profile)(ecu.address, ecu.sub_addr)
   values = []
   for did, signals in dids:
     data = client.read_data_by_identifier(did)
@@ -1045,7 +1140,7 @@ def cmd_did_watch(args, profile: Profile) -> int:
 
   transport = _live_transport()
   panda = transport.connect(profile)
-  client = transport.uds_client_factory(panda, profile)(ecu.address)
+  client = transport.uds_client_factory(panda, profile)(ecu.address, ecu.sub_addr)
   started = time.monotonic()
   sample = 0
   try:
@@ -1238,7 +1333,7 @@ def cmd_uds_raw(args, profile: Profile) -> int:
   except registry.RegistryError as e:
     raise SystemExit(str(e)) from e
   ecu = _raw_uds_target(profile, args.ecu)
-  raw_sub_addr = None if args.sub_address is None else _cli_int(args.sub_address, "sub-address")
+  raw_sub_addr = ecu.sub_addr if args.sub_address is None else _cli_int(args.sub_address, "sub-address")
   if raw_sub_addr is not None and not 0 <= raw_sub_addr <= 0xFF:
     raise SystemExit("sub-address must be one byte")
 
@@ -1263,7 +1358,8 @@ def _ffd_connect(profile: Profile):
   live = _live_transport()
   panda = live.connect(profile)
   factory = live.uds_client_factory(panda, profile)
-  return live, factory(_ffd_target(profile).address)
+  target = _ffd_target(profile)
+  return live, factory(target.address, target.sub_addr)
 
 
 def _ffd_int(value: str, what: str, maximum: int = 0xFFFF) -> int:
@@ -1510,9 +1606,15 @@ def cmd_functional_obd(args, profile: Profile) -> int:
 def build_parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(prog="toyota", description="Toyota/GTS-derived diagnostics on a Comma Panda")
   parser.add_argument(
-    "--registry", "--profile", dest="registry", default=str(registry.DEFAULT_REGISTRY), metavar="PROFILE_OR_FILE",
-    help="derived profile name or registry JSON (default: bundled Camry F33 profile)",
+    "--registry", "--profile", dest="registry", default=str(registry.DEFAULT_REGISTRY), metavar="BUNDLE_OR_FILE",
+    help="Toyota derived diagnostics bundle/legacy registry (default: bundled universal current-GTS Toyota database)",
   )
+  parser.add_argument("--region", default="NA", help="Toyota GTS region for the universal bundle (default: NA)")
+  parser.add_argument(
+    "--vehicle", dest="vehicle_select",
+    help="Toyota DB vehicle type or OEM name; live vehicle-scoped commands auto-resolve from VIN when omitted",
+  )
+  parser.add_argument("--bus", dest="panda_bus", type=int, help="Panda logical bus for diagnostics (default: bundle setting)")
   commands = parser.add_subparsers(dest="command", required=True)
 
   p = commands.add_parser("search", help="search ECUs, Data List/FFD items, DTCs, functions, and Active Tests")
@@ -1801,7 +1903,7 @@ def _normalize_argv(argv: list[str]) -> list[str]:
   # options may precede the command, so normalize only the command tail.
   prefix: list[str] = []
   index = 0
-  while index + 1 < len(argv) and argv[index] in {"--registry", "--profile"}:
+  while index + 1 < len(argv) and argv[index] in {"--registry", "--profile", "--region", "--vehicle", "--bus"}:
     prefix.extend(argv[index:index + 2])
     index += 2
   tail = argv[index:]
@@ -1840,7 +1942,8 @@ def _normalize_argv(argv: list[str]) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
   normalized = _normalize_argv(list(sys.argv[1:] if argv is None else argv))
   args = build_parser().parse_args(normalized)
-  return int(args.func(args, _profile(args)))
+  profile = _resolve_live_vehicle_context(args, _profile(args))
+  return int(args.func(args, profile))
 
 
 if __name__ == "__main__":

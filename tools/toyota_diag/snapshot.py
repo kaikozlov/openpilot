@@ -26,24 +26,26 @@ def _ascii(data: bytes | None) -> str | None:
 def build(profile: Profile, client_factory, transport_state: dict[str, Any] | None = None, *, show_all_dtcs: bool = False) -> dict[str, Any]:
   responding, faults = dtc.scan(
     client_factory,
-    [(ecu.address, ecu.name) for ecu in profile.scanned_ecus()],
+    profile.scanned_ecus(),
     profile.fault_status_mask,
     show_all=show_all_dtcs,
     echo=lambda _: None,
   )
   ecus = []
-  for address, records in responding.items():
-    try:
-      spec = profile.lookup_ecu(address)
-      key = spec.key
-      name = spec.name
-      category_id = spec.category_id
-    except Exception:
-      spec = None
-      key = None
-      name = profile.name_for(address)
-      category_id = None
-    client = client_factory(address)
+  for target, records in responding.items():
+    if hasattr(target, "address"):
+      spec = target
+    else:
+      try:
+        spec = profile.lookup_ecu(target)
+      except Exception:
+        spec = None
+    address = spec.address if spec is not None else int(target)
+    sub_addr = spec.sub_addr if spec is not None else None
+    key = spec.key if spec is not None else None
+    name = spec.name if spec is not None else profile.name_for(address)
+    category_id = spec.category_id if spec is not None else None
+    client = client_factory(address, sub_addr)
     identity = {}
     for did in IDENTITY_DIDS:
       raw = _safe_read(client, did)
@@ -62,6 +64,7 @@ def build(profile: Profile, client_factory, transport_state: dict[str, Any] | No
       "key": key,
       "name": name,
       "address": address,
+      "sub_addr": sub_addr,
       "category_id": category_id,
       "identity": identity,
       "dtcs": dtcs,
@@ -86,7 +89,7 @@ def render(document: dict[str, Any]) -> str:
   if transport:
     lines.append(f"Transport: {transport.get('mode', '?')} ({'ready' if transport.get('ready') else 'not ready'})")
   lines.append(f"Profile:   {document['profile']}  Panda bus={document['panda_bus']}")
-  lines.append(f"ECUs:      {document['responding_ecus']} responding on the live-validated DTC sweep")
+  lines.append(f"ECUs:      {document['responding_ecus']} responding Toyota logical ECU endpoint(s)")
   candidates = document.get("toyota_mount_candidates") or []
   if candidates:
     routed = sum(isinstance(row.get("transport_route"), dict) for row in candidates)
@@ -99,7 +102,8 @@ def render(document: dict[str, Any]) -> str:
     f181 = (ident.get("0xF181") or {}).get("ascii")
     suffix = f"  {f181}" if f181 else ""
     key = row.get("key") or "?"
-    lines.append(f"{mark} {row['name']:<30} {row['address']:#05x}  {key:<18}{suffix}")
+    endpoint = f"{row['address']:#05x}" + (f"/{row['sub_addr']:#04x}" if row.get("sub_addr") is not None else "")
+    lines.append(f"{mark} {row['name']:<30} {endpoint:<12}  {key:<18}{suffix}")
     for fault in row["dtcs"]:
       if not fault["fault_status"]:
         continue

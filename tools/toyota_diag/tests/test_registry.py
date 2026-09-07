@@ -9,7 +9,7 @@ from tools.toyota_diag.tests import support
 class TestRegistry(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
-    cls.profile = registry.load_registry()
+    cls.profile = registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)
 
   def test_exact_camry_profile_and_guard(self):
     self.assertEqual(self.profile.document["schema"], "toyota-diagnostics-registry-v6")
@@ -87,6 +87,59 @@ class TestRegistry(unittest.TestCase):
 
   def test_dtc_status_names_match_opendbc(self):
     self.assertEqual(registry.decode_status_bits(0xAF), get_dtc_status_names(0xAF))
+
+
+class TestUniversalToyotaDatabase(unittest.TestCase):
+  @classmethod
+  def setUpClass(cls):
+    cls.database = registry.ToyotaDatabase.load()
+
+  def test_bundle_covers_all_current_regions_and_keeps_offline_categories_unrouted(self):
+    self.assertEqual(self.database.index["schema"], registry.BUNDLE_SCHEMA)
+    self.assertEqual(set(self.database.index["regions"]), {"NA", "EU", "JP"})
+    self.assertEqual(self.database.index["p5_session_generation_low5"], [20, 21])
+    expected = {"NA": (2864, 135, 133), "EU": (6057, 161, 150), "JP": (1868, 143, 143)}
+    for region, (vehicle_count, p5_catalog_count, route_count) in expected.items():
+      counts = self.database.region_index(region)["counts"]
+      self.assertEqual(counts["vehicle_count"], vehicle_count)
+      self.assertEqual(counts["p5_plugin_category_count"], 179)
+      self.assertEqual(counts["supported_p5_category_count"], p5_catalog_count)
+      self.assertEqual(counts["route_count"], route_count)
+      self.assertEqual(counts["route_count"], len(self.database.region_index(region)["routes"]))
+    offline = self.database.profile("NA")
+    self.assertEqual(len(offline.ecus), 135)
+    self.assertFalse(offline.lookup_ecu("frc").route_resolved)
+    self.assertIsNone(offline.vehicle_resolution)
+
+  def test_camry_is_derived_from_toyota_vehicle_install_and_route_tables(self):
+    profile = self.database.profile("NA", 12704)
+    self.assertEqual((profile.vehicle_type, profile.vehicle), (12704, "Toyota Camry HV"))
+    self.assertEqual(profile.vehicle_resolution["install_set_ids"], [8119, 8120, 8121, 27706])
+    self.assertEqual(len(profile.mount_candidates()), 34)
+    self.assertEqual(len(profile.ecus), 33)  # one installed category is outside the implemented current-P5 family
+    self.assertEqual(profile.lookup_ecu("frc").endpoint, (0x792, None))
+    engine = profile.lookup_ecu("engine")
+    self.assertEqual(engine.functional_response, 0x7E8)
+    engine_route = next(row["transport_route"] for row in profile.mount_candidates() if row["category_id"] == 372)
+    self.assertEqual(engine_route["legislated_request_address"], 0x7E0)
+    self.assertNotIn("legislated_response_address", engine_route)
+    self.assertEqual(profile.lookup_ecu("Tire Pressure Monitor").endpoint, (0x750, 0x2A))
+    self.assertEqual(profile.lookup_ecu("Combination Meter").endpoint, (0x7C0, None))
+    self.assertEqual(profile.resolve_did("frc", "LTA Control Condition")[0], 0x1601)
+
+  def test_non_camry_vehicle_uses_the_same_database_pipeline(self):
+    profile = self.database.profile("NA", 12757)
+    self.assertEqual(profile.vehicle, "Toyota 4Runner")
+    self.assertEqual(len(profile.mount_candidates()), 35)
+    self.assertEqual(len(profile.ecus), 35)
+    self.assertTrue(all(ecu.route_resolved for ecu in profile.ecus))
+    self.assertTrue(all(profile.category(ecu) is not None for ecu in profile.ecus))
+
+  def test_vin_decision_resolves_camry_without_a_camry_profile(self):
+    for vin in ("XXXXAXXKXSX123456", "XXXXBXXKXSX123456"):
+      matches = self.database.resolve_vin("NA", vin, rx_address=0x7E8)
+      self.assertEqual([(row["vehicle_type"], row["name"]) for row in matches], [(12704, "Camry HV")])
+    self.assertEqual(self.database.resolve_vin("NA", "XXXXCXXKXSX123456", rx_address=0x7E8), [])
 
 
 if __name__ == "__main__":

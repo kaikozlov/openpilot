@@ -1,10 +1,9 @@
 """Toyota GTS-derived vehicle, mounted-ECU routing, and current-P5 capability resolution.
 
-Registry v6 carries the current GTS+ resolver recovered in `ghidra_rh850_analysis`:
-VIN decision rows, install-set/mount candidates, Toyota class-0x10D category routes,
-and the GetSupportP5 DID bitmap contract.  This module follows those Toyota resolver
-stages directly; maintained profile addresses are observations for older CLI surfaces,
-not admission policy for vehicle/category/capability resolution.
+The universal bundle carries Toyota regional VIN decisions, install sets, logical ECU
+categories, class-0x10D transport routes, and the GetSupportP5 capability contract.
+This module follows those recovered Toyota stages directly. Legacy single-vehicle
+registries remain supported as compatibility fixtures, not as routing authority.
 """
 from __future__ import annotations
 
@@ -167,11 +166,12 @@ def route_for_candidate(candidate: dict[str, Any]) -> ToyotaRoute:
 
 
 def mount_routes(profile: Profile) -> tuple[tuple[dict[str, Any], ToyotaRoute], ...]:
+  """Return mount candidates whose generation has an implemented exact Toyota route."""
   _vehicle_resolution(profile)
   rows = profile.mount_candidates()
   if not rows:
     raise ResolverError("vehicle_resolution.mount.candidates is empty")
-  return tuple((candidate, route_for_candidate(candidate)) for candidate in rows)
+  return tuple((candidate, route_for_candidate(candidate)) for candidate in rows if isinstance(candidate.get("transport_route"), dict))
 
 
 def lookup_mount_candidate(profile: Profile, ref: str | int) -> tuple[dict[str, Any], ToyotaRoute]:
@@ -323,19 +323,20 @@ def _response_probe(client: Any, did: int) -> tuple[str, bytes | None, str | Non
 
 
 def probe_mount_candidates(profile: Profile, client_factory) -> list[dict[str, Any]]:
-  """Apply Toyota's class-0x10D routes to the current-P5 mount candidates.
-
-  Each P5 candidate is queried through its Toyota `(request_address, sub_addr)` route.
-  A response is a live transport observation; a timeout is not treated as proof that
-  the logical category is absent. Non-P5 candidates remain in the Toyota install set
-  with no invented P5 probe.
-  """
+  """Apply Toyota's implemented route/capability resolver while preserving unsupported install metadata."""
+  _vehicle_resolution(profile)
   result: list[dict[str, Any]] = []
   endpoint_cache: dict[tuple[int, int | None], dict[str, Any]] = {}
-  for candidate, route in mount_routes(profile):
+  for candidate in profile.mount_candidates():
     row = dict(candidate)
+    if not isinstance(candidate.get("transport_route"), dict):
+      row.update(live_state="unsupported_generation", transport_responded=None,
+                 support_root=None, supported_group_count=None)
+      result.append(row)
+      continue
+    route = route_for_candidate(candidate)
     if not uses_current_p5_path(profile, route):
-      row.update(live_state="not_current_p5", transport_responded=None,
+      row.update(live_state="unsupported_generation", transport_responded=None,
                  support_root=None, supported_group_count=None)
       result.append(row)
       continue

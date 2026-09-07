@@ -57,7 +57,7 @@ def session_calls(scripted):
 
 class TestPlanResolution(unittest.TestCase):
   def test_bundled_v6_runtime_uses_toyota_generation_gate(self):
-    profile = registry.load_registry()
+    profile = registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)
 
     frc_row = profile.lookup_active_test("frc", "0xA429")
     frc_plan = resolve_plan(profile.lookup_ecu("frc"), frc_row)
@@ -82,7 +82,7 @@ class TestPlanResolution(unittest.TestCase):
     self.assertIn("execution is 'plan_only'", " ".join(plan.refusals))
 
   def test_bundled_v6_runtime_inventory_is_fail_closed(self):
-    profile = registry.load_registry()
+    profile = registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)
     grades = {"executable": 0, "blocked_geometry": 0, "plan_only": 0, "unresolved_static_plan": 0}
     for ecu in profile.ecus:
       for row in profile.active_tests(ecu):

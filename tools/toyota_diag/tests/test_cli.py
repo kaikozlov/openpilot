@@ -8,10 +8,13 @@ from tools.toyota_diag import active_test, cli, registry, resolver
 from tools.toyota_diag.tests import support
 
 
-def run_cli(argv):
+def run_cli(argv, *, use_default_registry=False):
+  args = list(argv)
+  if not use_default_registry and "--registry" not in args and "--profile" not in args:
+    args = ["--registry", str(registry.LEGACY_CAMRY_REGISTRY), *args]
   output = StringIO()
   with redirect_stdout(output):
-    rc = cli.main(argv)
+    rc = cli.main(args)
   return rc, output.getvalue()
 
 
@@ -466,7 +469,7 @@ class TestLiveCli(unittest.TestCase):
   def test_vehicle_mounted_uses_all_toyota_routes_without_local_endpoint_gate(self):
     import json
     scripted = support.ScriptedUds()
-    profile = registry.load_registry()
+    profile = registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)
     for _, route in resolver.mount_routes(profile):
       if not resolver.uses_current_p5_path(profile, route):
         continue
@@ -477,7 +480,7 @@ class TestLiveCli(unittest.TestCase):
       rc, output = run_cli(["vehicle", "mounted", "--json"])
     self.assertEqual(rc, 0, output)
     document = json.loads(output)
-    self.assertEqual((document["candidate_count"], document["responding"], document["no_response"], document["not_current_p5"]),
+    self.assertEqual((document["candidate_count"], document["responding"], document["no_response"], document["unsupported_generation"]),
                      (34, 33, 0, 1))
     self.assertEqual(len({row["category_id"] for row in document["candidates"]}), 34)
     tpm = next(row for row in document["candidates"] if row["category_id"] == 452)

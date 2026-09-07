@@ -32,7 +32,7 @@ class TestLifecycleParsing(unittest.TestCase):
     self.assertIsNone(parse_lifecycle(profile))
 
   def test_bundled_v6_lifecycle_and_toyota_generation_gate(self):
-    profile = registry.load_registry()
+    profile = registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)
     lifecycle = parse_lifecycle(profile)
     assert lifecycle is not None
     self.assertEqual(lifecycle.enter_sequence, (bytes.fromhex("1001"), bytes.fromhex("1003")))
@@ -91,7 +91,7 @@ class TestLifecycleParsing(unittest.TestCase):
     row = {"commset": {"uds_timeout_s": 0.8}}
     self.assertEqual(registry.commset_timeouts(profile, row).uds_timeout, 0.8)
     self.assertEqual(registry.commset_timeouts(profile, row).response_pending_timeout, 3.0)
-    self.assertEqual(registry.commset_timeouts(registry.load_registry()),
+    self.assertEqual(registry.commset_timeouts(registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)),
                      registry.CommTimeouts(uds_timeout=0.35, response_pending_timeout=2.0))
     with self.assertRaises(registry.RegistryError):
       registry.commset_timeouts(profile, {"commset": {"uds_timeout_s": 0}})
@@ -219,7 +219,7 @@ class TestDiagnosticSession(unittest.TestCase):
     self.assertEqual(sess.timeouts, registry.CommTimeouts(uds_timeout=0.9, response_pending_timeout=3.0))
 
   def test_transport_factory_honors_timeouts(self):
-    profile = registry.load_registry()
+    profile = registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)
     panda = support.FakePanda()
     client = transport.uds_client_factory(
       panda, profile, registry.CommTimeouts(uds_timeout=0.9, response_pending_timeout=4.0))(0x7A1)

@@ -31,7 +31,7 @@ def executable_direct_utility(**overrides):
 class TestBundledRegistry(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
-    cls.profile = registry.load_registry()
+    cls.profile = registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)
 
   def test_bundled_v4_exposes_generic_families_but_no_concrete_utilities(self):
     self.assertIsNotNone(self.profile.session_control)

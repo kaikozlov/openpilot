@@ -6,7 +6,7 @@ from tools.toyota_diag import decode, registry
 class TestDecode(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
-    cls.profile = registry.load_registry()
+    cls.profile = registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)
 
   def test_cross_byte_msb0_extraction(self):
     self.assertEqual(decode.extract_msb0(bytes.fromhex("a53c"), 4, 11), 0x53)

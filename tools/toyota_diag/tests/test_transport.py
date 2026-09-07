@@ -61,7 +61,7 @@ class _FakeMessaging:
 class TestTransport(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
-    cls.profile = registry.load_registry()
+    cls.profile = registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)
 
   @staticmethod
   def state(*, safety=CarParams.SafetyModel.elm327, param=1, controls=False):
