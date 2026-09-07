@@ -21,10 +21,17 @@ def run_cli(argv, *, use_default_registry=False):
 class TestOfflineCli(unittest.TestCase):
   def test_transport_status_is_machine_readable(self):
     state = {"pandad_running": True, "mode": "managed-sendcan", "ready": True, "detail": "ready"}
-    with mock.patch("tools.toyota_diag.transport.status", return_value=state):
+    with mock.patch("tools.toyota_diag.transport.status", return_value=state) as status:
       rc, output = run_cli(["transport", "status", "--json"])
     self.assertEqual(rc, 0)
     self.assertEqual(__import__("json").loads(output), state)
+    status.assert_called_once_with(mock.ANY, obd_multiplexing=False)
+
+    with mock.patch("tools.toyota_diag.transport.status", return_value=state) as status:
+      rc, output = run_cli(["--obd-multiplexing", "transport", "status", "--json"])
+    self.assertEqual(rc, 0)
+    self.assertEqual(__import__("json").loads(output), state)
+    status.assert_called_once_with(mock.ANY, obd_multiplexing=True)
 
   def test_tss3_ffd_catalog_and_search_are_first_class(self):
     import json
@@ -511,8 +518,28 @@ class TestLiveCli(unittest.TestCase):
     document = json.loads(output)
     self.assertEqual(document["category"]["name"], "Tire Pressure Monitor")
     self.assertEqual((document["route"]["request_address"], document["route"]["sub_addr"]), (0x750, 0x2A))
-    self.assertEqual([row["did"] for row in document["results"]], [0x1001, 0x1003])
+    self.assertEqual([row["did"] for row in document["results"]], [0x1000, 0x1001, 0x1003])
     self.assertIn(((0x750, 0x2A), "read_did", 0x0101), scripted.calls)
+
+  def test_p6_rid_support_uses_physical_29bit_route(self):
+    import json
+    scripted = support.ScriptedUds()
+    endpoint = 0x18DA00F1
+    root = bytearray(32)
+    root[0] = 0x20  # D102
+    scripted.routine[(endpoint, 1, 0xD100)] = bytes(root)
+    scripted.routine[(endpoint, 1, 0xD102)] = bytes.fromhex("40")  # RID 0x0201
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["--vehicle", "12165", "rid", "support", "6000", "0x0201", "--json"], use_default_registry=True)
+    self.assertEqual(rc, 0, output)
+    document = json.loads(output)
+    self.assertEqual(document["route"]["request_address"], endpoint)
+    self.assertEqual(document["route"]["request_address_field"], 0)
+    self.assertEqual(document["support_root_rid"], 0xD100)
+    self.assertEqual(document["results"], [{"names": [], "rid": 0x0201, "supported": True}])
+    self.assertIn((endpoint, "routine", 1, 0xD100, b""), scripted.calls)
+    self.assertIn((endpoint, "routine", 1, 0xD102, b""), scripted.calls)
 
   def test_did_read_fails_closed_when_payload_is_short(self):
     scripted = support.ScriptedUds()
@@ -571,6 +598,15 @@ class TestLiveCli(unittest.TestCase):
     self.assertEqual(rc, 0, output)
     self.assertIn("request:  221033", output)
     self.assertIn("response: 621033", output)
+
+  def test_raw_read_only_accepts_29bit_normal_fixed_address(self):
+    scripted = support.ScriptedUds()
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted, raw_response=bytes.fromhex("62a100" + "00" * 32)):
+      rc, output = run_cli(["uds", "raw", "0x18DA00F1", "0x22", "A100"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("request:  22a100", output)
+    self.assertIn("response: 62a100", output)
 
   def test_raw_mutation_accepts_explicit_numeric_address_with_force(self):
     scripted = support.ScriptedUds()

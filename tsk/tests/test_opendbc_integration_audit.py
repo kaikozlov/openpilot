@@ -109,7 +109,8 @@ class ToyotaFlags(IntFlag):
 class ToyotaTSS3PlatformConfig(PlatformConfig):
   dbc_dict: dict = field(default_factory=lambda: {Bus.pt: 'toyota_tss3_pt_generated'})
 class CAR(Platforms):
-  TOYOTA_CAMRY_TSS3 = ToyotaTSS3PlatformConfig([], CarSpecs(mass=1, wheelbase=1, steerRatio=1, tireStiffnessFactor=1))
+  TOYOTA_CAMRY_TSS3 = ToyotaTSS3PlatformConfig(
+    [], CarSpecs(mass=1, wheelbase=1, steerRatio=1, tireStiffnessFactor=1), flags=ToyotaFlags.SECOC)
 EPS_SCALE = defaultdict(lambda: 73, {})
 TSS3_EXACT_FW_VERSIONS = {
   CAR.TOYOTA_CAMRY_TSS3: {
@@ -184,7 +185,8 @@ class ToyotaFlags(IntFlag):
 class ToyotaTSS3PlatformConfig(PlatformConfig):
   dbc_dict: dict = field(default_factory=lambda: {Bus.pt: 'toyota_tss3_pt_generated'})
 class CAR(Platforms):
-  TOYOTA_CAMRY_TSS3 = ToyotaTSS3PlatformConfig([], CarSpecs(mass=1, wheelbase=1, steerRatio=1, tireStiffnessFactor=1))
+  TOYOTA_CAMRY_TSS3 = ToyotaTSS3PlatformConfig(
+    [], CarSpecs(mass=1, wheelbase=1, steerRatio=1, tireStiffnessFactor=1), flags=ToyotaFlags.SECOC)
 EPS_SCALE = defaultdict(lambda: 73, {})
 """.lstrip(), encoding="utf-8")
       (toyota / "fingerprints.py").write_text("""

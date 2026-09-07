@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from opendbc.car.uds import MessageTimeoutError, NegativeResponseError
+from opendbc.car.uds import MessageTimeoutError, NegativeResponseError, ROUTINE_CONTROL_TYPE
 from opendbc.car.vin import VIN_UNKNOWN, get_vin, is_valid_vin
 
 from tools.toyota_diag import registry
@@ -31,9 +31,12 @@ class ToyotaRoute:
   generation: int
   phase_type: int
   request_address: int
+  request_address_field: int
   address_extension: int
   protocol_info_id: int
   functional_address: int
+  transport_kind: str
+  controller: str | None
 
   @property
   def sub_addr(self) -> int | None:
@@ -45,6 +48,10 @@ class ToyotaRoute:
   def endpoint(self) -> tuple[int, int | None]:
     return self.request_address, self.sub_addr
 
+  @property
+  def uds_transport_supported(self) -> bool:
+    return self.transport_kind in registry.UDS_TRANSPORT_KINDS
+
   def as_dict(self) -> dict[str, Any]:
     return {
       "category_id": self.category_id,
@@ -52,7 +59,10 @@ class ToyotaRoute:
       "generation": self.generation,
       "phase_type": self.phase_type,
       "request_address": self.request_address,
+      "request_address_field": self.request_address_field,
       "address_extension": self.address_extension,
+      "transport_kind": self.transport_kind,
+      "controller": self.controller,
       "sub_addr": self.sub_addr,
       "protocol_info_id": self.protocol_info_id,
       "functional_address": self.functional_address,
@@ -145,10 +155,14 @@ def route_for_candidate(candidate: dict[str, Any]) -> ToyotaRoute:
     generation = int(candidate["generation"])
     phase_type = int(candidate["connection_phase_type"])
     route_phase = int(raw["phase_type"])
-    request_address = int(raw["request_address"])
+    request_address_field = int(raw["request_address"])
+    physical_request = raw.get("physical_request_address")
+    request_address = int(physical_request) if physical_request is not None else request_address_field
     extension = int(raw["address_extension"])
     protocol_info_id = int(raw["protocol_info_id"])
     functional_address = int(raw["functional_address"])
+    transport_kind = str(raw.get("transport_kind") or "legacy-unclassified")
+    controller = str(raw["controller"]) if raw.get("controller") else None
   except (KeyError, TypeError, ValueError) as e:
     raise ResolverError(f"malformed Toyota transport route: {candidate!r}") from e
   if phase_type != route_phase:
@@ -160,8 +174,9 @@ def route_for_candidate(candidate: dict[str, Any]) -> ToyotaRoute:
     raise ResolverError(f"category {category_id} Toyota address extension is not one byte: {extension}")
   return ToyotaRoute(
     category_id=category_id, name=name, generation=generation, phase_type=phase_type,
-    request_address=request_address, address_extension=extension,
+    request_address=request_address, request_address_field=request_address_field, address_extension=extension,
     protocol_info_id=protocol_info_id, functional_address=functional_address,
+    transport_kind=transport_kind, controller=controller,
   )
 
 
@@ -249,6 +264,25 @@ def support_family(profile: Profile, category_id: int) -> str | None:
   return None
 
 
+def support_mode(profile: Profile, category_id: int) -> str | None:
+  """Toyota family-local support-list mode, distinct from the shared plugin family."""
+  row = category_metadata(profile, category_id)
+  value = row.get("support_mode") if isinstance(row, dict) else None
+  if value:
+    return str(value).casefold()
+  family = support_family(profile, category_id)
+  if profile.database is None and family == "p5":
+    # Legacy Camry v6 predates the family-local mode export. Its retained generation-20
+    # Toyota categories were built through the ordinary C8 path; do not generalize this
+    # compatibility inference to universal bundles or other generation modes.
+    candidate = next((item for item in profile.mount_candidates() if int(item.get("category_id", -1)) == category_id), None)
+    if isinstance(candidate, dict):
+      generation = int(candidate.get("generation", -1))
+      if (generation & 0x1F) == 0x14 and (generation & 0xE0) == 0:
+        return "p5-standard"
+  return family
+
+
 def support_contract(profile: Profile, family: str) -> dict[str, Any] | None:
   contracts = None
   if profile.vehicle_resolution is not None:
@@ -261,7 +295,11 @@ def support_contract(profile: Profile, family: str) -> dict[str, Any] | None:
 
 
 def analyze_support_bitmap(base: int, bitmap: bytes, shift: int) -> list[int]:
-  """Express CCmdSupportDataIdList::AnalyzeFrameData exactly (MSB-first, max 32 bytes)."""
+  """Express ordinary-P5 CCmdSupportDataIdList::AnalyzeFrameData exactly.
+
+  Root calls use shift=8 and retain the resulting xx00 IDs. Member calls use
+  shift=0, add one, and skip byte31/bit7 because it aliases the next xx00 root.
+  """
   out: list[int] = []
   for byte_index, value in enumerate(bitmap[:32]):
     for bit_index in range(8):
@@ -270,10 +308,19 @@ def analyze_support_bitmap(base: int, bitmap: bytes, shift: int) -> list[int]:
       if shift:
         out.append((base + ((byte_index * 8 + bit_index) << shift)) & 0xFFFF)
       else:
-        # byte31 bit7 would be xx100, i.e. the following group's xx00 marker.
         if byte_index == 31 and bit_index == 7:
           continue
         out.append((base + 1 + byte_index * 8 + bit_index) & 0xFFFF)
+  return out
+
+
+def analyze_p6_support_bitmap(base: int, bitmap: bytes) -> list[int]:
+  """Express CCmdSupportDataIdListP6::AnalyzeFrameData for the shift-0 calls used by DID/RID support."""
+  out: list[int] = []
+  for byte_index, value in enumerate(bitmap[:32]):
+    for bit_index in range(8):
+      if value & (0x80 >> bit_index):
+        out.append((base + byte_index * 8 + bit_index) & 0xFFFF)
   return out
 
 
@@ -286,9 +333,10 @@ def _bitmap_has(bitmap: bytes, bit_index: int) -> bool:
 
 @dataclass
 class P5DidSupportResolver:
-  """Lazy current-P5 DID support resolver using Toyota's C8 two-level bitmap."""
+  """Lazy ordinary-Toyota P5 DID support resolver using the C8 two-level bitmap."""
   client: Any
   root_did: int = P5_SUPPORT_ROOT_DID
+  excluded_groups: frozenset[int] = frozenset({0xF300, 0xFD00})
   _root: bytes | None = None
   _groups: dict[int, bytes] | None = None
 
@@ -296,7 +344,6 @@ class P5DidSupportResolver:
   def from_profile(cls, profile: Profile, client: Any) -> P5DidSupportResolver:
     raw = support_contract(profile, "p5")
     if raw is None:
-      # Legacy v5/v6 registry compatibility.
       raw = _vehicle_resolution(profile).get("p5_support")
     did_root = raw.get("did_root") if isinstance(raw, dict) else None
     if not isinstance(did_root, dict):
@@ -306,7 +353,12 @@ class P5DidSupportResolver:
       raise ResolverError(f"P5 DID support root request is not 22xxxx: {request.hex()}")
     if str(did_root.get("positive_sid")).lower() not in {"0x62", "62"}:
       raise ResolverError("P5 DID support root positive SID is not 0x62")
-    return cls(client=client, root_did=int.from_bytes(request[1:3], "big"))
+    standard = raw.get("standard_did") if isinstance(raw, dict) else None
+    excluded = {0xF300, 0xFD00}
+    if isinstance(standard, dict) and isinstance(standard.get("selector_excluded"), list):
+      excluded = {registry.parse_int(value, "support_contracts.p5.standard_did.selector_excluded")
+                  for value in standard["selector_excluded"]}
+    return cls(client=client, root_did=int.from_bytes(request[1:3], "big"), excluded_groups=frozenset(excluded))
 
   @property
   def group_cache(self) -> dict[int, bytes]:
@@ -325,7 +377,7 @@ class P5DidSupportResolver:
   def group_bitmap(self, group: int) -> bytes:
     if group & 0xFF or not 0 <= group <= 0xFF00:
       raise ResolverError(f"P5 DID support group must be xx00, got 0x{group:04X}")
-    if not _bitmap_has(self.root_bitmap(), group >> 8):
+    if not _bitmap_has(self.root_bitmap(), group >> 8) or group in self.excluded_groups:
       return b""
     if group not in self.group_cache:
       self.group_cache[group] = bytes(self.client.read_data_by_identifier(group))
@@ -334,19 +386,194 @@ class P5DidSupportResolver:
   def supports(self, did: int) -> bool:
     if not 0 <= did <= 0xFFFF:
       raise ResolverError(f"DID out of range: {did:#x}")
-    low = did & 0xFF
-    if low == 0:
-      return False  # xx00 is the group query marker, not an enumerated member DID.
     group = did & 0xFF00
     if not _bitmap_has(self.root_bitmap(), group >> 8):
+      return False
+    low = did & 0xFF
+    if low == 0:
+      return True  # Toyota retains root xx00 IDs in the enabled-ID list.
+    if group in self.excluded_groups:
       return False
     return _bitmap_has(self.group_bitmap(group), low - 1)
 
   def supported_dids(self) -> tuple[int, ...]:
     out: list[int] = []
     for group in self.supported_groups():
-      out.extend(analyze_support_bitmap(group, self.group_bitmap(group), 0))
-    return tuple(out)
+      out.append(group)
+      if group not in self.excluded_groups:
+        out.extend(analyze_support_bitmap(group, self.group_bitmap(group), 0))
+    return tuple(dict.fromkeys(out))
+
+
+@dataclass
+class P6DidSupportResolver:
+  """Lazy P6 DID support resolver recovered from CCmdSupportDataIdListP6."""
+  client: Any
+  root_did: int = 0xA100
+  excluded_selectors: frozenset[int] = frozenset({0xA1FD, 0xA1FE})
+  _root: bytes | None = None
+  _selectors: dict[int, bytes] | None = None
+
+  @classmethod
+  def from_profile(cls, profile: Profile, client: Any) -> P6DidSupportResolver:
+    raw = support_contract(profile, "p6")
+    did_root = raw.get("did_root") if isinstance(raw, dict) else None
+    if not isinstance(did_root, dict):
+      raise ResolverError("support_contracts.p6.did_root is missing")
+    request = registry.parse_bytes(did_root.get("request"), "support_contracts.p6.did_root.request")
+    if len(request) != 3 or request[0] != READ_DATA_BY_IDENTIFIER:
+      raise ResolverError(f"P6 DID support root request is not 22xxxx: {request.hex()}")
+    if str(did_root.get("positive_sid")).lower() not in {"0x62", "62"}:
+      raise ResolverError("P6 DID support root positive SID is not 0x62")
+    root = registry.parse_int(did_root.get("root_base", int.from_bytes(request[1:], "big")),
+                              "support_contracts.p6.did_root.root_base")
+    excluded = {registry.parse_int(value, "support_contracts.p6.did_root.selector_excluded")
+                for value in did_root.get("selector_excluded", [])}
+    return cls(client=client, root_did=root, excluded_selectors=frozenset(excluded))
+
+  @property
+  def selector_cache(self) -> dict[int, bytes]:
+    if self._selectors is None:
+      self._selectors = {}
+    return self._selectors
+
+  def root_bitmap(self) -> bytes:
+    if self._root is None:
+      self._root = bytes(self.client.read_data_by_identifier(self.root_did))
+    return self._root
+
+  def supported_groups(self) -> tuple[int, ...]:
+    # Retain the CLI/API name for symmetry with P5; these are P6 A1nn selectors.
+    return tuple(analyze_p6_support_bitmap(self.root_did, self.root_bitmap()))
+
+  def selector_bitmap(self, selector: int) -> bytes:
+    if not self.root_did <= selector <= self.root_did + 0xFF:
+      raise ResolverError(f"P6 DID selector must be A1nn, got 0x{selector:04X}")
+    if not _bitmap_has(self.root_bitmap(), selector - self.root_did) or selector in self.excluded_selectors:
+      return b""
+    if selector not in self.selector_cache:
+      self.selector_cache[selector] = bytes(self.client.read_data_by_identifier(selector))
+    return self.selector_cache[selector]
+
+  def supports(self, did: int) -> bool:
+    if not 0 <= did <= 0xFFFF:
+      raise ResolverError(f"DID out of range: {did:#x}")
+    if self.root_did <= did <= self.root_did + 0xFF and _bitmap_has(self.root_bitmap(), did - self.root_did):
+      return True
+    selector = self.root_did + (did >> 8)
+    if selector > self.root_did + 0xFF or not _bitmap_has(self.root_bitmap(), selector - self.root_did):
+      return False
+    if selector in self.excluded_selectors:
+      return False
+    return _bitmap_has(self.selector_bitmap(selector), did & 0xFF)
+
+  def supported_dids(self) -> tuple[int, ...]:
+    out: list[int] = list(self.supported_groups())
+    for selector in self.supported_groups():
+      if selector in self.excluded_selectors:
+        continue
+      base = (selector & 0xFF) << 8
+      out.extend(analyze_p6_support_bitmap(base, self.selector_bitmap(selector)))
+    return tuple(dict.fromkeys(out))
+
+
+@dataclass
+class P6RidSupportResolver:
+  """Lazy P6 RID support resolver recovered from CCmdSupportDataIdListP6."""
+  client: Any
+  root_rid: int = 0xD100
+  excluded_selectors: frozenset[int] = frozenset({0xD1F0, 0xD1FE})
+  _root: bytes | None = None
+  _selectors: dict[int, bytes] | None = None
+
+  @classmethod
+  def from_profile(cls, profile: Profile, client: Any) -> P6RidSupportResolver:
+    raw = support_contract(profile, "p6")
+    routine_root = raw.get("routine_root") if isinstance(raw, dict) else None
+    if not isinstance(routine_root, dict):
+      raise ResolverError("support_contracts.p6.routine_root is missing")
+    request = registry.parse_bytes(routine_root.get("request"), "support_contracts.p6.routine_root.request")
+    if len(request) != 4 or request[:2] != bytes([0x31, int(ROUTINE_CONTROL_TYPE.START)]):
+      raise ResolverError(f"P6 RID support root request is not 3101xxxx: {request.hex()}")
+    if str(routine_root.get("positive_sid")).lower() not in {"0x71", "71"}:
+      raise ResolverError("P6 RID support root positive SID is not 0x71")
+    root = registry.parse_int(routine_root.get("root_base", int.from_bytes(request[2:], "big")),
+                              "support_contracts.p6.routine_root.root_base")
+    excluded = {registry.parse_int(value, "support_contracts.p6.routine_root.selector_excluded")
+                for value in routine_root.get("selector_excluded", [])}
+    return cls(client=client, root_rid=root, excluded_selectors=frozenset(excluded))
+
+  @property
+  def selector_cache(self) -> dict[int, bytes]:
+    if self._selectors is None:
+      self._selectors = {}
+    return self._selectors
+
+  def _request(self, rid: int) -> bytes:
+    return bytes(self.client.routine_control(ROUTINE_CONTROL_TYPE.START, rid))
+
+  def root_bitmap(self) -> bytes:
+    if self._root is None:
+      self._root = self._request(self.root_rid)
+    return self._root
+
+  def supported_groups(self) -> tuple[int, ...]:
+    # API symmetry with DID support; these are P6 D1nn selector RIDs.
+    return tuple(analyze_p6_support_bitmap(self.root_rid, self.root_bitmap()))
+
+  def selector_bitmap(self, selector: int) -> bytes:
+    if not self.root_rid <= selector <= self.root_rid + 0xFF:
+      raise ResolverError(f"P6 RID selector must be D1nn, got 0x{selector:04X}")
+    if not _bitmap_has(self.root_bitmap(), selector - self.root_rid) or selector in self.excluded_selectors:
+      return b""
+    if selector not in self.selector_cache:
+      self.selector_cache[selector] = self._request(selector)
+    return self.selector_cache[selector]
+
+  def supports(self, rid: int) -> bool:
+    if not 0 <= rid <= 0xFFFF:
+      raise ResolverError(f"RID out of range: {rid:#x}")
+    if self.root_rid <= rid <= self.root_rid + 0xFF and _bitmap_has(self.root_bitmap(), rid - self.root_rid):
+      return True
+    selector = self.root_rid + (rid >> 8)
+    if selector > self.root_rid + 0xFF or not _bitmap_has(self.root_bitmap(), selector - self.root_rid):
+      return False
+    if selector in self.excluded_selectors:
+      return False
+    return _bitmap_has(self.selector_bitmap(selector), rid & 0xFF)
+
+  def supported_rids(self) -> tuple[int, ...]:
+    out: list[int] = list(self.supported_groups())
+    for selector in self.supported_groups():
+      if selector in self.excluded_selectors:
+        continue
+      base = (selector & 0xFF) << 8
+      out.extend(analyze_p6_support_bitmap(base, self.selector_bitmap(selector)))
+    return tuple(dict.fromkeys(out))
+
+
+def rid_support_resolver(profile: Profile, category_id: int, client: Any) -> P6RidSupportResolver:
+  """Instantiate Toyota's exact RID support executor when recovered."""
+  mode = support_mode(profile, category_id)
+  if mode == "p6-standard":
+    return P6RidSupportResolver.from_profile(profile, client)
+  family = support_family(profile, category_id) or "unresolved"
+  raise ResolverError(
+    f"Toyota category {category_id} selects support family {family}, mode {mode or 'unresolved'}; "
+    + "that exact RID support-list executor is not yet recovered in this runtime")
+
+
+def did_support_resolver(profile: Profile, category_id: int, client: Any) -> P5DidSupportResolver | P6DidSupportResolver:
+  """Instantiate the exact Toyota DID support executor selected for this category."""
+  mode = support_mode(profile, category_id)
+  if mode == "p5-standard":
+    return P5DidSupportResolver.from_profile(profile, client)
+  if mode == "p6-standard":
+    return P6DidSupportResolver.from_profile(profile, client)
+  family = support_family(profile, category_id) or "unresolved"
+  raise ResolverError(
+    f"Toyota category {category_id} selects support family {family}, mode {mode or 'unresolved'}; "
+    + "that exact DID support-list executor is not yet recovered in this runtime")
 
 
 def _response_probe(client: Any, did: int) -> tuple[str, bytes | None, str | None]:
@@ -378,20 +605,22 @@ def _support_root_did(profile: Profile, family: str) -> int | None:
 
 
 def probe_mount_candidates(profile: Profile, client_factory) -> list[dict[str, Any]]:
-  """Probe Toyota install candidates without turning tooling coverage into an ECU policy.
+  """Probe Toyota install candidates only where the exact selected support executor is implemented.
 
-  P5/P6 categories have recovered live DID-support roots and can be response-probed
-  directly. Other routed categories remain fully represented; until their exact
-  Toyota connection/support executor is recovered they are `probe_unavailable`, not
-  "unsupported" and not absent.
+  Every Toyota candidate remains represented. `probe_unavailable` means this runtime
+  does not yet reproduce that category's Toyota family-local support executor; it is
+  never a statement that the ECU/generation is unsupported or absent.
   """
   _vehicle_resolution(profile)
   result: list[dict[str, Any]] = []
   endpoint_cache: dict[tuple[int, int | None, str, int], dict[str, Any]] = {}
   for candidate in profile.mount_candidates():
     row = dict(candidate)
-    family = support_family(profile, int(candidate.get("category_id", -1)))
+    category_id = int(candidate.get("category_id", -1))
+    family = support_family(profile, category_id)
+    mode = support_mode(profile, category_id)
     row["support_family"] = family
+    row["support_mode"] = mode
     if not isinstance(candidate.get("transport_route"), dict):
       row.update(live_state="route_unresolved", transport_responded=None, probe_available=False,
                  support_root=None, supported_group_count=None,
@@ -399,29 +628,47 @@ def probe_mount_candidates(profile: Profile, client_factory) -> list[dict[str, A
       result.append(row)
       continue
     route = route_for_candidate(candidate)
-    root_did = _support_root_did(profile, family) if family else None
+    if mode not in {"p5-standard", "p6-standard"}:
+      row.update(live_state="probe_unavailable", transport_responded=None, probe_available=False,
+                 support_root=None, supported_group_count=None,
+                 probe_error=(
+                   f"Toyota support family {family or 'unresolved'}, mode {mode or 'unresolved'} is known, "
+                   + "but that exact live support executor is not recovered in this runtime"))
+      result.append(row)
+      continue
+    if not route.uds_transport_supported:
+      row.update(live_state="probe_unavailable", transport_responded=None, probe_available=False,
+                 support_root=None, supported_group_count=None,
+                 probe_error=(f"Toyota route uses {route.transport_kind} ({route.controller or 'controller unresolved'}); "
+                              + "this Panda UDS runtime does not implement that transport"))
+      result.append(row)
+      continue
+    root_did = _support_root_did(profile, family or "")
     if root_did is None:
       row.update(live_state="probe_unavailable", transport_responded=None, probe_available=False,
                  support_root=None, supported_group_count=None,
-                 probe_error=f"Toyota support family {family or 'unresolved'} is known but its live probe executor is not recovered")
+                 probe_error=f"Toyota support mode {mode} has no recovered DID root contract")
       result.append(row)
       continue
 
-    endpoint_key = (route.request_address, route.sub_addr, family or "", root_did)
+    endpoint_key = (route.request_address, route.sub_addr, mode, root_did)
     if endpoint_key not in endpoint_cache:
       client = client_factory(route.request_address, route.sub_addr)
       root_state, root_payload, root_error = _response_probe(client, root_did)
-      state: dict[str, Any]
+      if root_payload is not None:
+        if mode == "p5-standard":
+          group_count = len(analyze_support_bitmap(0, root_payload, 8))
+        else:
+          group_count = len(analyze_p6_support_bitmap(root_did, root_payload))
+      else:
+        group_count = None
       if root_state in {"positive", "negative"}:
         state = {
           "live_state": "responding",
           "transport_responded": True,
           "probe_available": True,
           "support_root": root_state == "positive",
-          "supported_group_count": (
-            len(analyze_support_bitmap(0, root_payload or b"", 8))
-            if family == "p5" and root_payload is not None else None
-          ),
+          "supported_group_count": group_count,
           "support_error": root_error,
           "support_root_did": root_did,
         }

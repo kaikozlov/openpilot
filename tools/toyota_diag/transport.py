@@ -1,10 +1,11 @@
 """Live Toyota diagnostic transports.
 
 When pandad is stopped, use direct Panda ownership in Panda's ordinary ELM327
-diagnostic safety mode. When pandad is already running, reuse openpilot's
-can/sendcan messaging path if the live Panda is already in ELM327 safety. The
-managed path never changes Panda safety itself; Panda's ELM327 TX hook remains
-the diagnostic-address/frame enforcement boundary.
+diagnostic safety mode while preserving normal-harness bus routing by default;
+OBD bus-1 multiplexing is an explicit caller option. When pandad is already
+running, reuse openpilot's can/sendcan messaging path if the live Panda is already
+in ELM327 safety. The managed path never changes Panda safety itself; Panda's
+ELM327 TX hook remains the diagnostic-address/frame enforcement boundary.
 """
 from __future__ import annotations
 
@@ -124,14 +125,15 @@ class ManagedPandaAdapter(ManagedCanReceiver):
     self.messaging.drain_sock(self.can_sock, wait_for_one=False)
 
 
-def status(profile: Profile, *, messaging_module=None) -> dict[str, Any]:
+def status(profile: Profile, *, messaging_module=None, obd_multiplexing: bool = False) -> dict[str, Any]:
   """Describe the transport a live command could use without transmitting anything."""
   if not pandad_running():
     return {
       "pandad_running": False,
       "mode": "direct-panda",
       "ready": True,
-      "detail": "pandad stopped; next live command will claim Panda directly (hardware not probed)",
+      "detail": ("pandad stopped; next live command will claim Panda directly "
+                 + f"with {'OBD-port' if obd_multiplexing else 'normal-harness'} bus-1 routing (hardware not probed)"),
     }
 
   if messaging_module is None:
@@ -154,15 +156,16 @@ def passive_receiver():
   return Panda()
 
 
-def connect(profile: Profile):
+def connect(profile: Profile, *, obd_multiplexing: bool = False):
   if pandad_running():
     return ManagedPandaAdapter(profile)
 
   from panda import Panda  # lazy: offline commands must not import Panda
   panda = Panda()
-  # ELM327 param 0 multiplexes bus 1 to OBD; this profile uses bus 0, so that
-  # harness-side distinction does not alter the diagnostic route.
-  panda.set_safety_mode(CarParams.SafetyModel.elm327, 0)
+  # Panda ELM327 param 0 remaps logical bus 1 onto the OBD-II pins; param 1
+  # preserves normal harness routing. This is installation state, not Toyota
+  # vehicle/profile metadata, so the generic default is deliberately no remap.
+  panda.set_safety_mode(CarParams.SafetyModel.elm327, 0 if obd_multiplexing else 1)
   return panda
 
 
@@ -185,11 +188,30 @@ def can_query_callbacks(panda, *, wait_timeout: float = QUERY_RECV_WAIT):
   return can_recv, can_send
 
 
-def uds_client_factory(panda, profile: Profile, timeouts: registry.CommTimeouts | None = None) -> Callable[[int, int | None], UdsClient]:
-  def factory(address: int, sub_addr: int | None = None) -> UdsClient:
-    return UdsClient(panda, address, bus=profile.bus, sub_addr=sub_addr,
-                     timeout=timeouts.uds_timeout if timeouts is not None else profile.uds_timeout,
-                     response_pending_timeout=timeouts.response_pending_timeout if timeouts is not None else profile.uds_response_pending_timeout)
+def uds_client_factory(panda, profile: Profile, timeouts: registry.CommTimeouts | None = None,
+                       *, validate_profile_routes: bool = True) -> Callable[..., UdsClient]:
+  bus = registry.require_panda_bus(profile)
+
+  def factory(address: int, sub_addr: int | None = None, *, rx_addr: int | None = None,
+              rx_sub_addr: int | None = None) -> UdsClient:
+    if validate_profile_routes:
+      matches = [ecu for ecu in profile.ecus if ecu.route_resolved and ecu.endpoint == (address, sub_addr)]
+      if matches and not any(ecu.uds_transport_supported for ecu in matches):
+        kinds = ", ".join(sorted({ecu.transport_kind or "unclassified" for ecu in matches}))
+        raise registry.RegistryError(
+          f"Toyota route {address:#x}{f'/{sub_addr:#x}' if sub_addr is not None else ''} uses {kinds}; "
+          + "the current Panda UDS transport does not implement that controller")
+    kwargs = {
+      "bus": bus,
+      "sub_addr": sub_addr,
+      "timeout": timeouts.uds_timeout if timeouts is not None else profile.uds_timeout,
+      "response_pending_timeout": timeouts.response_pending_timeout if timeouts is not None else profile.uds_response_pending_timeout,
+    }
+    if rx_addr is not None:
+      kwargs["rx_addr"] = rx_addr
+    if rx_sub_addr is not None:
+      kwargs["rx_sub_addr"] = rx_sub_addr
+    return UdsClient(panda, address, **kwargs)
   return factory
 
 

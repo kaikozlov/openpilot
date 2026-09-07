@@ -136,10 +136,26 @@ class TestTransport(unittest.TestCase):
       self.assertIs(transport.connect(self.profile), sentinel)
     managed.assert_called_once_with(self.profile)
 
+  def test_connect_keeps_normal_harness_routing_unless_obd_multiplexing_is_explicit(self):
+    from tools.toyota_diag.tests.support import FakePanda
+
+    for obd_multiplexing, expected_param in ((False, 1), (True, 0)):
+      with self.subTest(obd_multiplexing=obd_multiplexing):
+        panda = FakePanda()
+        with mock.patch("tools.toyota_diag.transport.pandad_running", return_value=False), \
+             mock.patch("panda.Panda", return_value=panda):
+          self.assertIs(transport.connect(self.profile, obd_multiplexing=obd_multiplexing), panda)
+        self.assertEqual(panda.safety, [(CarParams.SafetyModel.elm327, expected_param)])
+
   def test_status_is_nontransmitting_and_explains_direct_managed_and_blocked(self):
     with mock.patch("tools.toyota_diag.transport.pandad_running", return_value=False):
       direct = transport.status(self.profile)
     self.assertEqual((direct["mode"], direct["ready"]), ("direct-panda", True))
+    self.assertIn("normal-harness", direct["detail"])
+
+    with mock.patch("tools.toyota_diag.transport.pandad_running", return_value=False):
+      obd = transport.status(self.profile, obd_multiplexing=True)
+    self.assertIn("OBD-port", obd["detail"])
 
     managed_messaging = _FakeMessaging([self.state()])
     with mock.patch("tools.toyota_diag.transport.pandad_running", return_value=True):

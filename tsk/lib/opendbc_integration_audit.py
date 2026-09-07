@@ -181,7 +181,10 @@ def audit_opendbc_implementation(identity: dict, integration: dict,
 
   config_class, block = block_info if block_info else ("", "")
   tss3_platform = config_class == "ToyotaTSS3PlatformConfig"
-  secoc_platform = config_class in {"ToyotaSecOCPlatformConfig", "ToyotaTSS3PlatformConfig"} or "ToyotaFlags.SECOC" in block
+  # TSS generation and SecOC authentication are independent platform axes.
+  # ToyotaTSS3PlatformConfig no longer implies SecOC; require the ordinary
+  # SecOC config class or an explicit per-platform ToyotaFlags.SECOC declaration.
+  secoc_platform = config_class == "ToyotaSecOCPlatformConfig" or "ToyotaFlags.SECOC" in block
   check("platform_secoc_enabled", secoc_platform,
         f"config={config_class or 'missing'}; target must carry Toyota SecOC flag")
 

@@ -43,9 +43,81 @@ class TestVehicleResolver(unittest.TestCase):
     self.assertTrue(current.supports(0x1601))
     self.assertFalse(current.supports(0x1602))
     self.assertFalse(current.supports(0x1701))
-    self.assertEqual(current.supported_dids(), (0x1601,))
+    self.assertEqual(current.supported_dids(), (0x1600, 0x1601))
     self.assertEqual(scripted.calls.count((0x792, "read_did", 0x0101)), 1)
     self.assertEqual(scripted.calls.count((0x792, "read_did", 0x1600)), 1)
+
+
+  def test_p5_root_ids_remain_supported_and_reserved_groups_are_not_queried(self):
+    scripted = support.ScriptedUds()
+    root = bytearray(32)
+    for index in (0xF3, 0xFD):
+      root[index // 8] |= 0x80 >> (index % 8)
+    scripted.did[0x792] = {0x0101: bytes(root)}
+    current = resolver.P5DidSupportResolver.from_profile(self.profile, scripted.factory(0x792))
+    self.assertEqual(current.supported_groups(), (0xF300, 0xFD00))
+    self.assertTrue(current.supports(0xF300))
+    self.assertTrue(current.supports(0xFD00))
+    self.assertFalse(current.supports(0xF301))
+    self.assertFalse(current.supports(0xFD01))
+    self.assertEqual(current.supported_dids(), (0xF300, 0xFD00))
+    self.assertNotIn((0x792, "read_did", 0xF300), scripted.calls)
+    self.assertNotIn((0x792, "read_did", 0xFD00), scripted.calls)
+
+  def test_p6_support_uses_selector_and_member_bitmaps_without_can_route_assumptions(self):
+    profile = registry.ToyotaDatabase.load().profile("NA", 12991)
+    self.assertEqual(resolver.support_mode(profile, 6000), "p6-standard")
+    scripted = support.ScriptedUds()
+    root = bytearray(32)
+    for index in (0x02, 0xFD):
+      root[index // 8] |= 0x80 >> (index % 8)
+    # A102 member bitmap: bit1 advertises DID 0x0201. A1FD is a Toyota-reserved
+    # selector that remains supported but is not expanded with a second request.
+    scripted.did[0x123] = {0xA100: bytes(root), 0xA102: bytes.fromhex("40")}
+    current = resolver.P6DidSupportResolver.from_profile(profile, scripted.factory(0x123))
+    self.assertEqual(current.supported_groups(), (0xA102, 0xA1FD))
+    self.assertTrue(current.supports(0xA102))
+    self.assertTrue(current.supports(0xA1FD))
+    self.assertTrue(current.supports(0x0201))
+    self.assertFalse(current.supports(0x0200))
+    self.assertEqual(current.supported_dids(), (0xA102, 0xA1FD, 0x0201))
+    self.assertEqual(scripted.calls.count((0x123, "read_did", 0xA100)), 1)
+    self.assertEqual(scripted.calls.count((0x123, "read_did", 0xA102)), 1)
+    self.assertNotIn((0x123, "read_did", 0xA1FD), scripted.calls)
+
+  def test_p6_rid_support_uses_d1_selector_hierarchy(self):
+    profile = registry.ToyotaDatabase.load().profile("NA", 12165, bus=0)
+    scripted = support.ScriptedUds()
+    endpoint = 0x18DA00F1
+    root = bytearray(32)
+    for index in (0x02, 0xF0):
+      root[index // 8] |= 0x80 >> (index % 8)
+    scripted.routine[(endpoint, 1, 0xD100)] = bytes(root)
+    scripted.routine[(endpoint, 1, 0xD102)] = bytes.fromhex("40")
+    current = resolver.P6RidSupportResolver.from_profile(profile, scripted.factory(endpoint))
+    self.assertEqual(current.supported_groups(), (0xD102, 0xD1F0))
+    self.assertTrue(current.supports(0xD102))
+    self.assertTrue(current.supports(0xD1F0))
+    self.assertTrue(current.supports(0x0201))
+    self.assertFalse(current.supports(0x0200))
+    self.assertFalse(current.supports(0xF001))
+    self.assertEqual(current.supported_rids(), (0xD102, 0xD1F0, 0x0201))
+    self.assertEqual(scripted.calls.count((endpoint, "routine", 1, 0xD100, b"")), 1)
+    self.assertEqual(scripted.calls.count((endpoint, "routine", 1, 0xD102, b"")), 1)
+    self.assertNotIn((endpoint, "routine", 1, 0xD1F0, b""), scripted.calls)
+
+  def test_p6_route_materializes_normal_fixed_physical_can_id(self):
+    profile = registry.ToyotaDatabase.load().profile("NA", 12165)
+    ecu = profile.lookup_ecu(6000)
+    _, route = resolver.lookup_mount_candidate(profile, 6000)
+    self.assertIsNone(profile.bus)
+    self.assertEqual(ecu.endpoint, (0x18DA00F1, None))
+    self.assertEqual(ecu.request_address_field, 0)
+    self.assertEqual(ecu.transport_kind, "iso15765-29bit-normal-fixed")
+    self.assertTrue(ecu.uds_transport_supported)
+    self.assertEqual(route.endpoint, (0x18DA00F1, None))
+    self.assertEqual(route.request_address_field, 0)
+    self.assertEqual(route.as_dict()["controller"], "CCommCtrlISO15765_29BitCan")
 
   def test_mount_routes_are_toyota_category_phase_routes(self):
     routes = {route.category_id: route for _, route in resolver.mount_routes(self.profile)}

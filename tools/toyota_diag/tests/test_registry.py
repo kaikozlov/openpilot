@@ -2,7 +2,7 @@ import unittest
 
 from opendbc.car.uds import get_dtc_status_names
 
-from tools.toyota_diag import registry
+from tools.toyota_diag import registry, resolver
 from tools.toyota_diag.tests import support
 
 
@@ -105,12 +105,26 @@ class TestUniversalToyotaDatabase(unittest.TestCase):
       self.assertEqual(counts["category_count"], 2136)
       self.assertEqual(counts["catalog_count"], catalog_count)
       self.assertEqual(counts["support_family_counts"], {"p3": 1, "p4": 1859, "p5": 172, "p6": 104})
+      self.assertEqual(counts["support_mode_counts"], {
+        "p3": 1, "p4": 1859, "p5-hino": 3, "p5-mazda": 11, "p5-standard": 114,
+        "p5-subaru": 24, "p5-suzuki": 20, "p6-standard": 104,
+      })
       self.assertEqual(counts["route_count"], route_count)
       self.assertEqual(counts["route_count"], len(self.database.region_index(region)["routes"]))
     offline = self.database.profile("NA")
     self.assertEqual(len(offline.ecus), 135)
     self.assertFalse(offline.lookup_ecu("frc").route_resolved)
     self.assertIsNone(offline.vehicle_resolution)
+
+  def test_universal_profile_has_no_implicit_panda_bus_and_category_ids_are_first_class(self):
+    profile = self.database.profile("NA", 12165)
+    self.assertIsNone(profile.bus)
+    self.assertEqual(profile.lookup_ecu(6000).category_id, 6000)
+    self.assertEqual(profile.lookup_ecu("6000").category_id, 6000)
+    self.assertEqual(profile.lookup_ecu("0x18DA00F1").category_id, 6000)
+    with self.assertRaisesRegex(registry.RegistryError, "no Panda diagnostic bus is bound"):
+      registry.require_panda_bus(profile)
+    self.assertEqual(registry.require_panda_bus(self.database.profile("NA", 12165, bus=2)), 2)
 
   def test_camry_is_derived_from_toyota_vehicle_install_and_route_tables(self):
     profile = self.database.profile("NA", 12704)
@@ -127,6 +141,17 @@ class TestUniversalToyotaDatabase(unittest.TestCase):
     self.assertEqual(profile.lookup_ecu("Tire Pressure Monitor").endpoint, (0x750, 0x2A))
     self.assertEqual(profile.lookup_ecu("Combination Meter").endpoint, (0x7C0, None))
     self.assertEqual(profile.resolve_did("frc", "LTA Control Condition")[0], 0x1601)
+
+
+  def test_support_modes_follow_toyota_family_local_dispatch(self):
+    profile = self.database.profile("NA", 12704)
+    self.assertEqual(resolver.support_mode(profile, 498), "p5-standard")
+    categories = self.database.region_index("NA")["categories"]
+    self.assertEqual(categories["722"]["support_mode"], "p5-subaru")
+    self.assertEqual(categories["8500"]["support_mode"], "p5-suzuki")
+    self.assertEqual(categories["851"]["support_mode"], "p5-mazda")
+    self.assertEqual(categories["5033"]["support_mode"], "p5-hino")
+    self.assertEqual(categories["6000"]["support_mode"], "p6-standard")
 
   def test_non_camry_vehicle_uses_the_same_database_pipeline(self):
     profile = self.database.profile("NA", 12757)

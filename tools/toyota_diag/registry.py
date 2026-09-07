@@ -28,6 +28,7 @@ SUPPORTED_SCHEMAS = frozenset({
 })
 DEFAULT_UDS_TIMEOUT = 0.35
 DEFAULT_UDS_RESPONSE_PENDING_TIMEOUT = 2.0
+UDS_TRANSPORT_KINDS = frozenset({"iso15765-phase-family", "iso15765-29bit-normal-fixed", "legacy-unclassified"})
 
 DTC_STATUS_BITS: tuple[tuple[int, str], ...] = (
   (0x01, "TEST_FAILED"),
@@ -94,10 +95,19 @@ class EcuSpec:
   sub_addr: int | None = None
   generation: int | None = None
   route_resolved: bool = True
+  transport_kind: str | None = None
+  controller: str | None = None
+  request_address_field: int | None = None
 
   @property
   def endpoint(self) -> tuple[int, int | None]:
     return self.address, self.sub_addr
+
+  @property
+  def uds_transport_supported(self) -> bool:
+    # Legacy single-vehicle fixtures predate explicit transport metadata and are
+    # ordinary ISO15765 routes. Universal bundles name Toyota's controller.
+    return self.transport_kind is None or self.transport_kind in UDS_TRANSPORT_KINDS
 
 
 @dataclass(frozen=True)
@@ -122,7 +132,7 @@ class Profile:
   document: dict[str, Any]
   name: str
   vehicle: str
-  bus: int
+  bus: int | None
   fault_status_mask: int
   ecus: tuple[EcuSpec, ...]
   guard: Guard | None = None
@@ -230,20 +240,37 @@ class Profile:
     return bytes.fromhex(str(value or "0104000000000000"))
 
   def scanned_ecus(self) -> tuple[EcuSpec, ...]:
-    """Resolved logical ECU endpoints for the selected vehicle/profile."""
-    return self.ecus
+    """Resolved ECU endpoints executable by this runtime's UDS transport.
+
+    Toyota logical categories/routes remain present in ``ecus``/mount metadata even
+    when the local Panda runtime does not implement that controller (for example
+    ISO13400 or CAN-FD ISO15765-PS). This is an implementation boundary, not a
+    Toyota capability/absence decision.
+    """
+    return tuple(ecu for ecu in self.ecus if ecu.route_resolved and ecu.uds_transport_supported)
 
   def lookup_ecu(self, ref: str | int) -> EcuSpec:
     if isinstance(ref, int):
-      matches = [ecu for ecu in self.ecus if ecu.route_resolved and ecu.address == ref]
+      # Toyota's natural stable identifier is the decimal logical category ID.
+      # Prefer it; callers that mean a CAN endpoint can use an explicit 0x string.
+      matches = [ecu for ecu in self.ecus if ecu.category_id == ref]
+      if not matches:
+        matches = [ecu for ecu in self.ecus if ecu.route_resolved and ecu.address == ref]
     else:
       text = ref.strip()
+      address = None
+      category_id = None
       try:
-        address = int(text, 0) if text.lower().startswith("0x") else None
+        if text.lower().startswith("0x"):
+          address = int(text, 16)
+        elif text.isdecimal():
+          category_id = int(text, 10)
       except ValueError:
-        address = None
+        pass
       if address is not None:
         matches = [ecu for ecu in self.ecus if ecu.route_resolved and ecu.address == address]
+      elif category_id is not None and (category_matches := [ecu for ecu in self.ecus if ecu.category_id == category_id]):
+        matches = category_matches
       else:
         needle = text.casefold()
         matches = [ecu for ecu in self.ecus if needle in {ecu.key.casefold(), ecu.name.casefold()}]
@@ -653,6 +680,7 @@ class ToyotaDatabase:
             "short_name": category.get("short_name"),
             "name": category.get("name"),
             "support_family": category.get("support_family"),
+            "support_mode": category.get("support_mode"),
             "support_plugin_single": category.get("support_plugin_single"),
             "support_plugin_multi": category.get("support_plugin_multi"),
             "catalog_available": bool(category.get("catalog_available", category.get("catalog_member"))),
@@ -673,7 +701,9 @@ class ToyotaDatabase:
       if not isinstance(route, dict):
         continue
       category_id = int(row["category_id"])
-      address = int(route["request_address"])
+      address_field = int(route["request_address"])
+      physical_address = route.get("physical_request_address")
+      address = int(physical_address) if physical_address is not None else address_field
       sub_addr = int(route.get("address_extension") or 0) or None
       endpoint_key = (address, sub_addr, category_id)
       if endpoint_key in used_endpoints:
@@ -691,6 +721,9 @@ class ToyotaDatabase:
         functional_response=_legislated_response_address(route),
         sub_addr=sub_addr,
         generation=int(row["generation"]) if row.get("generation") is not None else None,
+        transport_kind=str(route.get("transport_kind")) if route.get("transport_kind") else None,
+        controller=str(route.get("controller")) if route.get("controller") else None,
+        request_address_field=address_field,
       ))
     return tuple(rows)
 
@@ -709,6 +742,7 @@ class ToyotaDatabase:
           category_id=int(category_id),
           generation=int(category["generation"]) if category.get("generation") is not None else None,
           route_resolved=False,
+          transport_kind=None,
         )
         for category_id, category in sorted(categories.items(), key=lambda item: int(item[0]))
         if isinstance(category, dict) and bool(category.get("catalog_available", category.get("catalog_member")))
@@ -752,13 +786,19 @@ class ToyotaDatabase:
       "functional_response": ecu.functional_response,
       "generation": ecu.generation,
       "route_resolved": ecu.route_resolved,
+      "transport_kind": ecu.transport_kind,
+      "controller": ecu.controller,
+      "request_address_field": ecu.request_address_field,
     } for ecu in ecus]
     document: dict[str, Any] = {
       "schema": BUNDLE_SCHEMA,
       "profile": {
         "profile": profile_name,
         "vehicle": vehicle_name,
-        "panda_bus": int(self.index.get("default_panda_bus", 0) if bus is None else bus),
+        # Panda logical bus is installation-local, not Toyota database semantics.
+        # The CLI supplies its local default explicitly; library users get None unless
+        # they bind a bus themselves.
+        "panda_bus": None if bus is None else int(bus),
         "fault_status_mask": int(self.index.get("fault_status_mask", 0xAF)),
         "ecus": profile_rows,
         "session_control": index.get("session_control"),
@@ -784,7 +824,7 @@ class ToyotaDatabase:
       document=document,
       name=profile_name,
       vehicle=vehicle_name,
-      bus=int(document["profile"]["panda_bus"]),
+      bus=None if document["profile"]["panda_bus"] is None else int(document["profile"]["panda_bus"]),
       fault_status_mask=int(document["profile"]["fault_status_mask"]),
       ecus=ecus,
       guard=None,
@@ -793,6 +833,19 @@ class ToyotaDatabase:
       database=self,
     )
 
+
+
+def require_panda_bus(profile: Profile) -> int:
+  """Return the installation-local Panda bus or fail before transport.
+
+  Toyota's diagnostic database does not define Comma/Panda wiring. Universal
+  profiles therefore carry no implicit bus; callers must bind one explicitly.
+  """
+  if profile.bus is None:
+    raise RegistryError("no Panda diagnostic bus is bound; pass --bus (the maintainer Camry harness uses bus 0)")
+  if not 0 <= profile.bus <= 3:
+    raise RegistryError(f"Panda diagnostic bus must be 0..3, got {profile.bus}")
+  return profile.bus
 
 def _dedupe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
   """Preserve order while collapsing byte-for-byte-equivalent catalog rows."""
@@ -873,6 +926,9 @@ def _load_ecus(profile: dict[str, Any]) -> tuple[EcuSpec, ...]:
     sub_addr=int(row["sub_addr"]) if row.get("sub_addr") is not None else None,
     generation=int(row["generation"]) if row.get("generation") is not None else None,
     route_resolved=bool(row.get("route_resolved", True)),
+    transport_kind=str(row["transport_kind"]) if row.get("transport_kind") else None,
+    controller=str(row["controller"]) if row.get("controller") else None,
+    request_address_field=int(row["request_address_field"]) if row.get("request_address_field") is not None else None,
   ) for row in rows)
   if len({ecu.key for ecu in ecus}) != len(ecus):
     raise RegistryError("profile.ecus contains duplicate keys")

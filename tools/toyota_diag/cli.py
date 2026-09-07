@@ -13,6 +13,7 @@ from tools.toyota_diag.session import DiagnosticSession, LifecycleError
 
 READ_ONLY_UDS_SERVICES = frozenset({0x19, 0x22, 0x23, 0x24, 0x3E})
 READ_ONLY_OBD_MODES = frozenset({0x01, 0x02, 0x03, 0x05, 0x06, 0x07, 0x09, 0x0A})
+DEFAULT_LOCAL_PANDA_BUS = 0
 
 OBSERVE_PRESETS = {
   "tss3-longitudinal": (
@@ -31,7 +32,7 @@ def _cli_int(value: str, what: str) -> int:
 
 LIVE_VEHICLE_CONTEXT_FUNCS = frozenset({
   "cmd_vehicle_mounted", "cmd_scan", "cmd_monitor", "cmd_observe",
-  "cmd_did_read", "cmd_did_support", "cmd_did_watch", "cmd_dtc_scan", "cmd_dtc_clear",
+  "cmd_did_read", "cmd_did_support", "cmd_did_watch", "cmd_rid_support", "cmd_dtc_scan", "cmd_dtc_clear",
   "cmd_ffd_operation_list", "cmd_ffd_operation_records", "cmd_ffd_operation_read",
   "cmd_ffd_image_info", "cmd_ffd_image_list", "cmd_ffd_image_read",
   "cmd_uds_raw", "cmd_functional_obd", "cmd_active_test_run", "cmd_active_test_stop", "cmd_utility_run",
@@ -68,7 +69,7 @@ def _resolve_live_vehicle_context(args, profile: Profile) -> Profile:
   live = _live_transport()
   panda = None
   try:
-    panda = live.connect(profile)
+    panda = _connect_live(args, profile, live)
     can_recv, can_send = live.can_query_callbacks(panda)
     vin_info = resolver.read_vehicle_vin(can_recv, can_send, profile.bus)
     matches = profile.database.resolve_vin(
@@ -105,6 +106,11 @@ def _resolve_live_vehicle_context(args, profile: Profile) -> Profile:
 def _live_transport():
   from tools.toyota_diag import transport
   return transport
+
+
+def _connect_live(args, profile: Profile, live=None):
+  live = _live_transport() if live is None else live
+  return live.connect(profile, obd_multiplexing=bool(getattr(args, "obd_multiplexing", False)))
 
 
 def _format_signal(row: dict[str, Any]) -> str:
@@ -234,7 +240,7 @@ def cmd_vehicle_detect(args, profile: Profile) -> int:
   live = _live_transport()
   panda = None
   try:
-    panda = live.connect(profile)
+    panda = _connect_live(args, profile, live)
     can_recv, can_send = live.can_query_callbacks(panda)
     vin_info = resolver.read_vehicle_vin(can_recv, can_send, profile.bus)
   except Exception as e:
@@ -284,7 +290,7 @@ def cmd_vehicle_mounted(args, profile: Profile) -> int:
   """Show Toyota's logical install candidates and query them through Toyota's own routes."""
   live = _live_transport()
   try:
-    panda = live.connect(profile)
+    panda = _connect_live(args, profile, live)
     client_factory = live.uds_client_factory(panda, profile)
     rows = resolver.probe_mount_candidates(profile, client_factory)
   except (registry.RegistryError, resolver.ResolverError) as e:
@@ -642,7 +648,7 @@ def cmd_active_test_run(args, profile: Profile) -> int:
   control_mask = _optional_bytes(args.mask, "--mask") or b""
 
   live = _live_transport()
-  panda = live.connect(profile)
+  panda = _connect_live(args, profile, live)
   session = DiagnosticSession(profile, ecu, panda=panda, operation_row=row)
   try:
     with session:
@@ -693,7 +699,7 @@ def cmd_active_test_stop(args, profile: Profile) -> int:
     raise SystemExit("Active Test stop refused before transport: " + "; ".join(refusals))
   control_mask = _optional_bytes(args.mask, "--mask") or b""
   live = _live_transport()
-  panda = live.connect(profile)
+  panda = _connect_live(args, profile, live)
   session = DiagnosticSession(profile, ecu, panda=panda, operation_row=row)
   try:
     with session:
@@ -792,7 +798,7 @@ def cmd_utility_run(args, profile: Profile) -> int:
   value_payload = _optional_bytes(args.value, "--value") or b""
   control_mask = _optional_bytes(args.mask, "--mask") or b""
   live = _live_transport()
-  panda = live.connect(profile)
+  panda = _connect_live(args, profile, live)
   session = DiagnosticSession(profile, ecu, panda=panda)
   try:
     with session:
@@ -820,7 +826,7 @@ def cmd_utility_run(args, profile: Profile) -> int:
 
 def cmd_transport_status(args, profile: Profile) -> int:
   live = _live_transport()
-  state = live.status(profile)
+  state = live.status(profile, obd_multiplexing=bool(getattr(args, "obd_multiplexing", False)))
   if args.json:
     print(json.dumps(state, sort_keys=True))
   else:
@@ -909,7 +915,7 @@ def _scan_set(profile: Profile, refs: list[str] | None) -> list[registry.EcuSpec
 
 def cmd_dtc_scan(args, profile: Profile) -> int:
   transport = _live_transport()
-  panda = transport.connect(profile)
+  panda = _connect_live(args, profile, transport)
   client_factory = transport.uds_client_factory(panda, profile)
   quiet = (lambda _: None) if args.json else print
   responding, faults = dtc.scan(
@@ -954,7 +960,7 @@ def cmd_dtc_scan(args, profile: Profile) -> int:
 def cmd_dtc_clear(args, profile: Profile) -> int:
   import time
   transport = _live_transport()
-  panda = transport.connect(profile)
+  panda = _connect_live(args, profile, transport)
   client_factory = transport.uds_client_factory(panda, profile)
   scan_set = _scan_set(profile, None)
 
@@ -1067,7 +1073,7 @@ def cmd_did_read(args, profile: Profile) -> int:
   except registry.RegistryError as e:
     raise SystemExit(str(e)) from e
   transport = _live_transport()
-  panda = transport.connect(profile)
+  panda = _connect_live(args, profile, transport)
   client = transport.uds_client_factory(panda, profile)(ecu.address, ecu.sub_addr)
   values = []
   for did, signals in dids:
@@ -1082,28 +1088,27 @@ def cmd_did_read(args, profile: Profile) -> int:
 
 
 def cmd_did_support(args, profile: Profile) -> int:
-  """Query the Toyota-selected live DID support family through the category route."""
+  """Query the exact Toyota-selected live DID support executor for one category."""
   try:
     candidate, route = resolver.lookup_mount_candidate(profile, args.ecu)
     family = resolver.support_family(profile, route.category_id)
-    if family != "p5":
-      detail = family or "unresolved"
-      raise resolver.ResolverError(
-        f"Toyota category {route.category_id} ({route.name}) selects support family {detail}; "
-        + "exact DID enumeration is currently implemented only for Toyota's recovered P5 bitmap contract")
+    mode = resolver.support_mode(profile, route.category_id)
     logical_ecu = registry.EcuSpec(
       key=f"category-{route.category_id}", name=route.name, address=route.request_address,
       category_id=route.category_id,
     )
+    # Numeric DIDs are intentionally accepted even when this runtime has no decoded
+    # catalog shard for the category. Toyota's live support list is authoritative;
+    # catalog rows only contribute optional names/metadata.
     dids = _resolve_did_queries(profile, logical_ecu, args.did) if args.did else []
   except (registry.RegistryError, resolver.ResolverError) as e:
     raise SystemExit(str(e)) from e
 
   transport = _live_transport()
   try:
-    panda = transport.connect(profile)
+    panda = _connect_live(args, profile, transport)
     client = transport.uds_client_factory(panda, profile)(route.request_address, route.sub_addr)
-    support_resolver = resolver.P5DidSupportResolver.from_profile(profile, client)
+    support_resolver = resolver.did_support_resolver(profile, route.category_id, client)
     groups = support_resolver.supported_groups()
     if dids:
       rows = [
@@ -1127,7 +1132,8 @@ def cmd_did_support(args, profile: Profile) -> int:
       "name": route.name,
       "generation": route.generation,
       "database": candidate.get("database"),
-      "support_family": resolver.support_family(profile, route.category_id),
+      "support_family": family,
+      "support_mode": mode,
     },
     "route": route.as_dict(),
     "support_root_did": support_resolver.root_did,
@@ -1138,15 +1144,98 @@ def cmd_did_support(args, profile: Profile) -> int:
     print(json.dumps(document, sort_keys=True))
   else:
     endpoint = f"0x{route.request_address:03X}" + (f"/0x{route.sub_addr:02X}" if route.sub_addr is not None else "")
-    family = resolver.support_family(profile, route.category_id) or "unknown"
     print(
-      f"{route.name} (cat {route.category_id}, {endpoint}) Toyota {family.upper()} DID support root "
-      + f"0x{support_resolver.root_did:04X}"
+      f"{route.name} (cat {route.category_id}, {endpoint}) Toyota {(family or 'unknown').upper()} "
+      + f"[{mode or 'mode unresolved'}] DID support root 0x{support_resolver.root_did:04X}"
     )
     for row in rows:
       names = ", ".join(name for name in row["signals"] if name)
       suffix = f"  {names}" if names else ""
       print(f"{'✓' if row['supported'] else '·'} 0x{row['did']:04X}  {'supported' if row['supported'] else 'not advertised'}{suffix}")
+  return 0
+
+def _resolve_rid_queries(profile: Profile, ecu: registry.EcuSpec, queries: list[str]) -> list[tuple[int, list[str]]]:
+  out: list[tuple[int, list[str]]] = []
+  seen: set[int] = set()
+  for query in queries:
+    try:
+      rid = registry.parse_int(query, "RID")
+      names: list[str] = []
+    except registry.RegistryError:
+      try:
+        row = profile.lookup_active_test(ecu, query, kind="routine")
+      except registry.RegistryError as e:
+        raise registry.RegistryError(f"RID query {query!r} is neither numeric nor a unique routine name: {e}") from e
+      rid = registry.parse_int(row.get("routine_id"), "routine RID")
+      names = [str(row.get("name") or "")]
+    if not 0 <= rid <= 0xFFFF:
+      raise registry.RegistryError(f"RID out of range: {rid:#x}")
+    if rid not in seen:
+      seen.add(rid)
+      out.append((rid, names))
+  return out
+
+
+def cmd_rid_support(args, profile: Profile) -> int:
+  """Query Toyota's selected live RID support executor for one category."""
+  try:
+    candidate, route = resolver.lookup_mount_candidate(profile, args.ecu)
+    family = resolver.support_family(profile, route.category_id)
+    mode = resolver.support_mode(profile, route.category_id)
+    logical_ecu = profile.lookup_ecu(route.category_id)
+    rids = _resolve_rid_queries(profile, logical_ecu, args.rid) if args.rid else []
+  except (registry.RegistryError, resolver.ResolverError) as e:
+    raise SystemExit(str(e)) from e
+
+  transport = _live_transport()
+  try:
+    panda = _connect_live(args, profile, transport)
+    client = transport.uds_client_factory(panda, profile)(route.request_address, route.sub_addr)
+    support_resolver = resolver.rid_support_resolver(profile, route.category_id, client)
+    groups = support_resolver.supported_groups()
+    if rids:
+      rows = [{"rid": rid, "supported": support_resolver.supports(rid), "names": names} for rid, names in rids]
+    else:
+      routine_names: dict[int, list[str]] = {}
+      for row in profile.active_tests(logical_ecu):
+        if row.get("kind") != "routine" or row.get("routine_id") is None:
+          continue
+        try:
+          rid = registry.parse_int(row["routine_id"], "routine RID")
+        except registry.RegistryError:
+          continue
+        routine_names.setdefault(rid, []).append(str(row.get("name") or ""))
+      rows = [{"rid": rid, "supported": True, "names": routine_names.get(rid, [])}
+              for rid in support_resolver.supported_rids()]
+  except Exception as e:
+    raise SystemExit(f"RID support query failed: {e}") from e
+
+  document = {
+    "category": {
+      "category_id": route.category_id,
+      "name": route.name,
+      "generation": route.generation,
+      "database": candidate.get("database"),
+      "support_family": family,
+      "support_mode": mode,
+    },
+    "route": route.as_dict(),
+    "support_root_rid": support_resolver.root_rid,
+    "supported_groups": list(groups),
+    "results": rows,
+  }
+  if args.json:
+    print(json.dumps(document, sort_keys=True))
+  else:
+    endpoint = f"0x{route.request_address:X}" + (f"/0x{route.sub_addr:02X}" if route.sub_addr is not None else "")
+    print(
+      f"{route.name} (cat {route.category_id}, {endpoint}) Toyota {(family or 'unknown').upper()} "
+      + f"[{mode or 'mode unresolved'}] RID support root 0x{support_resolver.root_rid:04X}"
+    )
+    for row in rows:
+      names = ", ".join(name for name in row["names"] if name)
+      suffix = f"  {names}" if names else ""
+      print(f"{'✓' if row['supported'] else '·'} 0x{row['rid']:04X}  {'supported' if row['supported'] else 'not advertised'}{suffix}")
   return 0
 
 
@@ -1163,7 +1252,7 @@ def cmd_did_watch(args, profile: Profile) -> int:
     raise SystemExit(str(e)) from e
 
   transport = _live_transport()
-  panda = transport.connect(profile)
+  panda = _connect_live(args, profile, transport)
   client = transport.uds_client_factory(panda, profile)(ecu.address, ecu.sub_addr)
   started = time.monotonic()
   sample = 0
@@ -1198,7 +1287,7 @@ def cmd_monitor(args, profile: Profile) -> int:
   except registry.RegistryError as e:
     raise SystemExit(str(e)) from e
   transport = _live_transport()
-  panda = transport.connect(profile)
+  panda = _connect_live(args, profile, transport)
   session = DiagnosticSession(profile, ecu, panda=panda)
 
   try:
@@ -1266,7 +1355,7 @@ def cmd_observe(args, profile: Profile) -> int:
     raise SystemExit(str(e)) from e
 
   transport = _live_transport()
-  panda = transport.connect(profile)
+  panda = _connect_live(args, profile, transport)
   rows = []
   try:
     with ExitStack() as stack:
@@ -1319,7 +1408,7 @@ def cmd_observe(args, profile: Profile) -> int:
 def cmd_scan(args, profile: Profile) -> int:
   transport = _live_transport()
   state = transport.status(profile)
-  panda = transport.connect(profile)
+  panda = _connect_live(args, profile, transport)
   client_factory = transport.uds_client_factory(panda, profile)
   document = snapshot.build(profile, client_factory, state, show_all_dtcs=args.all_dtcs)
   if args.json:
@@ -1337,9 +1426,9 @@ def _raw_uds_target(profile: Profile, ref: str):
       address = registry.parse_int(ref, "ECU address")
     except registry.RegistryError:
       raise SystemExit(str(lookup_error)) from lookup_error
-    if not 0 <= address <= 0x7FF:
-      raise SystemExit(f"raw UDS numeric address must be an 11-bit CAN ID, got {address:#x}") from lookup_error
-    return registry.EcuSpec(key=f"raw_{address:03x}", name=f"ECU {address:#05x}", address=address)
+    if not 0 <= address <= 0x1FFFFFFF:
+      raise SystemExit(f"raw UDS numeric address must be an 11/29-bit CAN ID, got {address:#x}") from lookup_error
+    return registry.EcuSpec(key=f"raw_{address:x}", name=f"ECU {address:#x}", address=address)
 
 
 def cmd_uds_raw(args, profile: Profile) -> int:
@@ -1362,10 +1451,21 @@ def cmd_uds_raw(args, profile: Profile) -> int:
     raise SystemExit("sub-address must be one byte")
 
   transport = _live_transport()
-  panda = transport.connect(profile)
-  client_factory = transport.uds_client_factory(panda, profile)
+  panda = _connect_live(args, profile, transport)
+  client_factory = transport.uds_client_factory(panda, profile, validate_profile_routes=False)
+  rx_addr = None if args.rx_address is None else _cli_int(args.rx_address, "RX address")
+  if rx_addr is not None and not 0 <= rx_addr <= 0x1FFFFFFF:
+    raise SystemExit("RX address must be an 11/29-bit CAN ID")
+  rx_sub_addr = None if args.rx_sub_address is None else _cli_int(args.rx_sub_address, "RX sub-address")
+  if rx_sub_addr is not None and not 0 <= rx_sub_addr <= 0xFF:
+    raise SystemExit("RX sub-address must be one byte")
   request = bytes([service]) + (bytes([subfunction]) if subfunction is not None else b"") + data
-  response = transport.raw_isotp(client_factory(ecu.address, raw_sub_addr), request)
+  client_kwargs = {}
+  if rx_addr is not None:
+    client_kwargs["rx_addr"] = rx_addr
+  if rx_sub_addr is not None:
+    client_kwargs["rx_sub_addr"] = rx_sub_addr
+  response = transport.raw_isotp(client_factory(ecu.address, raw_sub_addr, **client_kwargs), request)
   print(f"request:  {request.hex()}")
   print(f"response: {response.hex()}")
   return 0
@@ -1378,9 +1478,9 @@ def _ffd_target(profile: Profile):
     raise SystemExit("this profile has no FRC endpoint for TSS3 FFD") from e
 
 
-def _ffd_connect(profile: Profile):
+def _ffd_connect(args, profile: Profile):
   live = _live_transport()
-  panda = live.connect(profile)
+  panda = _connect_live(args, profile, live)
   factory = live.uds_client_factory(panda, profile)
   target = _ffd_target(profile)
   return live, factory(target.address, target.sub_addr)
@@ -1452,7 +1552,7 @@ def _render_ffd_behavior(code: int) -> str:
 
 def cmd_ffd_operation_list(args, profile: Profile) -> int:
   try:
-    live, client = _ffd_connect(profile)
+    live, client = _ffd_connect(args, profile)
     response = live.raw_isotp(client, b"\xAB\x11")
     codes = recorder.parse_operation_behaviors(response)
   except recorder.RecorderError as e:
@@ -1469,7 +1569,7 @@ def cmd_ffd_operation_list(args, profile: Profile) -> int:
 def cmd_ffd_operation_records(args, profile: Profile) -> int:
   behavior = _ffd_int(args.behavior, "behavior")
   try:
-    live, client = _ffd_connect(profile)
+    live, client = _ffd_connect(args, profile)
     request = b"\xAB\x12" + behavior.to_bytes(2, "big")
     response = live.raw_isotp(client, request)
     records = recorder.parse_operation_records(response, behavior)
@@ -1488,7 +1588,7 @@ def cmd_ffd_operation_read(args, profile: Profile) -> int:
   behavior = _ffd_int(args.behavior, "behavior")
   record_id = _ffd_int(args.record, "record")
   try:
-    live, client = _ffd_connect(profile)
+    live, client = _ffd_connect(args, profile)
     request = b"\xAB\x13" + behavior.to_bytes(2, "big") + record_id.to_bytes(2, "big")
     response = live.raw_isotp(client, request)
     parsed = recorder.parse_operation_record(response, behavior, record_id)
@@ -1532,7 +1632,7 @@ def _ffd_default_session(client) -> None:
 
 
 def cmd_ffd_image_info(args, profile: Profile) -> int:
-  live, client = _ffd_connect(profile)
+  live, client = _ffd_connect(args, profile)
   try:
     client.diagnostic_session_control(3)
     spec = bytes(client.read_data_by_identifier(0x1103))
@@ -1559,7 +1659,7 @@ def cmd_ffd_image_info(args, profile: Profile) -> int:
 
 
 def cmd_ffd_image_list(args, profile: Profile) -> int:
-  live, client = _ffd_connect(profile)
+  live, client = _ffd_connect(args, profile)
   try:
     security = _ffd_image_unlock(live, client)
     response = live.raw_isotp(client, b"\xAB\x31")
@@ -1578,7 +1678,7 @@ def cmd_ffd_image_list(args, profile: Profile) -> int:
 def cmd_ffd_image_read(args, profile: Profile) -> int:
   rob = _ffd_int(args.rob, "RoB")
   frame = _ffd_int(args.frame, "frame", 0xFFFFFFFF)
-  live, client = _ffd_connect(profile)
+  live, client = _ffd_connect(args, profile)
   try:
     _ffd_image_unlock(live, client)
     request = b"\xAB\x33" + rob.to_bytes(2, "big") + frame.to_bytes(4, "big")
@@ -1619,7 +1719,7 @@ def cmd_functional_obd(args, profile: Profile) -> int:
     raise SystemExit(f"mutating OBD mode 0x{mode:02X} requires explicit --force acknowledgement")
 
   transport = _live_transport()
-  panda = transport.connect(profile)
+  panda = _connect_live(args, profile, transport)
   positives = dtc.functional_obd_request(panda, mode, payload, profile.legislated_responders, profile.bus, args.window)
   missing = set(profile.legislated_responders) - positives
   if missing:
@@ -1638,7 +1738,10 @@ def build_parser() -> argparse.ArgumentParser:
     "--vehicle", dest="vehicle_select",
     help="Toyota DB vehicle type or OEM name; live vehicle-scoped commands auto-resolve from VIN when omitted",
   )
-  parser.add_argument("--bus", dest="panda_bus", type=int, help="Panda logical bus for diagnostics (default: bundle setting)")
+  parser.add_argument("--bus", dest="panda_bus", type=int, default=DEFAULT_LOCAL_PANDA_BUS,
+                      help="installation-local Panda logical bus for diagnostics (default: 0; not Toyota DB metadata)")
+  parser.add_argument("--obd-multiplexing", action="store_true",
+                      help="direct-Panda only: remap logical bus 1 to OBD-II pins (default: preserve normal harness routing)")
   commands = parser.add_subparsers(dest="command", required=True)
 
   p = commands.add_parser("search", help="search ECUs, Data List/FFD items, DTCs, functions, and Active Tests")
@@ -1780,6 +1883,14 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("--json", action="store_true", help="emit one JSON object per sample group")
   p.set_defaults(func=cmd_did_watch)
 
+  rid = commands.add_parser("rid", help="Toyota routine-identifier capability queries")
+  rid_sub = rid.add_subparsers(required=True)
+  p = rid_sub.add_parser("support", help="query Toyota's selected live RID support contract")
+  p.add_argument("ecu", help="Toyota category ID/name, DDB name, or profile ECU alias")
+  p.add_argument("rid", nargs="*", help="RID numbers or routine names; omit to enumerate all advertised RIDs")
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_rid_support)
+
   dtc_parser = commands.add_parser("dtc")
   dtc_sub = dtc_parser.add_subparsers(required=True)
   p = dtc_sub.add_parser("catalog")
@@ -1807,7 +1918,9 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("service")
   p.add_argument("data", nargs="?")
   p.add_argument("--subfunction")
-  p.add_argument("--sub-address", help="optional ISO-TP address-extension byte for raw Toyota routes")
+  p.add_argument("--sub-address", help="optional ISO-TP TX address-extension byte")
+  p.add_argument("--rx-address", help="optional explicit 11/29-bit physical response CAN ID; normal 11/29-bit UDS is inferred when omitted")
+  p.add_argument("--rx-sub-address", help="optional ISO-TP RX address-extension byte")
   p.add_argument("--force", action="store_true", help="explicitly acknowledge a mutating diagnostic request")
   p.set_defaults(func=cmd_uds_raw)
 
@@ -1927,14 +2040,22 @@ def _normalize_argv(argv: list[str]) -> list[str]:
   # options may precede the command, so normalize only the command tail.
   prefix: list[str] = []
   index = 0
-  while index + 1 < len(argv) and argv[index] in {"--registry", "--profile", "--region", "--vehicle", "--bus"}:
-    prefix.extend(argv[index:index + 2])
-    index += 2
+  value_options = {"--registry", "--profile", "--region", "--vehicle", "--bus"}
+  flag_options = {"--obd-multiplexing"}
+  while index < len(argv):
+    if argv[index] in value_options and index + 1 < len(argv):
+      prefix.extend(argv[index:index + 2])
+      index += 2
+    elif argv[index] in flag_options:
+      prefix.append(argv[index])
+      index += 1
+    else:
+      break
   tail = argv[index:]
   ecu_actions = {"list", "info", "functions", "plugins", "data", "dtcs", "active-tests"}
   top_level = {
     "search", "vehicle", "scan", "monitor", "observe", "transport", "can", "ecu", "did", "dtc",
-    "uds", "ffd", "functional", "active-test", "utility",
+    "uds", "ffd", "functional", "active-test", "utility", "rid",
   }
   live_ecu_actions = {"monitor", "read", "watch"}
   if len(tail) >= 2 and tail[0] == "ecu":
