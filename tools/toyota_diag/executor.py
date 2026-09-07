@@ -28,7 +28,7 @@ from opendbc.car.uds import CONTROL_PARAMETER_TYPE, ROUTINE_CONTROL_TYPE
 
 from tools.toyota_diag import registry
 from tools.toyota_diag.registry import EcuSpec
-from tools.toyota_diag.session import DiagnosticSession, LifecycleError, parse_lifecycle, validate_lifecycle_for_ecu
+from tools.toyota_diag.session import DiagnosticSession, LifecycleError, parse_lifecycle
 
 EXECUTION_EXECUTABLE = "executable"
 SESSION_REQUIREMENT_EXTENDED = "extended"
@@ -178,17 +178,12 @@ def runtime_refusals(profile: registry.Profile, plan: TestPlan) -> tuple[str, ..
   refusals = list(plan.refusals)
   if plan.session_requirement == SESSION_REQUIREMENT_EXTENDED:
     try:
-      lifecycle = parse_lifecycle(profile)
+      lifecycle = parse_lifecycle(profile, plan.ecu)
     except (registry.RegistryError, LifecycleError) as e:
       refusals.append(f"recovered lifecycle metadata is not executable: {e}")
     else:
       if lifecycle is None:
         refusals.append("registry supplies no recovered session lifecycle")
-      else:
-        try:
-          validate_lifecycle_for_ecu(profile, plan.ecu, lifecycle)
-        except LifecycleError as e:
-          refusals.append(f"recovered lifecycle metadata is not executable for this ECU: {e}")
   return tuple(refusals)
 
 

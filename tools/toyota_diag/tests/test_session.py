@@ -3,8 +3,7 @@ import unittest
 from opendbc.car.uds import MessageTimeoutError
 
 from tools.toyota_diag import registry, transport
-from tools.toyota_diag.session import (DiagnosticSession, LifecycleError, LifecycleUnsupported, parse_lifecycle,
-                                       validate_lifecycle_for_ecu)
+from tools.toyota_diag.session import DiagnosticSession, LifecycleError, LifecycleUnsupported, parse_lifecycle
 from tools.toyota_diag.tests import support
 
 
@@ -31,15 +30,14 @@ class TestLifecycleParsing(unittest.TestCase):
     self.assertIsNone(profile.session_control)
     self.assertIsNone(parse_lifecycle(profile))
 
-  def test_bundled_v6_lifecycle_and_toyota_generation_gate(self):
+  def test_bundled_v6_lifecycle_has_no_second_generation_permission_gate(self):
     profile = registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)
     lifecycle = parse_lifecycle(profile)
     assert lifecycle is not None
     self.assertEqual(lifecycle.enter_sequence, (bytes.fromhex("1001"), bytes.fromhex("1003")))
     self.assertEqual(lifecycle.keepalive.did, 0xF186)
-    self.assertEqual(lifecycle.eligible_generation_low5, frozenset({0x14, 0x15, 0x16}))
-    self.assertIs(validate_lifecycle_for_ecu(profile, profile.lookup_ecu("engine"), lifecycle), lifecycle)
-    self.assertIs(validate_lifecycle_for_ecu(profile, profile.lookup_ecu("frc"), lifecycle), lifecycle)
+    self.assertEqual(lifecycle.default_session, 1)
+    self.assertEqual(lifecycle.extended_session, 3)
 
   def test_enter_sequence_parses_and_legacy_shape_expands_to_sendproc(self):
     profile = support.load_profile(None, session_control=current_p5_lifecycle())
@@ -54,10 +52,9 @@ class TestLifecycleParsing(unittest.TestCase):
     assert lifecycle is not None
     self.assertEqual(lifecycle.enter_sequence, (bytes.fromhex("1001"), bytes.fromhex("1003")))
 
-  def test_unsupported_generation_and_keepalive_kind_fail_closed(self):
+  def test_generation_label_is_metadata_but_unknown_keepalive_fails_closed(self):
     profile = support.load_profile(None, session_control=current_p5_lifecycle(generation="future-p7"))
-    with self.assertRaises(LifecycleUnsupported):
-      parse_lifecycle(profile)
+    self.assertIsNotNone(parse_lifecycle(profile))
     profile = support.load_profile(None, session_control=current_p5_lifecycle(
       keepalive={"kind": "mystery", "interval_s": 1.0}))
     with self.assertRaises(LifecycleUnsupported):

@@ -6,11 +6,11 @@ or managed pandad via `transport.connect`) and models the recovered lifecycle:
 - CommSet timeouts: `registry.commset_timeouts(profile, operation_row)` resolves
   per-operation > per-profile > live-validated defaults, and the session's client
   factory honors them when constructed from a Panda.
-- current-P5 TMS-077 SendProc: entering the extended session is the recovered D1
-  (default `10 01`) then D2 (extended `10 03`) sequence, never a direct `10 03`.
-  When a category's DD selector is the `22 F1 86` session poll, the ECU's reported
-  session state is preferred and an already-extended ECU skips the transition.
-  Cleanup sends D1 (`10 01`).
+- Toyota category-local D1/D2 selectors define the session transition. The runtime
+  executes their literal `10 XX` requests when that wire shape is present; it does
+  not admit or reject categories by generation/family. When DD is a session poll,
+  the ECU's reported state is preferred and an already-extended ECU skips D1/D2.
+  Cleanup replays the selected category's D1 request.
 - Keepalive/session polling comes from each category's actual DD selector. Current
   GTS categories use `22 F1 86`, other DID polls such as `22 D1 00`, or a `10 03`
   extended-session refresh; the runtime does not project the Camry/F186 form onto them.
@@ -33,8 +33,7 @@ from opendbc.car.uds import MessageTimeoutError, NegativeResponseError, UdsClien
 from tools.toyota_diag import registry
 from tools.toyota_diag.registry import EcuSpec, Profile
 
-SUPPORTED_SESSION_GENERATIONS = frozenset({"current-p5"})
-SESSION_DID_DEFAULT = 0xF186  # active diagnostic session, the current-P5 22 F1 86 poll
+SESSION_DID_DEFAULT = 0xF186  # legacy/default value; category-local DD metadata overrides it
 KEEPALIVE_TESTER_PRESENT = "tester_present"
 KEEPALIVE_SESSION_DID_POLL = "session_did_poll"
 KEEPALIVE_DID_POLL = "did_poll"
@@ -68,7 +67,6 @@ class SessionLifecycle:
   enter_sequence: tuple[bytes, ...]  # TMS-077 SendProc: D1 default reset then D2 extended
   return_default_request: bytes  # D1 cleanup
   keepalive: KeepaliveSpec | None
-  eligible_generation_low5: frozenset[int] | None = None
 
 
 def _session_byte(value: Any, what: str) -> int:
@@ -103,27 +101,33 @@ def parse_lifecycle(profile: Profile, ecu: EcuSpec | None = None) -> SessionLife
   if ecu is not None and ecu.category_id is not None:
     per_category = raw.get("per_category")
     candidate = per_category.get(str(ecu.category_id)) if isinstance(per_category, dict) else None
-    if isinstance(candidate, dict) and "lifecycle_supported" in candidate:
+    if isinstance(candidate, dict) and ("session_executor_supported" in candidate or "lifecycle_supported" in candidate):
       category_row = candidate
-      if not candidate.get("lifecycle_supported"):
+      implemented = candidate.get("session_executor_supported", candidate.get("lifecycle_supported", True))
+      if not implemented:
         return None
 
-  generation = raw.get("generation")
-  if not isinstance(generation, str) or not generation:
-    raise registry.RegistryError("session_control.generation: expected a non-empty string")
-  if generation not in SUPPORTED_SESSION_GENERATIONS:
-    supported = ", ".join(sorted(SUPPORTED_SESSION_GENERATIONS))
-    raise LifecycleUnsupported(f"session_control generation {generation!r} is not supported (supported: {supported})")
+  generation = str(raw.get("kind") or raw.get("generation") or "toyota-category-selectors")
 
   if category_row is not None:
     d1 = category_row.get("default_session")
     d2 = category_row.get("extended_session")
     if not isinstance(d1, dict) or not isinstance(d2, dict):
       raise LifecycleUnsupported(f"category {ecu.category_id} does not publish complete D1/D2 session frames")
+    d1_request, d1_session = _dsc_request(d1.get("send"), f"session_control.category[{ecu.category_id}].D1")
+    d2_request, d2_session = _dsc_request(d2.get("send"), f"session_control.category[{ecu.category_id}].D2")
+    declared_d1 = category_row.get("default_session_value")
+    declared_d2 = category_row.get("extended_session_value")
+    if declared_d1 is not None and registry.parse_int(declared_d1, "default_session_value") != d1_session:
+      raise registry.RegistryError(f"category {ecu.category_id} D1 session value disagrees with send bytes")
+    if declared_d2 is not None and registry.parse_int(declared_d2, "extended_session_value") != d2_session:
+      raise registry.RegistryError(f"category {ecu.category_id} D2 session value disagrees with send bytes")
     raw = {
       **raw,
-      "enter_sequence": [d1.get("send"), d2.get("send")],
-      "return_default": d1.get("send"),
+      "default_session": d1_session,
+      "extended_session": d2_session,
+      "enter_sequence": [d1_request.hex(), d2_request.hex()],
+      "return_default": d1_request.hex(),
       "keepalive": category_row.get("keepalive"),
     }
 
@@ -138,16 +142,6 @@ def parse_lifecycle(profile: Profile, ecu: EcuSpec | None = None) -> SessionLife
       f"session_control.return_default {return_default.hex()} is not the declared default session {default_session:#04x} transition; refused")
 
   enter_sequence = _parse_enter_sequence(raw, default_session, extended_session)
-
-  eligible_generation_low5 = None
-  if raw.get("eligible_generation_low5") is not None:
-    rows = raw["eligible_generation_low5"]
-    if not isinstance(rows, list) or not rows:
-      raise registry.RegistryError("session_control.eligible_generation_low5: expected a non-empty integer/hex list")
-    parsed = frozenset(registry.parse_int(value, "session_control.eligible_generation_low5") for value in rows)
-    if any(not 0 <= value <= 0x1F for value in parsed):
-      raise registry.RegistryError("session_control.eligible_generation_low5: values must fit low5")
-    eligible_generation_low5 = parsed
 
   keepalive = None
   if raw.get("keepalive") is not None:
@@ -180,24 +174,8 @@ def parse_lifecycle(profile: Profile, ecu: EcuSpec | None = None) -> SessionLife
     enter_sequence=enter_sequence,
     return_default_request=return_default,
     keepalive=keepalive,
-    eligible_generation_low5=eligible_generation_low5,
   )
 
-
-def validate_lifecycle_for_ecu(profile: Profile, ecu: EcuSpec, lifecycle: SessionLifecycle) -> SessionLifecycle:
-  """Apply Toyota's recovered P5 generation gate to one logical ECU category."""
-  eligible = lifecycle.eligible_generation_low5
-  if eligible is None:
-    return lifecycle
-  generation_low5 = profile.category_generation_low5(ecu)
-  if generation_low5 is None:
-    category = "unresolved" if ecu.category_id is None else str(ecu.category_id)
-    raise LifecycleUnsupported(f"ECU category {category} has no recovered generation for current-P5 lifecycle")
-  if generation_low5 not in eligible:
-    allowed = ", ".join(f"0x{value:02X}" for value in sorted(eligible))
-    raise LifecycleUnsupported(
-      f"ECU category {ecu.category_id} generation-low5 0x{generation_low5:02X} is outside Toyota's current-P5 gate ({allowed})")
-  return lifecycle
 
 
 def _validate_did_poll_wire(spec: dict[str, Any], did: int) -> None:
@@ -312,20 +290,19 @@ class DiagnosticSession:
     return value[0]
 
   def require_lifecycle_supported(self) -> SessionLifecycle:
-    """Return lifecycle metadata when Toyota's recovered generation gate admits this ECU."""
+    """Return this category's executable recovered lifecycle metadata."""
     lifecycle = self.lifecycle
     if lifecycle is None:
       raise LifecycleUnsupported("registry supplies no recovered session_control metadata")
-    validate_lifecycle_for_ecu(self.profile, self.ecu, lifecycle)
     return lifecycle
 
   def enter_extended(self) -> None:
-    """TMS-077 SendProc entry into the extended session.
+    """Enter the selected category's recovered D2 diagnostic session.
 
     When the metadata declares the session-DID poll, the ECU's reported state is
     preferred: an ECU already reporting the extended session skips the D1/D2
     transition. Otherwise the recovered sequence (D1 `10 01` then D2 `10 03`) is
-    sent verbatim. Never a direct `10 03`.
+    sent verbatim. No category/generation allowlist participates.
     """
     lifecycle = self.require_lifecycle_supported()
     if self._active_session == lifecycle.extended_session:
@@ -352,7 +329,7 @@ class DiagnosticSession:
     self._extended = True
 
   def restore_default(self) -> None:
-    """D1 cleanup: return the ECU to the recovered default session."""
+    """D1 cleanup: return the ECU to the category's recovered default session."""
     lifecycle = self.require_lifecycle_supported()
     self.client().diagnostic_session_control(lifecycle.default_session)
     self._active_session = None

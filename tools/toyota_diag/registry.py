@@ -19,7 +19,9 @@ from typing import Any
 DATA_DIR = Path(__file__).with_name("data")
 DEFAULT_REGISTRY = DATA_DIR / "toyota_current_diag.zip"
 LEGACY_CAMRY_REGISTRY = DATA_DIR / "camry_2026_f33.json"
-BUNDLE_SCHEMA = "toyota-diagnostics-bundle-v1"
+BUNDLE_SCHEMA = "toyota-diagnostics-bundle-v2"
+LEGACY_BUNDLE_SCHEMA = "toyota-diagnostics-bundle-v1"
+SUPPORTED_BUNDLE_SCHEMAS = frozenset({LEGACY_BUNDLE_SCHEMA, BUNDLE_SCHEMA})
 SUPPORTED_SCHEMAS = frozenset({
   "toyota-diagnostics-registry-v1", "toyota-diagnostics-registry-v2", "toyota-diagnostics-registry-v3",
   "toyota-diagnostics-registry-v4", "toyota-diagnostics-registry-v5", "toyota-diagnostics-registry-v6",
@@ -434,7 +436,7 @@ def _legislated_response_address(route: dict[str, Any]) -> int | None:
   if request == 0:
     return None
   if not 0x7E0 <= request <= 0x7E7:
-    raise RegistryError(f"unsupported Toyota legislated request address 0x{request:X}; expected standard 0x7E0..0x7E7")
+    return None
   return request + 8
 
 
@@ -489,7 +491,7 @@ class ToyotaDatabase:
       raise RegistryError(f"Toyota diagnostic bundle not found: {bundle}") from e
     except (KeyError, zipfile.BadZipFile, json.JSONDecodeError) as e:
       raise RegistryError(f"invalid Toyota diagnostic bundle {bundle}: {e}") from e
-    if index.get("schema") != BUNDLE_SCHEMA:
+    if index.get("schema") not in SUPPORTED_BUNDLE_SCHEMAS:
       raise RegistryError(f"unsupported Toyota diagnostic bundle schema {index.get('schema')!r}")
     if not isinstance(index.get("regions"), dict) or not index["regions"]:
       raise RegistryError("Toyota diagnostic bundle contains no regional indexes")
@@ -580,20 +582,40 @@ class ToyotaDatabase:
     ]
     if not candidates and source_keys:
       candidates = [row for row in rows if self._vin_row_matches(row, vin)]
+    categories = index.get("categories") if isinstance(index.get("categories"), dict) else {}
+    dispatch = index.get("vehicle_resolver_dispatch") if isinstance(index.get("vehicle_resolver_dispatch"), dict) else {}
+    vin10 = dispatch.get("vin10_generation_low5") if isinstance(dispatch.get("vin10_generation_low5"), dict) else {}
+
+    def stage(row: dict[str, Any]) -> str:
+      category = categories.get(str(row.get("category_id")))
+      generation = int(category.get("generation_low5", -1)) if isinstance(category, dict) else -1
+      phase = vin10.get(str(generation))
+      if phase in {"phase5", "phase6"}:
+        return "vin_final"
+      if phase in {"phase3", "phase4"}:
+        return "requires_type41_vehicle_decision"
+      if generation in set(dispatch.get("vin10_rejected_generation_low5") or []):
+        return "requires_legacy_vehicle_selector"
+      return "resolver_path_unresolved"
+
     by_type: dict[int, list[dict[str, Any]]] = {}
     for row in candidates:
-      by_type.setdefault(int(row["vehicle_type"]), []).append(row)
+      enriched = {**row, "resolver_stage": stage(row)}
+      by_type.setdefault(int(row["vehicle_type"]), []).append(enriched)
     vehicles = index.get("vehicles") if isinstance(index.get("vehicles"), dict) else {}
     out = []
     for vehicle_type, decision_rows in sorted(by_type.items()):
       vehicle = vehicles.get(str(vehicle_type))
       if not isinstance(vehicle, dict):
         continue
+      stages = sorted({str(row["resolver_stage"]) for row in decision_rows})
       out.append({
         **dict(vehicle),
         "region": region,
         "decision_rows": decision_rows,
         "source_keys": sorted([list(key) for key in source_keys]),
+        "resolver_stages": stages,
+        "resolution_complete": stages == ["vin_final"],
       })
     return out
 
@@ -630,7 +652,10 @@ class ToyotaDatabase:
             "database": category.get("database"),
             "short_name": category.get("short_name"),
             "name": category.get("name"),
-            "current_p5_supported": bool(category.get("current_p5_supported")),
+            "support_family": category.get("support_family"),
+            "support_plugin_single": category.get("support_plugin_single"),
+            "support_plugin_multi": category.get("support_plugin_multi"),
+            "catalog_available": bool(category.get("catalog_available", category.get("catalog_member"))),
           })
         route = routes.get(str(route_key)) if route_key is not None else None
         if isinstance(route, dict):
@@ -639,13 +664,11 @@ class ToyotaDatabase:
     return sorted(out, key=lambda row: (int(row["category_id"]), int(row["connection_phase_type"])))
 
   @staticmethod
-  def _ecu_specs(candidates: list[dict[str, Any]], *, supported_only: bool = True) -> tuple[EcuSpec, ...]:
+  def _ecu_specs(candidates: list[dict[str, Any]]) -> tuple[EcuSpec, ...]:
     rows = []
     used_keys: set[str] = set()
     used_endpoints: set[tuple[int, int | None, int]] = set()
     for row in candidates:
-      if supported_only and not row.get("current_p5_supported"):
-        continue
       route = row.get("transport_route")
       if not isinstance(route, dict):
         continue
@@ -687,11 +710,11 @@ class ToyotaDatabase:
           generation=int(category["generation"]) if category.get("generation") is not None else None,
           route_resolved=False,
         )
-        for category_id in index.get("supported_p5_category_ids") or []
-        if isinstance((category := categories.get(str(category_id))), dict)
+        for category_id, category in sorted(categories.items(), key=lambda item: int(item[0]))
+        if isinstance(category, dict) and bool(category.get("catalog_available", category.get("catalog_member")))
       )
       profile_name = f"toyota-current-{region_key.casefold()}"
-      vehicle_name = f"Toyota current-P5 catalog ({region_key}; no vehicle selected)"
+      vehicle_name = f"Toyota diagnostic catalog ({region_key}; no vehicle selected)"
       vehicle_resolution = None
       vehicle_type = None
       topology = None
@@ -702,7 +725,7 @@ class ToyotaDatabase:
       vehicle_name = f"Toyota {selected.get('name') or selected['vehicle_type']}"
       vehicle_type = int(selected["vehicle_type"])
       vehicle_resolution = {
-        "generation": "current-gtsplus-universal-resolver-v1",
+        "generation": "current-gtsplus-universal-resolver-v2",
         "vehicle_type": vehicle_type,
         "vehicle_name": selected.get("name") or "",
         "install_set_ids": list(selected.get("install_set_ids") or []),
@@ -711,7 +734,11 @@ class ToyotaDatabase:
           "candidate_count": len(candidates),
           "candidates": candidates,
         },
-        "p5_support": self.index.get("p5_support"),
+        "vin_decision": index.get("vin_decision"),
+        "vehicle_decision": index.get("vehicle_decision"),
+        "vehicle_resolver_dispatch": index.get("vehicle_resolver_dispatch"),
+        "support_contracts": self.index.get("support_contracts"),
+        "p5_support": (self.index.get("support_contracts") or {}).get("p5"),
       }
       topology_rows = index.get("can_topology", {}).get(str(vehicle_type), []) if isinstance(index.get("can_topology"), dict) else []
       topology = topology_rows[0] if len(topology_rows) == 1 else ({"rows": topology_rows} if topology_rows else None)

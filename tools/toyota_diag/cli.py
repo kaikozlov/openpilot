@@ -83,13 +83,23 @@ def _resolve_live_vehicle_context(args, profile: Profile) -> Profile:
     if callable(close):
       close()
 
-  if len(matches) != 1:
-    names = ", ".join(f"{row['vehicle_type']} {row.get('name') or '(unnamed)'}" for row in matches[:12]) or "none"
+  complete = [row for row in matches if row.get("resolution_complete", True)]
+  if len(complete) != 1:
+    names = ", ".join(
+      f"{row['vehicle_type']} {row.get('name') or '(unnamed)'} [{','.join(row.get('resolver_stages') or [])}]"
+      for row in matches[:12]
+    ) or "none"
+    if matches and not complete:
+      raise SystemExit(
+        f"Toyota VIN {vin_info['vin']} reached a non-final Toyota resolver stage ({names}); "
+        + "this corpus/runtime has not yet materialized that stage's exact live selector. "
+        + "Use --vehicle TYPE_OR_NAME only when you intentionally want explicit manual selection."
+      )
     raise SystemExit(
-      f"Toyota VIN {vin_info['vin']} resolved {len(matches)} vehicle candidates ({names}); "
+      f"Toyota VIN {vin_info['vin']} resolved {len(complete)} complete vehicle candidates ({names}); "
       + "use --vehicle TYPE_OR_NAME to select the intended Toyota DB vehicle"
     )
-  return profile.database.profile(profile.region, int(matches[0]["vehicle_type"]), bus=profile.bus)
+  return profile.database.profile(profile.region, int(complete[0]["vehicle_type"]), bus=profile.bus)
 
 
 def _live_transport():
@@ -157,7 +167,9 @@ def cmd_vehicle_show(args, profile: Profile) -> int:
       "release": profile.database.index.get("release"),
       "region": profile.region,
       "vehicle_count": region.get("counts", {}).get("vehicle_count"),
-      "supported_p5_category_count": region.get("counts", {}).get("supported_p5_category_count"),
+      "category_count": region.get("counts", {}).get("category_count"),
+      "catalog_count": region.get("counts", {}).get("catalog_count"),
+      "support_family_counts": region.get("counts", {}).get("support_family_counts"),
     }
   identity_witness = None
   if profile.guard is not None:
@@ -179,7 +191,8 @@ def cmd_vehicle_show(args, profile: Profile) -> int:
   if database_summary is not None:
     lines.append(
       f"Toyota DB: GTS+ {database_summary['release']} region {database_summary['region']}; "
-      + f"{database_summary['vehicle_count']} vehicles, {database_summary['supported_p5_category_count']} current-P5 catalogs"
+      + f"{database_summary['vehicle_count']} vehicles, {database_summary['category_count']} categories, "
+      + f"{database_summary['catalog_count']} decoded catalogs"
     )
   if resolver_summary is not None:
     install_sets = ",".join(str(value) for value in resolver_summary["install_set_ids"])
@@ -244,7 +257,9 @@ def cmd_vehicle_detect(args, profile: Profile) -> int:
       print(f"VIN: {vin_info['vin']}  RX={vin_info['rx_address']:#x} bus={vin_info['rx_bus']} region={profile.region}")
       for row in matches:
         sets = ",".join(str(value) for value in row["install_set_ids"])
-        print(f"✓ Toyota type {row['vehicle_type']} {row.get('name') or '(unnamed)'}; install sets {sets}")
+        marker = "✓" if row.get("resolution_complete", True) else "…"
+        stage = "" if row.get("resolution_complete", True) else f"; next={','.join(row.get('resolver_stages') or [])}"
+        print(f"{marker} Toyota type {row['vehicle_type']} {row.get('name') or '(unnamed)'}; install sets {sets}{stage}")
       if not matches:
         print("no Toyota DB vehicle matched the recovered VIN-decision rows")
     return 0 if matches else 1
@@ -283,7 +298,8 @@ def cmd_vehicle_mounted(args, profile: Profile) -> int:
     "candidate_count": len(rows),
     "responding": sum(row.get("transport_responded") is True for row in rows),
     "no_response": sum(row.get("live_state") == "no_response" for row in rows),
-    "unsupported_generation": sum(row.get("live_state") == "unsupported_generation" for row in rows),
+    "probe_unavailable": sum(row.get("live_state") == "probe_unavailable" for row in rows),
+    "route_unresolved": sum(row.get("live_state") == "route_unresolved" for row in rows),
     "candidates": rows,
   }
   if args.json:
@@ -298,7 +314,7 @@ def cmd_vehicle_mounted(args, profile: Profile) -> int:
         endpoint = f"0x{route.request_address:03X}" + (f"/0x{route.sub_addr:02X}" if route.sub_addr is not None else "")
         category_id, name, generation, phase_type = route.category_id, route.name, route.generation, route.phase_type
       else:
-        endpoint = "(generation route not implemented)"
+        endpoint = "(Toyota route unresolved)"
         category_id = int(row["category_id"])
         name = str(row.get("name") or f"Category {category_id}")
         generation = row.get("generation")
@@ -307,8 +323,8 @@ def cmd_vehicle_mounted(args, profile: Profile) -> int:
       description += f"set={row['install_set_id']} gen={generation} phase=0x{phase_type:02X} {state}"
       print(description)
     print(
-      "Timeouts are live observations only; they are not absence claims. Unsupported diagnostic generations remain visible "
-      + "without projecting current-P5 routing onto them."
+      "Timeouts are live observations only; they are not absence claims. A probe_unavailable row means Toyota's category/route "
+      + "is known but this tool has not recovered that family's exact live probe executor."
     )
   return 0
 
@@ -1066,12 +1082,15 @@ def cmd_did_read(args, profile: Profile) -> int:
 
 
 def cmd_did_support(args, profile: Profile) -> int:
-  """Query Toyota's current-P5 DID bitmap through the category's Toyota transport route."""
+  """Query the Toyota-selected live DID support family through the category route."""
   try:
     candidate, route = resolver.lookup_mount_candidate(profile, args.ecu)
-    if not resolver.uses_current_p5_path(profile, route):
+    family = resolver.support_family(profile, route.category_id)
+    if family != "p5":
+      detail = family or "unresolved"
       raise resolver.ResolverError(
-        f"Toyota category {route.category_id} ({route.name}) generation {route.generation} does not use the current-P5 support resolver")
+        f"Toyota category {route.category_id} ({route.name}) selects support family {detail}; "
+        + "exact DID enumeration is currently implemented only for Toyota's recovered P5 bitmap contract")
     logical_ecu = registry.EcuSpec(
       key=f"category-{route.category_id}", name=route.name, address=route.request_address,
       category_id=route.category_id,
@@ -1108,6 +1127,7 @@ def cmd_did_support(args, profile: Profile) -> int:
       "name": route.name,
       "generation": route.generation,
       "database": candidate.get("database"),
+      "support_family": resolver.support_family(profile, route.category_id),
     },
     "route": route.as_dict(),
     "support_root_did": support_resolver.root_did,
@@ -1118,7 +1138,11 @@ def cmd_did_support(args, profile: Profile) -> int:
     print(json.dumps(document, sort_keys=True))
   else:
     endpoint = f"0x{route.request_address:03X}" + (f"/0x{route.sub_addr:02X}" if route.sub_addr is not None else "")
-    print(f"{route.name} (cat {route.category_id}, {endpoint}) Toyota P5 DID support root 0x{support_resolver.root_did:04X}")
+    family = resolver.support_family(profile, route.category_id) or "unknown"
+    print(
+      f"{route.name} (cat {route.category_id}, {endpoint}) Toyota {family.upper()} DID support root "
+      + f"0x{support_resolver.root_did:04X}"
+    )
     for row in rows:
       names = ", ".join(name for name in row["signals"] if name)
       suffix = f"  {names}" if names else ""
@@ -1743,7 +1767,7 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("did", nargs="+", help="one or more DID numbers or GTS names")
   p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_did_read)
-  p = did_sub.add_parser("support", help="query Toyota's current-P5 live DID support bitmap")
+  p = did_sub.add_parser("support", help="query Toyota's selected live DID support contract")
   p.add_argument("ecu", help="Toyota category ID/name, DDB name, or profile ECU alias")
   p.add_argument("did", nargs="*", help="DID numbers or GTS names; omit to enumerate all advertised DIDs")
   p.add_argument("--json", action="store_true")

@@ -56,8 +56,8 @@ class TestVehicleResolver(unittest.TestCase):
     self.assertEqual(routes[466].endpoint, (0x750, 0x29))
     self.assertEqual(routes[470].endpoint, (0x750, 0x7B))
     self.assertEqual(routes[492].endpoint, (0x750, 0x96))
-    self.assertTrue(resolver.uses_current_p5_path(self.profile, routes[452]))
-    self.assertFalse(resolver.uses_current_p5_path(self.profile, routes[148]))
+    self.assertTrue(resolver.support_family(self.profile, routes[452].category_id) == "p5")
+    self.assertFalse(resolver.support_family(self.profile, routes[148].category_id) == "p5")
     self.assertEqual(resolver.lookup_mount_candidate(self.profile, "frc")[1].category_id, 498)
     self.assertEqual(resolver.lookup_mount_candidate(self.profile, "Tire Pressure Monitor")[1].category_id, 452)
 
@@ -73,7 +73,8 @@ class TestVehicleResolver(unittest.TestCase):
     self.assertEqual(next(row for row in rows if row["category_id"] == 452)["live_state"], "responding")
     self.assertEqual(next(row for row in rows if row["category_id"] == 409)["live_state"], "no_response")
     master = next(row for row in rows if row["category_id"] == 148)
-    self.assertEqual((master["live_state"], master["transport_responded"]), ("unsupported_generation", None))
+    self.assertEqual((master["live_state"], master["transport_responded"]), ("probe_unavailable", None))
+    self.assertFalse(master["probe_available"])
     self.assertIn(((0x750, 0x2A), "read_did", 0x0101), scripted.calls)
     self.assertEqual([call for call in scripted.calls if call[0] == 0x7C0], [(0x7C0, "read_did", 0x0101)])
 

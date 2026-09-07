@@ -97,13 +97,14 @@ class TestUniversalToyotaDatabase(unittest.TestCase):
   def test_bundle_covers_all_current_regions_and_keeps_offline_categories_unrouted(self):
     self.assertEqual(self.database.index["schema"], registry.BUNDLE_SCHEMA)
     self.assertEqual(set(self.database.index["regions"]), {"NA", "EU", "JP"})
-    self.assertEqual(self.database.index["p5_session_generation_low5"], [20, 21])
-    expected = {"NA": (2864, 135, 133), "EU": (6057, 161, 150), "JP": (1868, 143, 143)}
-    for region, (vehicle_count, p5_catalog_count, route_count) in expected.items():
+    self.assertEqual(set(self.database.index["support_contracts"]), {"p5", "p6"})
+    expected = {"NA": (2864, 135, 479), "EU": (6057, 161, 554), "JP": (1868, 143, 589)}
+    for region, (vehicle_count, catalog_count, route_count) in expected.items():
       counts = self.database.region_index(region)["counts"]
       self.assertEqual(counts["vehicle_count"], vehicle_count)
-      self.assertEqual(counts["p5_plugin_category_count"], 179)
-      self.assertEqual(counts["supported_p5_category_count"], p5_catalog_count)
+      self.assertEqual(counts["category_count"], 2136)
+      self.assertEqual(counts["catalog_count"], catalog_count)
+      self.assertEqual(counts["support_family_counts"], {"p3": 1, "p4": 1859, "p5": 172, "p6": 104})
       self.assertEqual(counts["route_count"], route_count)
       self.assertEqual(counts["route_count"], len(self.database.region_index(region)["routes"]))
     offline = self.database.profile("NA")
@@ -116,7 +117,7 @@ class TestUniversalToyotaDatabase(unittest.TestCase):
     self.assertEqual((profile.vehicle_type, profile.vehicle), (12704, "Toyota Camry HV"))
     self.assertEqual(profile.vehicle_resolution["install_set_ids"], [8119, 8120, 8121, 27706])
     self.assertEqual(len(profile.mount_candidates()), 34)
-    self.assertEqual(len(profile.ecus), 33)  # one installed category is outside the implemented current-P5 family
+    self.assertEqual(len(profile.ecus), 34)  # every routed Toyota install candidate survives catalog/family tooling gaps
     self.assertEqual(profile.lookup_ecu("frc").endpoint, (0x792, None))
     engine = profile.lookup_ecu("engine")
     self.assertEqual(engine.functional_response, 0x7E8)
@@ -133,7 +134,18 @@ class TestUniversalToyotaDatabase(unittest.TestCase):
     self.assertEqual(len(profile.mount_candidates()), 35)
     self.assertEqual(len(profile.ecus), 35)
     self.assertTrue(all(ecu.route_resolved for ecu in profile.ecus))
-    self.assertTrue(all(profile.category(ecu) is not None for ecu in profile.ecus))
+    self.assertTrue(all(ecu.route_resolved for ecu in profile.ecus))
+    self.assertEqual(len(profile.ecus), 35)
+
+  def test_p4_vin_hit_remains_nonfinal_until_toyota_type41_stage(self):
+    # Current NA type-59 row: category 60 / phase 0x12 / vehicle 10877.
+    # VIN10 dispatches generation-low5 4 through CGetCarInfoPhase4, which then
+    # runs the Spe 0x28..0x39 probe program and class-0x129 type-41 decision.
+    matches = self.database.resolve_vin("NA", "XX1KEXXEXAX123456")
+    self.assertEqual(len(matches), 1)
+    self.assertEqual(matches[0]["vehicle_type"], 10877)
+    self.assertEqual(matches[0]["resolver_stages"], ["requires_type41_vehicle_decision"])
+    self.assertFalse(matches[0]["resolution_complete"])
 
   def test_vin_decision_resolves_camry_without_a_camry_profile(self):
     for vin in ("XXXXAXXKXSX123456", "XXXXBXXKXSX123456"):

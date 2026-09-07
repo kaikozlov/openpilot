@@ -1,9 +1,9 @@
-"""Toyota GTS-derived vehicle, mounted-ECU routing, and current-P5 capability resolution.
+"""Toyota GTS-derived vehicle, mounted-ECU routing, and capability resolution.
 
-The universal bundle carries Toyota regional VIN decisions, install sets, logical ECU
-categories, class-0x10D transport routes, and the GetSupportP5 capability contract.
-This module follows those recovered Toyota stages directly. Legacy single-vehicle
-registries remain supported as compatibility fixtures, not as routing authority.
+The universal bundle carries Toyota regional vehicle decisions, install sets, logical
+ECU categories, class-0x10D transport routes, literal support-plugin dispatch, and
+family support contracts. Implementation availability is kept separate from Toyota
+category/vehicle support. Legacy registries remain compatibility fixtures only.
 """
 from __future__ import annotations
 
@@ -216,14 +216,48 @@ def lookup_mount_candidate(profile: Profile, ref: str | int) -> tuple[dict[str, 
   raise ResolverError(f"ambiguous Toyota mount category {ref!r}")
 
 
-def uses_current_p5_path(profile: Profile, route: ToyotaRoute) -> bool:
-  """Return whether Toyota's recovered generation dispatch selects the current-P5 path."""
-  raw = profile.session_control or {}
-  eligible = raw.get("eligible_generation_low5")
-  if not isinstance(eligible, list) or not eligible:
-    return False
-  generations = {registry.parse_int(value, "session_control.eligible_generation_low5") for value in eligible}
-  return (route.generation & 0x1F) in generations
+def category_metadata(profile: Profile, category_id: int) -> dict[str, Any] | None:
+  """Return Toyota master category metadata without requiring a decoded catalog shard."""
+  if profile.database is not None and profile.region is not None:
+    categories = profile.database.region_index(profile.region).get("categories")
+    row = categories.get(str(category_id)) if isinstance(categories, dict) else None
+    if isinstance(row, dict):
+      return row
+  for candidate in profile.mount_candidates():
+    if int(candidate.get("category_id", -1)) == category_id:
+      return candidate
+  return None
+
+
+def support_family(profile: Profile, category_id: int) -> str | None:
+  """Toyota DLL-table-selected support family; generation fallback is legacy-fixture-only."""
+  row = category_metadata(profile, category_id)
+  value = row.get("support_family") if isinstance(row, dict) else None
+  if value:
+    return str(value).casefold()
+  # Registry v5/v6 predates literal DLL-family metadata. Preserve it as a compatibility
+  # fixture without allowing this inference to become authority for universal bundles.
+  if profile.database is None:
+    candidate = next((item for item in profile.mount_candidates() if int(item.get("category_id", -1)) == category_id), None)
+    raw = profile.session_control or {}
+    eligible = raw.get("eligible_generation_low5")
+    if isinstance(candidate, dict) and isinstance(eligible, list):
+      generation = int(candidate.get("generation", -1)) & 0x1F
+      values = {registry.parse_int(item, "session_control.eligible_generation_low5") for item in eligible}
+      if generation in values:
+        return "p5"
+  return None
+
+
+def support_contract(profile: Profile, family: str) -> dict[str, Any] | None:
+  contracts = None
+  if profile.vehicle_resolution is not None:
+    contracts = profile.vehicle_resolution.get("support_contracts")
+  if not isinstance(contracts, dict) and profile.database is not None:
+    contracts = profile.database.index.get("support_contracts")
+  row = contracts.get(family.casefold()) if isinstance(contracts, dict) else None
+  return row if isinstance(row, dict) else None
+
 
 
 def analyze_support_bitmap(base: int, bitmap: bytes, shift: int) -> list[int]:
@@ -260,7 +294,10 @@ class P5DidSupportResolver:
 
   @classmethod
   def from_profile(cls, profile: Profile, client: Any) -> P5DidSupportResolver:
-    raw = _vehicle_resolution(profile).get("p5_support")
+    raw = support_contract(profile, "p5")
+    if raw is None:
+      # Legacy v5/v6 registry compatibility.
+      raw = _vehicle_resolution(profile).get("p5_support")
     did_root = raw.get("did_root") if isinstance(raw, dict) else None
     if not isinstance(did_root, dict):
       raise ResolverError("vehicle_resolution.p5_support.did_root is missing")
@@ -322,47 +359,83 @@ def _response_probe(client: Any, did: int) -> tuple[str, bytes | None, str | Non
     return "timeout", None, str(e)
 
 
+def _support_root_did(profile: Profile, family: str) -> int | None:
+  contract = support_contract(profile, family)
+  if contract is None and family == "p5" and profile.database is None:
+    legacy = profile.vehicle_resolution or {}
+    candidate = legacy.get("p5_support")
+    contract = candidate if isinstance(candidate, dict) else None
+  root = contract.get("did_root") if isinstance(contract, dict) else None
+  if not isinstance(root, dict):
+    return None
+  try:
+    request = registry.parse_bytes(root.get("request"), f"support_contracts.{family}.did_root.request")
+  except registry.RegistryError:
+    return None
+  if len(request) != 3 or request[0] != READ_DATA_BY_IDENTIFIER:
+    return None
+  return int.from_bytes(request[1:], "big")
+
+
 def probe_mount_candidates(profile: Profile, client_factory) -> list[dict[str, Any]]:
-  """Apply Toyota's implemented route/capability resolver while preserving unsupported install metadata."""
+  """Probe Toyota install candidates without turning tooling coverage into an ECU policy.
+
+  P5/P6 categories have recovered live DID-support roots and can be response-probed
+  directly. Other routed categories remain fully represented; until their exact
+  Toyota connection/support executor is recovered they are `probe_unavailable`, not
+  "unsupported" and not absent.
+  """
   _vehicle_resolution(profile)
   result: list[dict[str, Any]] = []
-  endpoint_cache: dict[tuple[int, int | None], dict[str, Any]] = {}
+  endpoint_cache: dict[tuple[int, int | None, str, int], dict[str, Any]] = {}
   for candidate in profile.mount_candidates():
     row = dict(candidate)
+    family = support_family(profile, int(candidate.get("category_id", -1)))
+    row["support_family"] = family
     if not isinstance(candidate.get("transport_route"), dict):
-      row.update(live_state="unsupported_generation", transport_responded=None,
-                 support_root=None, supported_group_count=None)
+      row.update(live_state="route_unresolved", transport_responded=None, probe_available=False,
+                 support_root=None, supported_group_count=None,
+                 probe_error="Toyota class-0x10D route is not resolved in this corpus")
       result.append(row)
       continue
     route = route_for_candidate(candidate)
-    if not uses_current_p5_path(profile, route):
-      row.update(live_state="unsupported_generation", transport_responded=None,
-                 support_root=None, supported_group_count=None)
+    root_did = _support_root_did(profile, family) if family else None
+    if root_did is None:
+      row.update(live_state="probe_unavailable", transport_responded=None, probe_available=False,
+                 support_root=None, supported_group_count=None,
+                 probe_error=f"Toyota support family {family or 'unresolved'} is known but its live probe executor is not recovered")
       result.append(row)
       continue
 
-    endpoint = route.endpoint
-    if endpoint not in endpoint_cache:
+    endpoint_key = (route.request_address, route.sub_addr, family or "", root_did)
+    if endpoint_key not in endpoint_cache:
       client = client_factory(route.request_address, route.sub_addr)
-      support = P5DidSupportResolver.from_profile(profile, client)
-      root_state, root_payload, root_error = _response_probe(client, support.root_did)
+      root_state, root_payload, root_error = _response_probe(client, root_did)
+      state: dict[str, Any]
       if root_state in {"positive", "negative"}:
         state = {
           "live_state": "responding",
           "transport_responded": True,
+          "probe_available": True,
           "support_root": root_state == "positive",
-          "supported_group_count": len(analyze_support_bitmap(0, root_payload or b"", 8)) if root_payload is not None else None,
+          "supported_group_count": (
+            len(analyze_support_bitmap(0, root_payload or b"", 8))
+            if family == "p5" and root_payload is not None else None
+          ),
           "support_error": root_error,
+          "support_root_did": root_did,
         }
       else:
         state = {
           "live_state": "no_response",
           "transport_responded": False,
+          "probe_available": True,
           "support_root": None,
           "supported_group_count": None,
           "support_error": root_error,
+          "support_root_did": root_did,
         }
-      endpoint_cache[endpoint] = state
-    row.update(endpoint_cache[endpoint])
+      endpoint_cache[endpoint_key] = state
+    row.update(endpoint_cache[endpoint_key])
     result.append(row)
   return result

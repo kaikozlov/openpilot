@@ -348,7 +348,7 @@ class TestLiveCli(unittest.TestCase):
     condition = next(signal for signal in documents[0]["values"][0]["signals"] if signal["name"] == "LTA Control Condition")
     self.assertEqual(condition["pattern"], "LTA Enabled")
 
-  def test_monitor_engine_uses_toyota_current_p5_generation_gate(self):
+  def test_monitor_engine_uses_category_local_toyota_lifecycle(self):
     scripted = support.ScriptedUds()
     scripted.did[0x700] = {0x0000: b"\x01"}
     panda = support.FakePanda()
@@ -471,7 +471,7 @@ class TestLiveCli(unittest.TestCase):
     scripted = support.ScriptedUds()
     profile = registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)
     for _, route in resolver.mount_routes(profile):
-      if not resolver.uses_current_p5_path(profile, route):
+      if resolver.support_family(profile, route.category_id) != "p5":
         continue
       endpoint = (route.request_address, route.sub_addr) if route.sub_addr is not None else route.request_address
       scripted.did[endpoint] = {0x0101: bytes(32)}
@@ -480,7 +480,7 @@ class TestLiveCli(unittest.TestCase):
       rc, output = run_cli(["vehicle", "mounted", "--json"])
     self.assertEqual(rc, 0, output)
     document = json.loads(output)
-    self.assertEqual((document["candidate_count"], document["responding"], document["no_response"], document["unsupported_generation"]),
+    self.assertEqual((document["candidate_count"], document["responding"], document["no_response"], document["probe_unavailable"]),
                      (34, 33, 0, 1))
     self.assertEqual(len({row["category_id"] for row in document["candidates"]}), 34)
     tpm = next(row for row in document["candidates"] if row["category_id"] == 452)
