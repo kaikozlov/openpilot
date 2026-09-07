@@ -38,6 +38,13 @@ layers; no missing frame may be used to invent a private EPS stub or second EPS 
 
 The EPS bootloader F181 is `02 || 32*0x21` on the same physical route.
 
+CAN identification uses elimination, not a requirement to observe every listed frame.
+The provisional Corolla census therefore remains a competing fingerprint candidate:
+its subset traffic must leave identification ambiguous, rather than falsely selecting
+Camry. Observing Camry-only traffic eliminates that candidate and preserves normal
+Camry identification. This does not establish an exact Corolla firmware identity or
+change either platform's control configuration.
+
 ## Source-real state joins
 
 Controlled passive captures on this exact Camry establish:
@@ -49,6 +56,13 @@ Controlled passive captures on this exact Camry establish:
 - physical steering state is carried by the same TSS3-era FD family already used by the
   passive Camry port (`0x025`, `0x030`, etc.). `0x030` yields source-real physical driver
   torque; the old `0x260/0x262/0x2E4/0x131` Corolla-era steering contract is not present.
+- Native post-repin bus-2 `0x08A/32` is **40 Hz**, not 83 Hz. Original rlogs
+  `2026-09-04/0000003d--0e812cecba` segments 0 and 10 and
+  `2026-09-06/0000003e--1a2f20417d` segment 10 measure 39.999, 39.994, and
+  39.998 Hz respectively, counting native bus-2 frames only (no TX echoes).
+  The parser and Panda receive declarations use 40 Hz. This restores the parser's
+  normal ten-period timeout to 250 ms; Panda's existing one-second minimum
+  receive timeout is unchanged. The timeout regression still rejects a lost stream.
 
 ### Cruise controls
 
