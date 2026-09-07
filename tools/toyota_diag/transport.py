@@ -189,9 +189,9 @@ def can_query_callbacks(panda, *, wait_timeout: float = QUERY_RECV_WAIT):
   return can_recv, can_send
 
 
-def uds_client_factory(panda, profile: Profile, timeouts: registry.CommTimeouts | None = None) -> Callable[[int], UdsClient]:
-  def factory(address: int) -> UdsClient:
-    return UdsClient(panda, address, bus=profile.bus,
+def uds_client_factory(panda, profile: Profile, timeouts: registry.CommTimeouts | None = None) -> Callable[[int, int | None], UdsClient]:
+  def factory(address: int, sub_addr: int | None = None) -> UdsClient:
+    return UdsClient(panda, address, bus=profile.bus, sub_addr=sub_addr,
                      timeout=timeouts.uds_timeout if timeouts is not None else profile.uds_timeout,
                      response_pending_timeout=timeouts.response_pending_timeout if timeouts is not None else profile.uds_response_pending_timeout)
   return factory

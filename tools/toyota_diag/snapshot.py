@@ -67,12 +67,7 @@ def build(profile: Profile, client_factory, transport_state: dict[str, Any] | No
       "dtcs": dtcs,
       "fault_count": sum(1 for row in dtcs if row["fault_status"]),
     })
-  mount_candidates = []
-  for candidate in profile.mount_candidates():
-    row = dict(candidate)
-    address = row.get("direct_address")
-    row["dtc_scan_responded"] = None if address is None else int(address) in responding
-    mount_candidates.append(row)
+  mount_candidates = [dict(candidate) for candidate in profile.mount_candidates()]
   return {
     "profile": profile.name,
     "vehicle": profile.vehicle,
@@ -94,9 +89,8 @@ def render(document: dict[str, Any]) -> str:
   lines.append(f"ECUs:      {document['responding_ecus']} responding on the live-validated DTC sweep")
   candidates = document.get("toyota_mount_candidates") or []
   if candidates:
-    direct = [row for row in candidates if row.get("direct_address") is not None]
-    observed = sum(row.get("dtc_scan_responded") is True for row in direct)
-    lines.append(f"Toyota:    {len(candidates)} logical mount candidates; {observed}/{len(direct)} direct endpoints responded to DTC scan")
+    routed = sum(isinstance(row.get("transport_route"), dict) for row in candidates)
+    lines.append(f"Toyota:    {len(candidates)} logical mount candidates; {routed} Toyota transport routes")
   lines.append(f"DTCs:      {document['fault_status_records']} fault-status record(s)")
   lines.append("")
   for row in document["ecus"]:

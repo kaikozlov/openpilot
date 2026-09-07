@@ -12,7 +12,7 @@ class TestRegistry(unittest.TestCase):
     cls.profile = registry.load_registry()
 
   def test_exact_camry_profile_and_guard(self):
-    self.assertEqual(self.profile.document["schema"], "toyota-diagnostics-registry-v5")
+    self.assertEqual(self.profile.document["schema"], "toyota-diagnostics-registry-v6")
     self.assertEqual(self.profile.name, "camry-2026-f33")
     self.assertEqual(self.profile.bus, 0)
     self.assertEqual(self.profile.fault_status_mask, 0xAF)
@@ -58,7 +58,7 @@ class TestRegistry(unittest.TestCase):
                      (0x1588, "31011588", "31021588", "31031588"))
     self.assertEqual((test["execution"], test["session_requirement"]), ("executable", "extended"))
 
-  def test_v5_resolver_lifecycle_plugins_and_utility_family_metadata(self):
+  def test_v6_resolver_lifecycle_plugins_and_utility_family_metadata(self):
     resolver = self.profile.vehicle_resolution
     self.assertEqual((resolver["vehicle_type"], resolver["vehicle_name"], resolver["install_set_ids"]),
                      (12704, "Camry HV", [8119, 8120, 8121, 27706]))
@@ -66,6 +66,11 @@ class TestRegistry(unittest.TestCase):
     self.assertEqual({row["connection_frame_id"] for row in self.profile.mount_candidates()}, {0})
     self.assertEqual({row["connection_comm_set_id"] for row in self.profile.mount_candidates()}, {9})
     self.assertEqual({row["connection_phase_type"] for row in self.profile.mount_candidates()}, {0x12, 0x22})
+    self.assertTrue(all("direct_address" not in row for row in self.profile.mount_candidates()))
+    routes = {row["category_id"]: row["transport_route"] for row in self.profile.mount_candidates()}
+    self.assertEqual((routes[409]["request_address"], routes[409]["address_extension"]), (0x7C0, 0))
+    self.assertEqual((routes[452]["request_address"], routes[452]["address_extension"]), (0x750, 0x2A))
+    self.assertEqual((routes[498]["request_address"], routes[498]["address_extension"]), (0x792, 0))
     session = self.profile.session_control
     self.assertEqual((session["generation"], session["enter_sequence"], session["return_default"]),
                      ("current-p5", ["1001", "1003"], "1001"))

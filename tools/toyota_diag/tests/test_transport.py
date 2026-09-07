@@ -117,6 +117,18 @@ class TestTransport(unittest.TestCase):
     can_send([CanData(0x7DF, bytes.fromhex("0209020000000000"), 0)])
     self.assertEqual(panda.sent, [(0x7DF, bytes.fromhex("0209020000000000"), 0)])
 
+  def test_uds_factory_passes_toyota_subaddress_to_upstream_client(self):
+    panda = object()
+    sentinel = object()
+    with mock.patch("tools.toyota_diag.transport.UdsClient", return_value=sentinel) as uds:
+      client = transport.uds_client_factory(panda, self.profile)(0x750, 0x2A)
+    self.assertIs(client, sentinel)
+    uds.assert_called_once_with(
+      panda, 0x750, bus=self.profile.bus, sub_addr=0x2A,
+      timeout=self.profile.uds_timeout,
+      response_pending_timeout=self.profile.uds_response_pending_timeout,
+    )
+
   def test_connect_uses_managed_path_when_pandad_owns_panda(self):
     sentinel = object()
     with mock.patch("tools.toyota_diag.transport.pandad_running", return_value=True), \

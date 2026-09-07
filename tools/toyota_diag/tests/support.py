@@ -46,41 +46,43 @@ class FakePanda:
 
 
 class _ScriptedClient:
-  def __init__(self, owner, address):
+  def __init__(self, owner, address, sub_addr=None):
     self.owner = owner
     self.address = address
+    self.sub_addr = sub_addr
+    self.endpoint = (address, sub_addr) if sub_addr is not None else address
 
   def read_dtc_information(self, report_type, status_mask, *args, **kwargs):
-    self.owner.calls.append((self.address, "read_dtc", report_type, status_mask))
-    return self.owner.result(self.owner.dtc.get(self.address), MessageTimeoutError())
+    self.owner.calls.append((self.endpoint, "read_dtc", report_type, status_mask))
+    return self.owner.result(self.owner.dtc.get(self.endpoint), MessageTimeoutError())
 
   def clear_diagnostic_information(self, group):
-    self.owner.calls.append((self.address, "clear", group))
-    return self.owner.result(self.owner.clear.get(self.address), None)
+    self.owner.calls.append((self.endpoint, "clear", group))
+    return self.owner.result(self.owner.clear.get(self.endpoint), None)
 
   def read_data_by_identifier(self, did):
-    self.owner.calls.append((self.address, "read_did", did))
-    return self.owner.result(self.owner.did.get(self.address, {}).get(did), MessageTimeoutError())
+    self.owner.calls.append((self.endpoint, "read_did", did))
+    return self.owner.result(self.owner.did.get(self.endpoint, {}).get(did), MessageTimeoutError())
 
   def diagnostic_session_control(self, session_type):
-    self.owner.calls.append((self.address, "session", int(session_type)))
-    return self.owner.result(self.owner.session.get((self.address, int(session_type))), None)
+    self.owner.calls.append((self.endpoint, "session", int(session_type)))
+    return self.owner.result(self.owner.session.get((self.endpoint, int(session_type))), None)
 
   def tester_present(self, *args, **kwargs):
-    self.owner.calls.append((self.address, "tester_present"))
-    return self.owner.result(self.owner.tester.get(self.address), None)
+    self.owner.calls.append((self.endpoint, "tester_present"))
+    return self.owner.result(self.owner.tester.get(self.endpoint), None)
 
   def input_output_control_by_identifier(self, did, control_parameter_type,
                                          control_option_record=b"", control_enable_mask_record=b""):
-    self.owner.calls.append((self.address, "io_control", int(did), int(control_parameter_type),
+    self.owner.calls.append((self.endpoint, "io_control", int(did), int(control_parameter_type),
                              bytes(control_option_record), bytes(control_enable_mask_record)))
-    return self.owner.result(self.owner.io_control.get((self.address, int(did), int(control_parameter_type))), b"")
+    return self.owner.result(self.owner.io_control.get((self.endpoint, int(did), int(control_parameter_type))), b"")
 
   def routine_control(self, routine_control_type, routine_identifier, routine_option_record=b""):
-    self.owner.calls.append((self.address, "routine", int(routine_control_type), int(routine_identifier),
+    self.owner.calls.append((self.endpoint, "routine", int(routine_control_type), int(routine_identifier),
                              bytes(routine_option_record)))
     return self.owner.result(
-      self.owner.routine.get((self.address, int(routine_control_type), int(routine_identifier))), b"")
+      self.owner.routine.get((self.endpoint, int(routine_control_type), int(routine_identifier))), b"")
 
 
 
@@ -109,8 +111,8 @@ class ScriptedUds:
       raise script
     return script
 
-  def factory(self, address):
-    return _ScriptedClient(self, address)
+  def factory(self, address, sub_addr=None):
+    return _ScriptedClient(self, address, sub_addr)
 
   @staticmethod
   def negative_response():

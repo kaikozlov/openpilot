@@ -4,7 +4,7 @@ from contextlib import ExitStack, redirect_stdout
 from io import StringIO
 from unittest import mock
 
-from tools.toyota_diag import active_test, cli, registry
+from tools.toyota_diag import active_test, cli, registry, resolver
 from tools.toyota_diag.tests import support
 
 
@@ -455,7 +455,8 @@ class TestLiveCli(unittest.TestCase):
     self.assertIn("8965F3307000", document["ecus"][0]["identity"]["0xF181"]["ascii"])
     self.assertEqual(len(document["toyota_mount_candidates"]), 34)
     eps_candidate = next(row for row in document["toyota_mount_candidates"] if row["category_id"] == 405)
-    self.assertTrue(eps_candidate["dtc_scan_responded"])
+    self.assertEqual(eps_candidate["transport_route"]["request_address"], 0x7A1)
+    self.assertNotIn("dtc_scan_responded", eps_candidate)
 
   def test_vehicle_detect_uses_toyota_vin_decision_not_f181_guard(self):
     scripted = support.ScriptedUds()
@@ -470,20 +471,26 @@ class TestLiveCli(unittest.TestCase):
     read_vin.assert_called_once()
     self.assertEqual(scripted.calls, [])
 
-  def test_vehicle_mounted_preserves_34_logical_categories(self):
+  def test_vehicle_mounted_uses_all_toyota_routes_without_local_endpoint_gate(self):
     import json
     scripted = support.ScriptedUds()
     profile = registry.load_registry()
-    for row in profile.mount_candidates():
-      if row["direct_address"] is not None:
-        scripted.did[int(row["direct_address"])] = {0x0101: bytes(32)}
+    for _, route in resolver.mount_routes(profile):
+      if not resolver.uses_current_p5_path(profile, route):
+        continue
+      endpoint = (route.request_address, route.sub_addr) if route.sub_addr is not None else route.request_address
+      scripted.did[endpoint] = {0x0101: bytes(32)}
     panda = support.FakePanda()
     with self.patch_live(panda, scripted):
       rc, output = run_cli(["vehicle", "mounted", "--json"])
     self.assertEqual(rc, 0, output)
     document = json.loads(output)
-    self.assertEqual((document["candidate_count"], document["responding_direct"], document["not_directly_routed"]), (34, 8, 26))
+    self.assertEqual((document["candidate_count"], document["responding"], document["no_response"], document["not_current_p5"]),
+                     (34, 33, 0, 1))
     self.assertEqual(len({row["category_id"] for row in document["candidates"]}), 34)
+    tpm = next(row for row in document["candidates"] if row["category_id"] == 452)
+    self.assertEqual((tpm["transport_route"]["request_address"], tpm["transport_route"]["address_extension"]), (0x750, 0x2A))
+    self.assertIn(((0x750, 0x2A), "read_did", 0x0101), scripted.calls)
 
   def test_did_support_uses_toyota_c8_bitmap(self):
     import json
@@ -494,8 +501,23 @@ class TestLiveCli(unittest.TestCase):
       rc, output = run_cli(["did", "support", "frc", "0x1601", "--json"])
     self.assertEqual(rc, 0, output)
     document = json.loads(output)
+    self.assertEqual((document["category"]["category_id"], document["route"]["request_address"]), (498, 0x792))
     self.assertEqual(document["supported_groups"], [0x1600])
     self.assertEqual(document["results"][0]["supported"], True)
+
+  def test_did_support_accepts_toyota_category_and_extended_route_and_can_enumerate(self):
+    import json
+    scripted = support.ScriptedUds()
+    scripted.did[(0x750, 0x2A)] = {0x0101: bytes.fromhex("000080"), 0x1000: bytes.fromhex("a0")}
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["did", "support", "452", "--json"])
+    self.assertEqual(rc, 0, output)
+    document = json.loads(output)
+    self.assertEqual(document["category"]["name"], "Tire Pressure Monitor")
+    self.assertEqual((document["route"]["request_address"], document["route"]["sub_addr"]), (0x750, 0x2A))
+    self.assertEqual([row["did"] for row in document["results"]], [0x1001, 0x1003])
+    self.assertIn(((0x750, 0x2A), "read_did", 0x0101), scripted.calls)
 
   def test_did_read_fails_closed_when_payload_is_short(self):
     scripted = support.ScriptedUds()

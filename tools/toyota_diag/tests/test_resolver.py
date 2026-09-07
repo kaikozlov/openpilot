@@ -47,26 +47,39 @@ class TestVehicleResolver(unittest.TestCase):
     self.assertEqual(scripted.calls.count((0x792, "read_did", 0x0101)), 1)
     self.assertEqual(scripted.calls.count((0x792, "read_did", 0x1600)), 1)
 
-  def test_mount_candidates_preserve_logical_category_and_fail_open_on_route_unknown(self):
+  def test_mount_routes_are_toyota_category_phase_routes(self):
+    routes = {route.category_id: route for _, route in resolver.mount_routes(self.profile)}
+    self.assertEqual(len(routes), 34)
+    self.assertEqual(routes[409].endpoint, (0x7C0, None))
+    self.assertEqual(routes[498].endpoint, (0x792, None))
+    self.assertEqual(routes[452].endpoint, (0x750, 0x2A))
+    self.assertEqual(routes[466].endpoint, (0x750, 0x29))
+    self.assertEqual(routes[470].endpoint, (0x750, 0x7B))
+    self.assertEqual(routes[492].endpoint, (0x750, 0x96))
+    self.assertTrue(resolver.uses_current_p5_path(self.profile, routes[452]))
+    self.assertFalse(resolver.uses_current_p5_path(self.profile, routes[148]))
+    self.assertEqual(resolver.lookup_mount_candidate(self.profile, "frc")[1].category_id, 498)
+    self.assertEqual(resolver.lookup_mount_candidate(self.profile, "Tire Pressure Monitor")[1].category_id, 452)
+
+  def test_mount_probe_uses_toyota_routes_including_extended_addressing(self):
     scripted = support.ScriptedUds()
-    direct = [row for row in self.profile.mount_candidates() if row["direct_address"] is not None]
-    first = int(direct[0]["direct_address"])
-    scripted.did[first] = {0x0101: bytes(32)}  # positive root response proves endpoint presence
-    # Another direct endpoint explicitly times out on root + fallback; that remains an observation, not absence proof.
-    second = int(direct[1]["direct_address"])
-    scripted.did[second] = {0x0101: MessageTimeoutError(), 0xF186: MessageTimeoutError()}
+    scripted.did[0x792] = {0x0101: bytes(32)}
+    scripted.did[(0x750, 0x2A)] = {0x0101: bytes(32)}
+    scripted.did[0x7C0] = {0x0101: MessageTimeoutError()}
     rows = resolver.probe_mount_candidates(self.profile, scripted.factory)
     self.assertEqual(len(rows), 34)
     self.assertEqual(len({row["category_id"] for row in rows}), 34)
-    self.assertEqual(next(row for row in rows if row["direct_address"] == first)["live_state"], "responding")
-    self.assertEqual(next(row for row in rows if row["direct_address"] == second)["live_state"], "no_response")
-    indirect = [row for row in rows if row["direct_address"] is None]
-    self.assertTrue(indirect)
-    self.assertTrue(all(row["live_state"] == "not_directly_routed" and row["transport_responded"] is None for row in indirect))
+    self.assertEqual(next(row for row in rows if row["category_id"] == 498)["live_state"], "responding")
+    self.assertEqual(next(row for row in rows if row["category_id"] == 452)["live_state"], "responding")
+    self.assertEqual(next(row for row in rows if row["category_id"] == 409)["live_state"], "no_response")
+    master = next(row for row in rows if row["category_id"] == 148)
+    self.assertEqual((master["live_state"], master["transport_responded"]), ("not_current_p5", None))
+    self.assertIn(((0x750, 0x2A), "read_did", 0x0101), scripted.calls)
+    self.assertEqual([call for call in scripted.calls if call[0] == 0x7C0], [(0x7C0, "read_did", 0x0101)])
 
   def test_v3_registry_has_no_invented_vehicle_resolver(self):
     legacy = support.load_profile(None)
-    with self.assertRaisesRegex(resolver.ResolverError, "requires registry v5"):
+    with self.assertRaisesRegex(resolver.ResolverError, "requires registry v5\\+"):
       resolver.resolve_profile_vin(legacy, "XXXXAXXKXSX123456")
 
 

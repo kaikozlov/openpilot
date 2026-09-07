@@ -31,7 +31,7 @@ class TestLifecycleParsing(unittest.TestCase):
     self.assertIsNone(profile.session_control)
     self.assertIsNone(parse_lifecycle(profile))
 
-  def test_bundled_v5_lifecycle_and_toyota_generation_gate(self):
+  def test_bundled_v6_lifecycle_and_toyota_generation_gate(self):
     profile = registry.load_registry()
     lifecycle = parse_lifecycle(profile)
     assert lifecycle is not None

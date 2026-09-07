@@ -1,17 +1,10 @@
-"""Toyota GTS-derived vehicle, mounted-ECU, and current-P5 capability resolution.
+"""Toyota GTS-derived vehicle, mounted-ECU routing, and current-P5 capability resolution.
 
-Registry v5 carries a clean representation of the current GTS+ resolver recovered in
-`ghidra_rh850_analysis`: VIN decision rows, install-set/mount candidates, and the
-GetSupportP5 DID bitmap contract.  This module interprets that metadata without
-shipping or emulating Toyota binaries.
-
-The live Comma transport cannot reproduce Toyota's category-aware J2534 connection
-object for gateway-shared logical ECUs.  Consequently live mount probing is exact only
-about what it actually observes: a response from a registry-supplied direct endpoint
-proves that transport endpoint is present; no response is reported as `no_response`,
-not as proof that a Toyota logical ECU is absent.  Candidates without a validated
-`direct_address` remain `not_directly_routed` rather than being collapsed onto a
-shared CAN ID.
+Registry v6 carries the current GTS+ resolver recovered in `ghidra_rh850_analysis`:
+VIN decision rows, install-set/mount candidates, Toyota class-0x10D category routes,
+and the GetSupportP5 DID bitmap contract.  This module follows those Toyota resolver
+stages directly; maintained profile addresses are observations for older CLI surfaces,
+not admission policy for vehicle/category/capability resolution.
 """
 from __future__ import annotations
 
@@ -25,7 +18,6 @@ from tools.toyota_diag import registry
 from tools.toyota_diag.registry import Profile
 
 P5_SUPPORT_ROOT_DID = 0x0101
-CURRENT_SESSION_DID = 0xF186
 READ_DATA_BY_IDENTIFIER = 0x22
 
 
@@ -33,10 +25,45 @@ class ResolverError(ValueError):
   pass
 
 
+@dataclass(frozen=True)
+class ToyotaRoute:
+  category_id: int
+  name: str
+  generation: int
+  phase_type: int
+  request_address: int
+  address_extension: int
+  protocol_info_id: int
+  functional_address: int
+
+  @property
+  def sub_addr(self) -> int | None:
+    # Toyota's protocol row carries the address extension explicitly. A nonzero
+    # value maps directly to upstream openpilot's existing (tx_addr, sub_addr) transport.
+    return self.address_extension or None
+
+  @property
+  def endpoint(self) -> tuple[int, int | None]:
+    return self.request_address, self.sub_addr
+
+  def as_dict(self) -> dict[str, Any]:
+    return {
+      "category_id": self.category_id,
+      "name": self.name,
+      "generation": self.generation,
+      "phase_type": self.phase_type,
+      "request_address": self.request_address,
+      "address_extension": self.address_extension,
+      "sub_addr": self.sub_addr,
+      "protocol_info_id": self.protocol_info_id,
+      "functional_address": self.functional_address,
+    }
+
+
 def _vehicle_resolution(profile: Profile) -> dict[str, Any]:
   raw = profile.vehicle_resolution
   if raw is None:
-    raise ResolverError("registry supplies no Toyota vehicle_resolution metadata (requires registry v5)")
+    raise ResolverError("registry supplies no Toyota vehicle_resolution metadata (requires registry v5+)")
   return raw
 
 
@@ -47,7 +74,7 @@ def _vin11(vin: str) -> bytes:
 
 
 def vin_decision_matches(row: dict[str, Any], vin: str, *, category_id: int, phase_type: int) -> bool:
-  """Express current CDbVinVehicleDecisionTable::DecisionKey over a v5 row."""
+  """Express current CDbVinVehicleDecisionTable::DecisionKey over a structured resolver row."""
   vin11 = _vin11(vin)
   try:
     if int(row["category_id"]) != category_id or int(row["phase_type"]) != phase_type:
@@ -64,8 +91,8 @@ def vin_decision_matches(row: dict[str, Any], vin: str, *, category_id: int, pha
 def resolve_profile_vin(profile: Profile, vin: str) -> dict[str, Any] | None:
   """Resolve one bundled profile's Toyota VIN-decision rows.
 
-  The v5 profile already identifies the source category and phase rows selected from
-  Toyota's current master.  This function evaluates the exact VIN wildcard predicate;
+  The registry identifies the source category and phase rows selected from Toyota's
+  current master. This function evaluates the exact VIN wildcard predicate;
   live endpoint/capability observations are a separate stage below.
   """
   raw = _vehicle_resolution(profile)
@@ -106,6 +133,97 @@ def read_vehicle_vin(can_recv, can_send, bus: int, *, timeout: float = 0.1, retr
   if vin == VIN_UNKNOWN or not is_valid_vin(vin):
     raise ResolverError("Toyota vehicle resolution could not obtain a valid 17-character VIN")
   return {"vin": vin, "rx_address": rx_address, "rx_bus": rx_bus}
+
+
+def route_for_candidate(candidate: dict[str, Any]) -> ToyotaRoute:
+  """Validate and materialize Toyota's class-0x10D route for one install candidate."""
+  raw = candidate.get("transport_route")
+  if not isinstance(raw, dict):
+    raise ResolverError(f"category {candidate.get('category_id')} has no Toyota transport_route")
+  try:
+    category_id = int(candidate["category_id"])
+    name = str(candidate.get("name") or f"Category {category_id}")
+    generation = int(candidate["generation"])
+    phase_type = int(candidate["connection_phase_type"])
+    route_phase = int(raw["phase_type"])
+    request_address = int(raw["request_address"])
+    extension = int(raw["address_extension"])
+    protocol_info_id = int(raw["protocol_info_id"])
+    functional_address = int(raw["functional_address"])
+  except (KeyError, TypeError, ValueError) as e:
+    raise ResolverError(f"malformed Toyota transport route: {candidate!r}") from e
+  if phase_type != route_phase:
+    raise ResolverError(
+      f"category {category_id} install phase 0x{phase_type:02X} disagrees with route phase 0x{route_phase:02X}")
+  if request_address < 0:
+    raise ResolverError(f"category {category_id} Toyota request address is negative: {request_address}")
+  if not 0 <= extension <= 0xFF:
+    raise ResolverError(f"category {category_id} Toyota address extension is not one byte: {extension}")
+  return ToyotaRoute(
+    category_id=category_id, name=name, generation=generation, phase_type=phase_type,
+    request_address=request_address, address_extension=extension,
+    protocol_info_id=protocol_info_id, functional_address=functional_address,
+  )
+
+
+def mount_routes(profile: Profile) -> tuple[tuple[dict[str, Any], ToyotaRoute], ...]:
+  _vehicle_resolution(profile)
+  rows = profile.mount_candidates()
+  if not rows:
+    raise ResolverError("vehicle_resolution.mount.candidates is empty")
+  return tuple((candidate, route_for_candidate(candidate)) for candidate in rows)
+
+
+def lookup_mount_candidate(profile: Profile, ref: str | int) -> tuple[dict[str, Any], ToyotaRoute]:
+  """Resolve a Toyota logical category by category ID, profile ECU alias, name, or DDB name."""
+  rows = mount_routes(profile)
+  category_id = None
+  if isinstance(ref, int):
+    category_id = ref
+  else:
+    text = ref.strip()
+    try:
+      # Decimal is the natural Toyota category notation; explicit 0x is also accepted.
+      category_id = int(text, 0)
+    except ValueError:
+      category_id = None
+    if category_id is None:
+      try:
+        spec = profile.lookup_ecu(text)
+      except registry.RegistryError:
+        spec = None
+      if spec is not None and spec.category_id is not None:
+        category_id = spec.category_id
+      else:
+        needle = text.casefold()
+        matches = [
+          pair for pair in rows
+          if needle in {
+            str(pair[0].get("name") or "").casefold(),
+            str(pair[0].get("database") or "").casefold(),
+          }
+        ]
+        if len(matches) == 1:
+          return matches[0]
+        if not matches:
+          raise ResolverError(f"no Toyota mount category matches {ref!r}")
+        raise ResolverError(f"ambiguous Toyota mount category {ref!r}")
+  matches = [pair for pair in rows if pair[1].category_id == category_id]
+  if len(matches) == 1:
+    return matches[0]
+  if not matches:
+    raise ResolverError(f"no Toyota mount category matches {ref!r}")
+  raise ResolverError(f"ambiguous Toyota mount category {ref!r}")
+
+
+def uses_current_p5_path(profile: Profile, route: ToyotaRoute) -> bool:
+  """Return whether Toyota's recovered generation dispatch selects the current-P5 path."""
+  raw = profile.session_control or {}
+  eligible = raw.get("eligible_generation_low5")
+  if not isinstance(eligible, list) or not eligible:
+    return False
+  generations = {registry.parse_int(value, "session_control.eligible_generation_low5") for value in eligible}
+  return (route.generation & 0x1F) in generations
 
 
 def analyze_support_bitmap(base: int, bitmap: bytes, shift: int) -> list[int]:
@@ -205,30 +323,26 @@ def _response_probe(client: Any, did: int) -> tuple[str, bytes | None, str | Non
 
 
 def probe_mount_candidates(profile: Profile, client_factory) -> list[dict[str, Any]]:
-  """Probe the v5 Toyota logical mount candidates reachable through known direct endpoints.
+  """Apply Toyota's class-0x10D routes to the current-P5 mount candidates.
 
-  A direct endpoint response is positive evidence of transport presence.  `no_response`
-  remains an observation, not a claim that the logical Toyota category is absent.
-  Gateway/shared candidates with no validated direct endpoint are retained distinctly.
+  Each P5 candidate is queried through its Toyota `(request_address, sub_addr)` route.
+  A response is a live transport observation; a timeout is not treated as proof that
+  the logical category is absent. Non-P5 candidates remain in the Toyota install set
+  with no invented P5 probe.
   """
-  _vehicle_resolution(profile)  # fail closed for pre-v5 registries
-  rows = profile.mount_candidates()
-  if not rows:
-    raise ResolverError("vehicle_resolution.mount.candidates is empty")
-
   result: list[dict[str, Any]] = []
-  address_cache: dict[int, dict[str, Any]] = {}
-  for candidate in rows:
+  endpoint_cache: dict[tuple[int, int | None], dict[str, Any]] = {}
+  for candidate, route in mount_routes(profile):
     row = dict(candidate)
-    address = row.get("direct_address")
-    if address is None:
-      row.update(live_state="not_directly_routed", transport_responded=None,
+    if not uses_current_p5_path(profile, route):
+      row.update(live_state="not_current_p5", transport_responded=None,
                  support_root=None, supported_group_count=None)
       result.append(row)
       continue
-    address = int(address)
-    if address not in address_cache:
-      client = client_factory(address)
+
+    endpoint = route.endpoint
+    if endpoint not in endpoint_cache:
+      client = client_factory(route.request_address, route.sub_addr)
       support = P5DidSupportResolver.from_profile(profile, client)
       root_state, root_payload, root_error = _response_probe(client, support.root_did)
       if root_state in {"positive", "negative"}:
@@ -240,19 +354,14 @@ def probe_mount_candidates(profile: Profile, client_factory) -> list[dict[str, A
           "support_error": root_error,
         }
       else:
-        # F186 is the separately recovered current-P5 session-state poll.  It is
-        # a read-only fallback for endpoint presence if the support root times out.
-        session_state, _, session_error = _response_probe(client, CURRENT_SESSION_DID)
-        responded = session_state in {"positive", "negative"}
         state = {
-          "live_state": "responding" if responded else "no_response",
-          "transport_responded": responded,
+          "live_state": "no_response",
+          "transport_responded": False,
           "support_root": None,
           "supported_group_count": None,
           "support_error": root_error,
-          "fallback_error": session_error,
         }
-      address_cache[address] = state
-    row.update(address_cache[address])
+      endpoint_cache[endpoint] = state
+    row.update(endpoint_cache[endpoint])
     result.append(row)
   return result

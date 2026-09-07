@@ -190,7 +190,7 @@ def cmd_vehicle_detect(args, profile: Profile) -> int:
 
 
 def cmd_vehicle_mounted(args, profile: Profile) -> int:
-  """Inspect Toyota's logical mount candidates and probe only validated direct endpoints."""
+  """Show Toyota's logical install candidates and query them through Toyota's own routes."""
   live = _live_transport()
   try:
     panda = live.connect(profile)
@@ -205,9 +205,9 @@ def cmd_vehicle_mounted(args, profile: Profile) -> int:
     "vehicle_name": raw.get("vehicle_name"),
     "install_set_ids": raw.get("install_set_ids", []),
     "candidate_count": len(rows),
-    "responding_direct": sum(row.get("transport_responded") is True for row in rows),
-    "no_response_direct": sum(row.get("live_state") == "no_response" for row in rows),
-    "not_directly_routed": sum(row.get("live_state") == "not_directly_routed" for row in rows),
+    "responding": sum(row.get("transport_responded") is True for row in rows),
+    "no_response": sum(row.get("live_state") == "no_response" for row in rows),
+    "not_current_p5": sum(row.get("live_state") == "not_current_p5" for row in rows),
     "candidates": rows,
   }
   if args.json:
@@ -216,12 +216,15 @@ def cmd_vehicle_mounted(args, profile: Profile) -> int:
     print(f"Toyota {document['vehicle_name']} type {document['vehicle_type']}: {document['candidate_count']} logical ECU candidates")
     for row in rows:
       state = row["live_state"]
-      mark = "✓" if state == "responding" else ("?" if state == "not_directly_routed" else "·")
-      address = f"0x{int(row['direct_address']):03X}" if row.get("direct_address") is not None else "gateway/shared"
-      description = f"{mark} cat {int(row['category_id']):<5} {str(row['name']):<42} {address:<14} "
-      description += f"set={row['install_set_id']} phase=0x{int(row['connection_phase_type']):02X} {state}"
+      mark = "✓" if state == "responding" else ("·" if state == "no_response" else "-")
+      route = resolver.route_for_candidate(row)
+      endpoint = f"0x{route.request_address:03X}"
+      if route.sub_addr is not None:
+        endpoint += f"/0x{route.sub_addr:02X}"
+      description = f"{mark} cat {route.category_id:<5} {route.name:<42} {endpoint:<14} "
+      description += f"set={row['install_set_id']} gen={route.generation} phase=0x{route.phase_type:02X} {state}"
       print(description)
-    print("No response is an observation only; it is not proof that a Toyota logical category is absent.")
+    print("Timeouts are live observations only; they are not absence claims. Non-current-P5 generations are listed without inventing a P5 probe.")
   return 0
 
 
@@ -978,24 +981,50 @@ def cmd_did_read(args, profile: Profile) -> int:
 
 
 def cmd_did_support(args, profile: Profile) -> int:
-  """Query Toyota's current-P5 live DID-support bitmap for one direct ECU endpoint."""
+  """Query Toyota's current-P5 DID bitmap through the category's Toyota transport route."""
   try:
-    ecu = profile.lookup_ecu(args.ecu)
-    dids = _resolve_did_queries(profile, ecu, args.did)
-  except registry.RegistryError as e:
+    candidate, route = resolver.lookup_mount_candidate(profile, args.ecu)
+    if not resolver.uses_current_p5_path(profile, route):
+      raise resolver.ResolverError(
+        f"Toyota category {route.category_id} ({route.name}) generation {route.generation} does not use the current-P5 support resolver")
+    logical_ecu = registry.EcuSpec(
+      key=f"category-{route.category_id}", name=route.name, address=route.request_address,
+      category_id=route.category_id,
+    )
+    dids = _resolve_did_queries(profile, logical_ecu, args.did) if args.did else []
+  except (registry.RegistryError, resolver.ResolverError) as e:
     raise SystemExit(str(e)) from e
+
   transport = _live_transport()
   try:
     panda = transport.connect(profile)
-    client = transport.uds_client_factory(panda, profile)(ecu.address)
+    client = transport.uds_client_factory(panda, profile)(route.request_address, route.sub_addr)
     support_resolver = resolver.P5DidSupportResolver.from_profile(profile, client)
-    rows = [{"did": did, "supported": support_resolver.supports(did), "signals": [row.get("name") or "" for row in signals]}
-            for did, signals in dids]
     groups = support_resolver.supported_groups()
+    if dids:
+      rows = [
+        {"did": did, "supported": support_resolver.supports(did),
+         "signals": [signal.get("name") or "" for signal in signals]}
+        for did, signals in dids
+      ]
+    else:
+      catalog = profile.dids(logical_ecu)
+      rows = [
+        {"did": did, "supported": True,
+         "signals": [signal.get("name") or "" for signal in catalog.get(f"0x{did:04X}", [])]}
+        for did in support_resolver.supported_dids()
+      ]
   except Exception as e:
     raise SystemExit(f"DID support query failed: {e}") from e
+
   document = {
-    "ecu": _ecu_document(ecu),
+    "category": {
+      "category_id": route.category_id,
+      "name": route.name,
+      "generation": route.generation,
+      "database": candidate.get("database"),
+    },
+    "route": route.as_dict(),
     "support_root_did": support_resolver.root_did,
     "supported_groups": list(groups),
     "results": rows,
@@ -1003,7 +1032,8 @@ def cmd_did_support(args, profile: Profile) -> int:
   if args.json:
     print(json.dumps(document, sort_keys=True))
   else:
-    print(f"{ecu.name} Toyota P5 DID support root 0x{support_resolver.root_did:04X}")
+    endpoint = f"0x{route.request_address:03X}" + (f"/0x{route.sub_addr:02X}" if route.sub_addr is not None else "")
+    print(f"{route.name} (cat {route.category_id}, {endpoint}) Toyota P5 DID support root 0x{support_resolver.root_did:04X}")
     for row in rows:
       names = ", ".join(name for name in row["signals"] if name)
       suffix = f"  {names}" if names else ""
@@ -1520,7 +1550,7 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("--json", action="store_true")
   p.add_argument("--verbose", action="store_true")
   p.set_defaults(func=cmd_vehicle_detect)
-  p = vehicle_sub.add_parser("mounted", help="show Toyota logical mount candidates and probe validated direct endpoints")
+  p = vehicle_sub.add_parser("mounted", help="show Toyota logical mount candidates and query their Toyota transport routes")
   p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_vehicle_mounted)
   vehicle.set_defaults(func=cmd_vehicle_show, json=False)
@@ -1628,8 +1658,8 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_did_read)
   p = did_sub.add_parser("support", help="query Toyota's current-P5 live DID support bitmap")
-  p.add_argument("ecu")
-  p.add_argument("did", nargs="+", help="one or more DID numbers or GTS names")
+  p.add_argument("ecu", help="Toyota category ID/name, DDB name, or profile ECU alias")
+  p.add_argument("did", nargs="*", help="DID numbers or GTS names; omit to enumerate all advertised DIDs")
   p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_did_support)
   p = did_sub.add_parser("watch")

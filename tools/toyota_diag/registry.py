@@ -16,7 +16,7 @@ from typing import Any
 DEFAULT_REGISTRY = Path(__file__).with_name("data") / "camry_2026_f33.json"
 SUPPORTED_SCHEMAS = frozenset({
   "toyota-diagnostics-registry-v1", "toyota-diagnostics-registry-v2", "toyota-diagnostics-registry-v3",
-  "toyota-diagnostics-registry-v4", "toyota-diagnostics-registry-v5",
+  "toyota-diagnostics-registry-v4", "toyota-diagnostics-registry-v5", "toyota-diagnostics-registry-v6",
 })
 DEFAULT_UDS_TIMEOUT = 0.35
 DEFAULT_UDS_RESPONSE_PENDING_TIMEOUT = 2.0
@@ -136,7 +136,7 @@ class Profile:
 
   @property
   def vehicle_resolution(self) -> dict[str, Any] | None:
-    """Toyota vehicle/install-set/mounted-ECU/capability resolver metadata (registry v5)."""
+    """Toyota vehicle/install-set/mounted-ECU/capability resolver metadata (registry v5+)."""
     raw = self.document["profile"].get("vehicle_resolution")
     return raw if isinstance(raw, dict) else None
 
