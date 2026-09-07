@@ -12,7 +12,7 @@ class TestRegistry(unittest.TestCase):
     cls.profile = registry.load_registry()
 
   def test_exact_camry_profile_and_guard(self):
-    self.assertEqual(self.profile.document["schema"], "toyota-diagnostics-registry-v4")
+    self.assertEqual(self.profile.document["schema"], "toyota-diagnostics-registry-v5")
     self.assertEqual(self.profile.name, "camry-2026-f33")
     self.assertEqual(self.profile.bus, 0)
     self.assertEqual(self.profile.fault_status_mask, 0xAF)
@@ -58,11 +58,19 @@ class TestRegistry(unittest.TestCase):
                      (0x1588, "31011588", "31021588", "31031588"))
     self.assertEqual((test["execution"], test["session_requirement"]), ("executable", "extended"))
 
-  def test_v4_lifecycle_plugins_and_utility_family_metadata(self):
+  def test_v5_resolver_lifecycle_plugins_and_utility_family_metadata(self):
+    resolver = self.profile.vehicle_resolution
+    self.assertEqual((resolver["vehicle_type"], resolver["vehicle_name"], resolver["install_set_ids"]),
+                     (12704, "Camry HV", [8119, 8120, 8121, 27706]))
+    self.assertEqual(len(self.profile.mount_candidates()), 34)
+    self.assertEqual({row["connection_frame_id"] for row in self.profile.mount_candidates()}, {0})
+    self.assertEqual({row["connection_comm_set_id"] for row in self.profile.mount_candidates()}, {9})
+    self.assertEqual({row["connection_phase_type"] for row in self.profile.mount_candidates()}, {0x12, 0x22})
     session = self.profile.session_control
     self.assertEqual((session["generation"], session["enter_sequence"], session["return_default"]),
                      ("current-p5", ["1001", "1003"], "1001"))
-    self.assertEqual(session["wire_proven_categories"], [397, 435, 498])
+    self.assertEqual(session["eligible_generation_low5"], ["0x14", "0x15", "0x16"])
+    self.assertNotIn("wire_proven_categories", session)
     self.assertEqual(session["keepalive"]["request"], "22f186")
     comm_set_id, commset = self.profile.session_commset("frc")
     self.assertEqual((comm_set_id, commset["receive_timeout"], commset["retry_count"]), (1, 1020, 1))

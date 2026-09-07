@@ -16,7 +16,7 @@ from typing import Any
 DEFAULT_REGISTRY = Path(__file__).with_name("data") / "camry_2026_f33.json"
 SUPPORTED_SCHEMAS = frozenset({
   "toyota-diagnostics-registry-v1", "toyota-diagnostics-registry-v2", "toyota-diagnostics-registry-v3",
-  "toyota-diagnostics-registry-v4",
+  "toyota-diagnostics-registry-v4", "toyota-diagnostics-registry-v5",
 })
 DEFAULT_UDS_TIMEOUT = 0.35
 DEFAULT_UDS_RESPONSE_PENDING_TIMEOUT = 2.0
@@ -133,6 +133,28 @@ class Profile:
     """Raw recovered session-lifecycle metadata, or None when the registry supplies none."""
     raw = self.document["profile"].get("session_control")
     return raw if isinstance(raw, dict) else None
+
+  @property
+  def vehicle_resolution(self) -> dict[str, Any] | None:
+    """Toyota vehicle/install-set/mounted-ECU/capability resolver metadata (registry v5)."""
+    raw = self.document["profile"].get("vehicle_resolution")
+    return raw if isinstance(raw, dict) else None
+
+  def category_generation_low5(self, ecu: EcuSpec | str | int) -> int | None:
+    spec = ecu if isinstance(ecu, EcuSpec) else self.lookup_ecu(ecu)
+    category = self.category(spec)
+    if category is None:
+      return None
+    meta = category.get("category")
+    if not isinstance(meta, dict) or meta.get("generation") is None:
+      return None
+    return int(meta["generation"]) & 0x1F
+
+  def mount_candidates(self) -> list[dict[str, Any]]:
+    raw = self.vehicle_resolution
+    mount = raw.get("mount") if raw is not None else None
+    rows = mount.get("candidates") if isinstance(mount, dict) else None
+    return rows if isinstance(rows, list) else []
 
   def commset(self, comm_set_id: int) -> dict[str, Any] | None:
     """Raw Toyota CommSet row; timeout units remain intentionally untranslated."""

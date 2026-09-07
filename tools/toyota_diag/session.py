@@ -63,7 +63,7 @@ class SessionLifecycle:
   enter_sequence: tuple[bytes, ...]  # TMS-077 SendProc: D1 default reset then D2 extended
   return_default_request: bytes  # D1 cleanup
   keepalive: KeepaliveSpec | None
-  wire_proven_categories: frozenset[int] | None = None
+  eligible_generation_low5: frozenset[int] | None = None
 
 
 def _session_byte(value: Any, what: str) -> int:
@@ -110,12 +110,15 @@ def parse_lifecycle(profile: Profile) -> SessionLifecycle | None:
 
   enter_sequence = _parse_enter_sequence(raw, default_session, extended_session)
 
-  wire_proven_categories = None
-  if raw.get("wire_proven_categories") is not None:
-    rows = raw["wire_proven_categories"]
-    if not isinstance(rows, list) or not rows or any(isinstance(value, bool) or not isinstance(value, int) for value in rows):
-      raise registry.RegistryError("session_control.wire_proven_categories: expected a non-empty integer list")
-    wire_proven_categories = frozenset(rows)
+  eligible_generation_low5 = None
+  if raw.get("eligible_generation_low5") is not None:
+    rows = raw["eligible_generation_low5"]
+    if not isinstance(rows, list) or not rows:
+      raise registry.RegistryError("session_control.eligible_generation_low5: expected a non-empty integer/hex list")
+    parsed = frozenset(registry.parse_int(value, "session_control.eligible_generation_low5") for value in rows)
+    if any(not 0 <= value <= 0x1F for value in parsed):
+      raise registry.RegistryError("session_control.eligible_generation_low5: values must fit low5")
+    eligible_generation_low5 = parsed
 
   keepalive = None
   if raw.get("keepalive") is not None:
@@ -143,8 +146,24 @@ def parse_lifecycle(profile: Profile) -> SessionLifecycle | None:
     enter_sequence=enter_sequence,
     return_default_request=return_default,
     keepalive=keepalive,
-    wire_proven_categories=wire_proven_categories,
+    eligible_generation_low5=eligible_generation_low5,
   )
+
+
+def validate_lifecycle_for_ecu(profile: Profile, ecu: EcuSpec, lifecycle: SessionLifecycle) -> SessionLifecycle:
+  """Apply Toyota's recovered P5 generation gate to one logical ECU category."""
+  eligible = lifecycle.eligible_generation_low5
+  if eligible is None:
+    return lifecycle
+  generation_low5 = profile.category_generation_low5(ecu)
+  if generation_low5 is None:
+    category = "unresolved" if ecu.category_id is None else str(ecu.category_id)
+    raise LifecycleUnsupported(f"ECU category {category} has no recovered generation for current-P5 lifecycle")
+  if generation_low5 not in eligible:
+    allowed = ", ".join(f"0x{value:02X}" for value in sorted(eligible))
+    raise LifecycleUnsupported(
+      f"ECU category {ecu.category_id} generation-low5 0x{generation_low5:02X} is outside Toyota's current-P5 gate ({allowed})")
+  return lifecycle
 
 
 def _validate_session_poll_wire(spec: dict[str, Any], did: int) -> None:
@@ -260,17 +279,12 @@ class DiagnosticSession:
       raise LifecycleError(f"DID {self._session_did():#06x} returned no session byte")
     return value[0]
 
-  def require_lifecycle_proven(self) -> SessionLifecycle:
-    """Return lifecycle metadata only when its host behavior is proven for this ECU category."""
+  def require_lifecycle_supported(self) -> SessionLifecycle:
+    """Return lifecycle metadata when Toyota's recovered generation gate admits this ECU."""
     lifecycle = self.lifecycle
     if lifecycle is None:
       raise LifecycleUnsupported("registry supplies no recovered session_control metadata")
-    proven = lifecycle.wire_proven_categories
-    if proven is not None and self.ecu.category_id not in proven:
-      category = "unresolved" if self.ecu.category_id is None else str(self.ecu.category_id)
-      allowed = ", ".join(str(value) for value in sorted(proven))
-      raise LifecycleUnsupported(
-        f"current-P5 lifecycle is not wire-proven for ECU category {category}; proven categories: {allowed}")
+    validate_lifecycle_for_ecu(self.profile, self.ecu, lifecycle)
     return lifecycle
 
   def enter_extended(self, *, acknowledge: bool = False) -> None:
@@ -283,7 +297,7 @@ class DiagnosticSession:
     """
     if not acknowledge:
       raise LifecycleError("entering the extended session requires an explicit acknowledgement")
-    lifecycle = self.require_lifecycle_proven()
+    lifecycle = self.require_lifecycle_supported()
     if self._active_session == lifecycle.extended_session:
       return
     poll = self._declared_session_poll(lifecycle)
@@ -309,14 +323,14 @@ class DiagnosticSession:
 
   def restore_default(self) -> None:
     """D1 cleanup: return the ECU to the recovered default session."""
-    lifecycle = self.require_lifecycle_proven()
+    lifecycle = self.require_lifecycle_supported()
     self.client().diagnostic_session_control(lifecycle.default_session)
     self._active_session = None
     self._extended = False
 
   def keepalive(self) -> None:
     """One recovered keepalive step: tester present or the `22 F1 86` session-DID poll."""
-    lifecycle = self.require_lifecycle_proven()
+    lifecycle = self.require_lifecycle_supported()
     if lifecycle.keepalive is None:
       raise LifecycleUnsupported("registry supplies no recovered keepalive metadata")
     spec = lifecycle.keepalive

@@ -4,6 +4,7 @@ import types
 import unittest
 from unittest import mock
 
+from opendbc.car.can_definitions import CanData
 from opendbc.car.structs import CarParams
 
 from tools.toyota_diag import registry, transport
@@ -107,6 +108,14 @@ class TestTransport(unittest.TestCase):
     with self.assertRaisesRegex(SystemExit, "not in diagnostic-safe ELM327/param1"):
       adapter.can_send(0x792, bytes(8), 0)
     self.assertEqual(messaging.pub.sent, [])
+
+  def test_standard_can_query_callbacks_adapt_panda_shape(self):
+    from tools.toyota_diag.tests.support import FakePanda
+    panda = FakePanda(recv_batches=[[(0x7E8, bytes.fromhex("03490a00"), 0)]])
+    can_recv, can_send = transport.can_query_callbacks(panda, wait_timeout=0)
+    self.assertEqual(can_recv(wait_for_one=True), [[CanData(0x7E8, bytes.fromhex("03490a00"), 0)]])
+    can_send([CanData(0x7DF, bytes.fromhex("0209020000000000"), 0)])
+    self.assertEqual(panda.sent, [(0x7DF, bytes.fromhex("0209020000000000"), 0)])
 
   def test_connect_uses_managed_path_when_pandad_owns_panda(self):
     sentinel = object()

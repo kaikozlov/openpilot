@@ -28,7 +28,7 @@ from opendbc.car.uds import CONTROL_PARAMETER_TYPE, ROUTINE_CONTROL_TYPE
 
 from tools.toyota_diag import registry
 from tools.toyota_diag.registry import EcuSpec
-from tools.toyota_diag.session import DiagnosticSession, LifecycleError, parse_lifecycle
+from tools.toyota_diag.session import DiagnosticSession, LifecycleError, parse_lifecycle, validate_lifecycle_for_ecu
 
 EXECUTION_EXECUTABLE = "executable"
 SESSION_REQUIREMENT_EXTENDED = "extended"
@@ -184,10 +184,11 @@ def runtime_refusals(profile: registry.Profile, plan: TestPlan) -> tuple[str, ..
     else:
       if lifecycle is None:
         refusals.append("registry supplies no recovered session lifecycle")
-      elif lifecycle.wire_proven_categories is not None and plan.ecu.category_id not in lifecycle.wire_proven_categories:
-        category = "unresolved" if plan.ecu.category_id is None else str(plan.ecu.category_id)
-        allowed = ", ".join(str(value) for value in sorted(lifecycle.wire_proven_categories))
-        refusals.append(f"current-P5 lifecycle is not wire-proven for ECU category {category}; proven categories: {allowed}")
+      else:
+        try:
+          validate_lifecycle_for_ecu(profile, plan.ecu, lifecycle)
+        except LifecycleError as e:
+          refusals.append(f"recovered lifecycle metadata is not executable for this ECU: {e}")
   return tuple(refusals)
 
 
@@ -310,7 +311,7 @@ def _prepare(session: DiagnosticSession, plan: TestPlan, *, execute: bool,
   # Refuse before even the read-only identity guard when the recovered lifecycle
   # is explicitly bounded to other ECU categories.
   if plan.session_requirement == SESSION_REQUIREMENT_EXTENDED:
-    session.require_lifecycle_proven()
+    session.require_lifecycle_supported()
   session.guard(echo=echo)
   if plan.session_requirement == SESSION_REQUIREMENT_EXTENDED:
     session.enter_extended(acknowledge=True)

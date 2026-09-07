@@ -350,14 +350,19 @@ class TestLiveCli(unittest.TestCase):
     condition = next(signal for signal in documents[0]["values"][0]["signals"] if signal["name"] == "LTA Control Condition")
     self.assertEqual(condition["pattern"], "LTA Enabled")
 
-  def test_monitor_unproven_category_stays_default_session(self):
+  def test_monitor_engine_uses_toyota_current_p5_generation_gate(self):
     scripted = support.ScriptedUds()
     scripted.did[0x700] = {0x0000: b"\x01"}
     panda = support.FakePanda()
     with self.patch_live(panda, scripted):
       rc, output = run_cli(["monitor", "engine", "0x0000", "--interval", "0", "--count", "1", "--jsonl"])
     self.assertEqual(rc, 0, output)
-    self.assertEqual(scripted.calls, [(0x700, "read_did", 0x0000)])
+    self.assertEqual(scripted.calls, [
+      (0x700, "read_did", 0xF186),
+      (0x700, "session", 1), (0x700, "session", 3),
+      (0x700, "read_did", 0x0000),
+      (0x700, "session", 1),
+    ])
 
   def test_observe_tss3_longitudinal_reads_frc_and_brake_in_one_sample(self):
     import json
@@ -377,7 +382,7 @@ class TestLiveCli(unittest.TestCase):
       [("frc", did) for did in range(0x1B03, 0x1B08)] + [("brake", did) for did in range(0x10A1, 0x10A5)],
     )
 
-  def test_active_test_dry_run_and_runtime_blocks_do_not_connect(self):
+  def test_active_test_dry_run_and_geometry_blocks_do_not_connect(self):
     with mock.patch("tools.toyota_diag.transport.connect", side_effect=AssertionError("must not connect")):
       rc, output = run_cli(["active-test", "run", "frc", "0xA429"])
       self.assertEqual(rc, 0, output)
@@ -385,11 +390,6 @@ class TestLiveCli(unittest.TestCase):
 
       with self.assertRaisesRegex(SystemExit, "placeholder 0xFFFF"):
         run_cli(["active-test", "run", "brake", "42001", "--execute"])
-
-      engine = registry.load_registry()
-      blocked = next(row for row in engine.active_tests("engine") if row.get("execution") == "executable")
-      with self.assertRaisesRegex(SystemExit, "not wire-proven for ECU category 372"):
-        run_cli(["active-test", "run", "engine", str(blocked["id"]), "--execute"])
 
   def test_active_test_run_and_stop_use_guarded_recovered_lifecycle(self):
     scripted = support.ScriptedUds()
@@ -453,16 +453,49 @@ class TestLiveCli(unittest.TestCase):
     self.assertEqual((document["profile"], document["responding_ecus"]), ("camry-2026-f33", 1))
     self.assertEqual(document["ecus"][0]["key"], "eps")
     self.assertIn("8965F3307000", document["ecus"][0]["identity"]["0xF181"]["ascii"])
+    self.assertEqual(len(document["toyota_mount_candidates"]), 34)
+    eps_candidate = next(row for row in document["toyota_mount_candidates"] if row["category_id"] == 405)
+    self.assertTrue(eps_candidate["dtc_scan_responded"])
 
-  def test_vehicle_detect_is_read_only_identity_match(self):
+  def test_vehicle_detect_uses_toyota_vin_decision_not_f181_guard(self):
     scripted = support.ScriptedUds()
-    scripted.did[0x7A1] = {0xF181: support.EXPECTED_EPS_F181}
     panda = support.FakePanda()
-    with self.patch_live(panda, scripted):
+    vin_info = {"vin": "XXXXAXXKXSX123456", "rx_address": 0x7E8, "rx_bus": 0}
+    with self.patch_live(panda, scripted), mock.patch(
+        "tools.toyota_diag.resolver.read_vehicle_vin", return_value=vin_info) as read_vin:
       rc, output = run_cli(["vehicle", "detect"])
     self.assertEqual(rc, 0, output)
     self.assertIn("camry-2026-f33", output)
-    self.assertFalse([call for call in scripted.calls if call[1] != "read_did"])
+    self.assertIn("Toyota type 12704 Camry HV", output)
+    read_vin.assert_called_once()
+    self.assertEqual(scripted.calls, [])
+
+  def test_vehicle_mounted_preserves_34_logical_categories(self):
+    import json
+    scripted = support.ScriptedUds()
+    profile = registry.load_registry()
+    for row in profile.mount_candidates():
+      if row["direct_address"] is not None:
+        scripted.did[int(row["direct_address"])] = {0x0101: bytes(32)}
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["vehicle", "mounted", "--json"])
+    self.assertEqual(rc, 0, output)
+    document = json.loads(output)
+    self.assertEqual((document["candidate_count"], document["responding_direct"], document["not_directly_routed"]), (34, 8, 26))
+    self.assertEqual(len({row["category_id"] for row in document["candidates"]}), 34)
+
+  def test_did_support_uses_toyota_c8_bitmap(self):
+    import json
+    scripted = support.ScriptedUds()
+    scripted.did[0x792] = {0x0101: bytes.fromhex("000002"), 0x1600: bytes.fromhex("80")}
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["did", "support", "frc", "0x1601", "--json"])
+    self.assertEqual(rc, 0, output)
+    document = json.loads(output)
+    self.assertEqual(document["supported_groups"], [0x1600])
+    self.assertEqual(document["results"][0]["supported"], True)
 
   def test_did_read_fails_closed_when_payload_is_short(self):
     scripted = support.ScriptedUds()

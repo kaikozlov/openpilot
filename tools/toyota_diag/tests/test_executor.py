@@ -56,7 +56,7 @@ def session_calls(scripted):
 
 
 class TestPlanResolution(unittest.TestCase):
-  def test_bundled_v4_runtime_grades_are_stricter_than_static_geometry(self):
+  def test_bundled_v5_runtime_uses_toyota_generation_gate(self):
     profile = registry.load_registry()
 
     frc_row = profile.lookup_active_test("frc", "0xA429")
@@ -67,7 +67,7 @@ class TestPlanResolution(unittest.TestCase):
     engine_row = next(row for row in profile.active_tests("engine") if row.get("execution") == "executable")
     engine_plan = resolve_plan(profile.lookup_ecu("engine"), engine_row)
     self.assertTrue(engine_plan.executable)  # static request geometry is complete
-    self.assertIn("not wire-proven for ECU category 372", " ".join(runtime_refusals(profile, engine_plan)))
+    self.assertEqual(runtime_refusals(profile, engine_plan), ())  # generation20 low5=0x14 is Toyota current-P5
 
     brake_row = profile.lookup_active_test("brake", "42001")
     brake_plan = resolve_plan(profile.lookup_ecu("brake"), brake_row)
@@ -81,7 +81,7 @@ class TestPlanResolution(unittest.TestCase):
     self.assertFalse(plan.executable)
     self.assertIn("execution is 'plan_only'", " ".join(plan.refusals))
 
-  def test_bundled_v4_runtime_inventory_is_fail_closed(self):
+  def test_bundled_v5_runtime_inventory_is_fail_closed(self):
     profile = registry.load_registry()
     grades = {"executable": 0, "blocked_geometry": 0, "plan_only": 0, "unresolved_static_plan": 0}
     for ecu in profile.ecus:
@@ -93,7 +93,7 @@ class TestPlanResolution(unittest.TestCase):
         else:
           grades[str(row.get("execution"))] += 1
     self.assertEqual(grades, {
-      "executable": 14, "blocked_geometry": 27, "plan_only": 361, "unresolved_static_plan": 26,
+      "executable": 38, "blocked_geometry": 3, "plan_only": 361, "unresolved_static_plan": 26,
     })
 
   def test_unresolved_and_partially_recovered_rows_refuse(self):

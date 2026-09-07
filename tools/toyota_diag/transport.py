@@ -13,6 +13,7 @@ from collections.abc import Callable
 from subprocess import CalledProcessError, check_output
 from typing import Any
 
+from opendbc.car.can_definitions import CanData
 from opendbc.car.structs import CarParams
 from opendbc.car.uds import IsoTpMessage, UdsClient
 
@@ -22,6 +23,7 @@ from tools.toyota_diag.registry import Profile
 ELM327_PARAM_NORMAL = 1
 MANAGED_READY_TIMEOUT = 1.0
 SENDCAN_WARMUP = 0.15
+QUERY_RECV_WAIT = 0.1
 
 
 def pandad_running() -> bool:
@@ -166,6 +168,25 @@ def connect(profile: Profile):
   # profile uses bus 0, so the bus-1 OBD multiplex side effect is irrelevant.
   panda.set_safety_mode(CarParams.SafetyModel.elm327, 0)
   return panda
+
+
+def can_query_callbacks(panda, *, wait_timeout: float = QUERY_RECV_WAIT):
+  """Adapt direct Panda/managed-sendcan transport to openpilot's standard CAN query callbacks."""
+  def can_recv(wait_for_one: bool = False) -> list[list[CanData]]:
+    deadline = time.monotonic() + wait_timeout
+    while True:
+      frames = panda.can_recv()
+      if frames:
+        return [[CanData(address, bytes(data), bus) for address, data, bus in frames]]
+      if not wait_for_one or time.monotonic() >= deadline:
+        return []
+      time.sleep(0.001)
+
+  def can_send(messages: list[CanData]) -> None:
+    for message in messages:
+      panda.can_send(message.address, bytes(message.dat), message.src)
+
+  return can_recv, can_send
 
 
 def uds_client_factory(panda, profile: Profile, timeouts: registry.CommTimeouts | None = None) -> Callable[[int], UdsClient]:

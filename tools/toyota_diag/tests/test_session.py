@@ -3,7 +3,8 @@ import unittest
 from opendbc.car.uds import MessageTimeoutError
 
 from tools.toyota_diag import registry, transport
-from tools.toyota_diag.session import DiagnosticSession, LifecycleError, LifecycleUnsupported, parse_lifecycle
+from tools.toyota_diag.session import (DiagnosticSession, LifecycleError, LifecycleUnsupported, parse_lifecycle,
+                                       validate_lifecycle_for_ecu)
 from tools.toyota_diag.tests import support
 
 
@@ -30,13 +31,15 @@ class TestLifecycleParsing(unittest.TestCase):
     self.assertIsNone(profile.session_control)
     self.assertIsNone(parse_lifecycle(profile))
 
-  def test_bundled_v4_lifecycle_and_wire_scope(self):
+  def test_bundled_v5_lifecycle_and_toyota_generation_gate(self):
     profile = registry.load_registry()
     lifecycle = parse_lifecycle(profile)
     assert lifecycle is not None
     self.assertEqual(lifecycle.enter_sequence, (bytes.fromhex("1001"), bytes.fromhex("1003")))
     self.assertEqual(lifecycle.keepalive.did, 0xF186)
-    self.assertEqual(lifecycle.wire_proven_categories, frozenset({397, 435, 498}))
+    self.assertEqual(lifecycle.eligible_generation_low5, frozenset({0x14, 0x15, 0x16}))
+    self.assertIs(validate_lifecycle_for_ecu(profile, profile.lookup_ecu("engine"), lifecycle), lifecycle)
+    self.assertIs(validate_lifecycle_for_ecu(profile, profile.lookup_ecu("frc"), lifecycle), lifecycle)
 
   def test_enter_sequence_parses_and_legacy_shape_expands_to_sendproc(self):
     profile = support.load_profile(None, session_control=current_p5_lifecycle())

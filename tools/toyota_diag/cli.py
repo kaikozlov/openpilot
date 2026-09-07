@@ -7,7 +7,7 @@ import json
 import sys
 from typing import Any
 
-from tools.toyota_diag import active_test, decode, discovery, dtc, executor, monitor, recorder, registry, snapshot, utility
+from tools.toyota_diag import active_test, decode, discovery, dtc, executor, monitor, recorder, registry, resolver, snapshot, utility
 from tools.toyota_diag.registry import Profile
 from tools.toyota_diag.session import DiagnosticSession, LifecycleError
 
@@ -94,25 +94,40 @@ def cmd_search(args, profile: Profile) -> int:
 
 
 def cmd_vehicle_show(args, profile: Profile) -> int:
+  vehicle_resolution = profile.vehicle_resolution
+  resolver_summary = None
+  if vehicle_resolution is not None:
+    resolver_summary = {
+      "vehicle_type": vehicle_resolution.get("vehicle_type"),
+      "vehicle_name": vehicle_resolution.get("vehicle_name"),
+      "install_set_ids": vehicle_resolution.get("install_set_ids"),
+      "mount_candidate_count": len(profile.mount_candidates()),
+    }
   document = {
     "profile": profile.name,
     "vehicle": profile.vehicle,
     "panda_bus": profile.bus,
     "registry": str(profile.path),
+    "vehicle_resolution": resolver_summary,
     "identity_guard": {
       "ecu": profile.guard.ecu_key,
       "did": profile.guard.did,
       "contains_ascii": profile.guard.contains_ascii,
     },
   }
-  text = "\n".join((
+  lines = [
     profile.vehicle,
     f"profile:  {profile.name}",
     f"registry: {profile.path}",
     f"Panda bus: {profile.bus}",
-    f"guard:    {profile.guard.ecu_key} DID 0x{profile.guard.did:04X} contains {profile.guard.contains_ascii}",
-  ))
-  return _json_or_text(args, document, text)
+  ]
+  if resolver_summary is not None:
+    install_sets = ",".join(str(value) for value in resolver_summary["install_set_ids"])
+    summary = f"Toyota resolver: type {resolver_summary['vehicle_type']} {resolver_summary['vehicle_name']}; install sets {install_sets}; "
+    summary += f"{resolver_summary['mount_candidate_count']} logical ECU candidates"
+    lines.append(summary)
+  lines.append(f"mutation guard: {profile.guard.ecu_key} DID 0x{profile.guard.did:04X} contains {profile.guard.contains_ascii}")
+  return _json_or_text(args, document, "\n".join(lines))
 
 
 def cmd_vehicle_list(args, profile: Profile) -> int:
@@ -133,38 +148,81 @@ def cmd_vehicle_list(args, profile: Profile) -> int:
 
 
 def cmd_vehicle_detect(args, profile: Profile) -> int:
+  """Resolve the live VIN through Toyota's recovered current vehicle-decision rows."""
   live = _live_transport()
-  candidates = []
-  for path in registry.available_registries(profile.path.parent):
-    try:
-      candidates.append(registry.load_registry(path))
-    except registry.RegistryError:
-      continue
+  try:
+    panda = live.connect(profile)
+    can_recv, can_send = live.can_query_callbacks(panda)
+    vin_info = resolver.read_vehicle_vin(can_recv, can_send, profile.bus)
+  except Exception as e:
+    # Keep one clear command-level failure; vehicle detection is read-only and has
+    # no reason to fall back to the old profile-by-profile F181 mutation guard.
+    raise SystemExit(f"vehicle detection failed: {e}") from e
+
   matches = []
   errors = []
-  for candidate in candidates:
+  for path in registry.available_registries(profile.path.parent):
     try:
-      panda = live.connect(candidate)
-      factory = live.uds_client_factory(panda, candidate)
-      ecu = candidate.lookup_ecu(candidate.guard.ecu_key)
-      data = factory(ecu.address).read_data_by_identifier(candidate.guard.did)
-      if candidate.guard.contains in data:
-        matches.append({"profile": candidate.name, "vehicle": candidate.vehicle, "guard_data_hex": bytes(data).hex()})
-    except Exception as e:
-      errors.append({"profile": candidate.name, "error": str(e)})
-  document = {"matches": matches, "errors": errors}
+      candidate = registry.load_registry(path)
+      if candidate.bus != profile.bus:
+        continue
+      match = resolver.resolve_profile_vin(candidate, vin_info["vin"])
+      if match is not None:
+        matches.append(match)
+    except (registry.RegistryError, resolver.ResolverError) as e:
+      errors.append({"registry": str(path), "error": str(e)})
+
+  document = {**vin_info, "matches": matches, "errors": errors}
   if args.json:
     print(json.dumps(document, sort_keys=True))
   else:
+    print(f"VIN: {vin_info['vin']}  RX={vin_info['rx_address']:#x} bus={vin_info['rx_bus']}")
     if matches:
       for row in matches:
-        print(f"✓ {row['profile']}: {row['vehicle']}")
+        sets = ",".join(str(value) for value in row["install_set_ids"])
+        print(f"✓ {row['profile']}: {row['vehicle']} — Toyota type {row['vehicle_type']} {row['vehicle_name']}; install sets {sets}")
     else:
-      print("no bundled profile matched the live identity guard")
+      print("no bundled registry matched Toyota's VIN-decision rows")
     for row in errors:
       if args.verbose:
-        print(f"  {row['profile']}: {row['error']}")
+        print(f"  {row['registry']}: {row['error']}")
   return 0 if matches else 1
+
+
+def cmd_vehicle_mounted(args, profile: Profile) -> int:
+  """Inspect Toyota's logical mount candidates and probe only validated direct endpoints."""
+  live = _live_transport()
+  try:
+    panda = live.connect(profile)
+    client_factory = live.uds_client_factory(panda, profile)
+    rows = resolver.probe_mount_candidates(profile, client_factory)
+  except (registry.RegistryError, resolver.ResolverError) as e:
+    raise SystemExit(f"mounted-ECU resolution failed: {e}") from e
+
+  raw = profile.vehicle_resolution or {}
+  document = {
+    "vehicle_type": raw.get("vehicle_type"),
+    "vehicle_name": raw.get("vehicle_name"),
+    "install_set_ids": raw.get("install_set_ids", []),
+    "candidate_count": len(rows),
+    "responding_direct": sum(row.get("transport_responded") is True for row in rows),
+    "no_response_direct": sum(row.get("live_state") == "no_response" for row in rows),
+    "not_directly_routed": sum(row.get("live_state") == "not_directly_routed" for row in rows),
+    "candidates": rows,
+  }
+  if args.json:
+    print(json.dumps(document, sort_keys=True))
+  else:
+    print(f"Toyota {document['vehicle_name']} type {document['vehicle_type']}: {document['candidate_count']} logical ECU candidates")
+    for row in rows:
+      state = row["live_state"]
+      mark = "✓" if state == "responding" else ("?" if state == "not_directly_routed" else "·")
+      address = f"0x{int(row['direct_address']):03X}" if row.get("direct_address") is not None else "gateway/shared"
+      description = f"{mark} cat {int(row['category_id']):<5} {str(row['name']):<42} {address:<14} "
+      description += f"set={row['install_set_id']} phase=0x{int(row['connection_phase_type']):02X} {state}"
+      print(description)
+    print("No response is an observation only; it is not proof that a Toyota logical category is absent.")
+  return 0
 
 
 def _ecu_document(ecu) -> dict[str, Any]:
@@ -919,6 +977,40 @@ def cmd_did_read(args, profile: Profile) -> int:
   return 0
 
 
+def cmd_did_support(args, profile: Profile) -> int:
+  """Query Toyota's current-P5 live DID-support bitmap for one direct ECU endpoint."""
+  try:
+    ecu = profile.lookup_ecu(args.ecu)
+    dids = _resolve_did_queries(profile, ecu, args.did)
+  except registry.RegistryError as e:
+    raise SystemExit(str(e)) from e
+  transport = _live_transport()
+  try:
+    panda = transport.connect(profile)
+    client = transport.uds_client_factory(panda, profile)(ecu.address)
+    support_resolver = resolver.P5DidSupportResolver.from_profile(profile, client)
+    rows = [{"did": did, "supported": support_resolver.supports(did), "signals": [row.get("name") or "" for row in signals]}
+            for did, signals in dids]
+    groups = support_resolver.supported_groups()
+  except Exception as e:
+    raise SystemExit(f"DID support query failed: {e}") from e
+  document = {
+    "ecu": _ecu_document(ecu),
+    "support_root_did": support_resolver.root_did,
+    "supported_groups": list(groups),
+    "results": rows,
+  }
+  if args.json:
+    print(json.dumps(document, sort_keys=True))
+  else:
+    print(f"{ecu.name} Toyota P5 DID support root 0x{support_resolver.root_did:04X}")
+    for row in rows:
+      names = ", ".join(name for name in row["signals"] if name)
+      suffix = f"  {names}" if names else ""
+      print(f"{'✓' if row['supported'] else '·'} 0x{row['did']:04X}  {'supported' if row['supported'] else 'not advertised'}{suffix}")
+  return 0
+
+
 def cmd_did_watch(args, profile: Profile) -> int:
   import time
   if args.interval < 0:
@@ -973,16 +1065,13 @@ def cmd_monitor(args, profile: Profile) -> int:
   try:
     with session:
       lifecycle = session.lifecycle
-      proven = (
-        lifecycle is not None
-        and (lifecycle.wire_proven_categories is None or ecu.category_id in lifecycle.wire_proven_categories)
-      )
-      if proven:
+      if lifecycle is not None:
         # This is read-only Data Monitor lifecycle, not actuator authorization: mirror
         # Techstream's recovered D1→D2 entry and deterministically restore D1 on exit.
+        # DiagnosticSession applies Toyota's recovered generation gate.
         session.enter_extended(acknowledge=True)
       client = session.client()
-      keepalive = lifecycle.keepalive if proven and lifecycle is not None else None
+      keepalive = lifecycle.keepalive if lifecycle is not None else None
       next_keepalive = time.monotonic() + keepalive.interval_s if keepalive is not None else float("inf")
 
       def read_values():
@@ -1045,13 +1134,9 @@ def cmd_observe(args, profile: Profile) -> int:
       for ecu, dids in targets:
         session = stack.enter_context(DiagnosticSession(profile, ecu, panda=panda))
         lifecycle = session.lifecycle
-        proven = (
-          lifecycle is not None
-          and (lifecycle.wire_proven_categories is None or ecu.category_id in lifecycle.wire_proven_categories)
-        )
-        if proven:
+        if lifecycle is not None:
           session.enter_extended(acknowledge=True)
-        keepalive = lifecycle.keepalive if proven and lifecycle is not None else None
+        keepalive = lifecycle.keepalive if lifecycle is not None else None
         rows.append({
           "ecu": ecu,
           "dids": dids,
@@ -1431,10 +1516,13 @@ def build_parser() -> argparse.ArgumentParser:
   p = vehicle_sub.add_parser("list")
   p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_vehicle_list)
-  p = vehicle_sub.add_parser("detect")
+  p = vehicle_sub.add_parser("detect", help="resolve the live VIN through Toyota's current vehicle-decision rows")
   p.add_argument("--json", action="store_true")
   p.add_argument("--verbose", action="store_true")
   p.set_defaults(func=cmd_vehicle_detect)
+  p = vehicle_sub.add_parser("mounted", help="show Toyota logical mount candidates and probe validated direct endpoints")
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_vehicle_mounted)
   vehicle.set_defaults(func=cmd_vehicle_show, json=False)
 
   p = commands.add_parser("scan", help="read-only vehicle inventory, identity, and DTC snapshot")
@@ -1539,6 +1627,11 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("did", nargs="+", help="one or more DID numbers or GTS names")
   p.add_argument("--json", action="store_true")
   p.set_defaults(func=cmd_did_read)
+  p = did_sub.add_parser("support", help="query Toyota's current-P5 live DID support bitmap")
+  p.add_argument("ecu")
+  p.add_argument("did", nargs="+", help="one or more DID numbers or GTS names")
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_did_support)
   p = did_sub.add_parser("watch")
   p.add_argument("ecu")
   p.add_argument("did", nargs="+", help="one or more DID numbers or GTS names")
