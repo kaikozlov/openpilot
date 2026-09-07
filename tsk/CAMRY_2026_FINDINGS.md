@@ -5,20 +5,23 @@ EPS application F181 **`8965F3307000 / 8A3113303100`**. The byte-level/static au
 remains `ghidra_rh850_analysis`; this document mirrors only findings that are already
 field- or exact-firmware-evidenced and useful to the fork.
 
-The exact Gate-2-patched maintainer Camry is the fork's lateral-output target; no wheel
-response to openpilot B6 has ever been observed (VAR-124/126), and this does not authorize
-upstream inclusion or generalize to an unpatched/other F33. The port follows
+The exact Gate-2-patched maintainer Camry is the fork's exact-F33 lateral **sender** target;
+no wheel response to openpilot B6 has ever been observed (VAR-124/126), so the implementation
+is not yet a supported steering port and does not authorize upstream inclusion or generalize
+to an unpatched/other F33. The port follows
 the ordinary Toyota/openpilot shape on `TOYOTA_CAMRY_TSS3`:
 ordinary CarParams, CarController, and Panda safety — no private parameters, no
 ephemeral-bridge arming, and no `ALLOW_DEBUG` development mode. It sends deliberately
 zero-MAC28 `0x0B6` on Panda bus 0, for which the maintainer EPS's persistent exact-F33
-Gate-2 patch (CodeFlash compare neutralization with deterministic CRC repair) was the
-enabling development prerequisite — receiver admission itself remains unproven (see
+Gate-2 patch (CodeFlash compare neutralization with deterministic CRC repair) is an
+installed development precondition — not proof of receiver/application admission (see
 receiver acceptance below). CORR-135/VAR-087 remain the stock-architecture boundary: factory LTA/LCA steers
 with zero B6 through an exact F33 B6-independent internal assist path, so `0x08A`
 producer/SecOC ownership must not be conflated with a presumed `0x08A -> B6` transform. No stock-lateral frame block is justified by the exact-F33 patched-verifier surface; request-plane
 `0x08A` therefore remains observational rather than an authority veto. System-generated stock
-ACC cancel is the one normal feature still unsupported because its TSS3 transmit contract is unrecovered.
+ACC cancel is recovered independently: the fork clones the live checksum-valid `0x101` Brake Module
+shape onto bus 2 with only `BRAKE_PRESSED` asserted, matching two retained cancel transitions whose
+`0x08A` cruise-operation latch cleared 70.229/82.528 ms later.
 
 ## Exact ECU identities and route
 
@@ -267,16 +270,24 @@ with no private arming parameters:
   so identification works in READY even when the EPS does not answer F181;
 - CarState consumes live `SECOC_SYNCHRONIZATION`, `0x025` steering, `0x030` physical N·m
   driver torque plus its validity/fault-inhibit observables, `0x51E` Ready, `0x127`
-  P/R/N/D/B, and cruise state from the camera-bus `TSS3_LATERAL_REQUEST` (`0x08A`
-  `CRUISE_OPERATING_LATCH`/`SET_SPEED`);
+  P/R/N/D/B, body/chassis/BSM state, and independently checked periodic liveness. Cruise uses
+  `0x251 B1[4]` for persistent main/availability, `0x08A B3[3]` for operation, B7 states
+  `0x66/0x67` for source-real stock-ACC hold/standstill, `0x08A B10` for internal set speed,
+  and `0x251 B2` for the cluster-domain set speed; `steeringPressed` uses the same-car-validated
+  physical-torque sign and a 0.6 N.m openpilot policy threshold;
 - CarController sends one zero-MAC28 `0x0B6`/DLC32 frame per scheduled control frame on
   Panda bus 0 with live `0x00F` TRIP/RESET freshness, ID11 while `latActive`, ID0 with
   zeroed companions on release, and a standard angle-rate-limited target;
+- CarController also owns the camera-side `0x412` replacement surface and the recovered stock-ACC
+  cancel. The HUD renders only recovered per-side lane states, suppresses Toyota's later B2[6]
+  escalation/chime stage, and maps openpilot `steerRequired` onto the source-real B1[3:2]
+  steering-warning visual. Stable replacement traffic follows the Camry's ~1 Hz native heartbeat,
+  with display changes rate-bounded to 10 Hz instead of the prior constant 5 Hz ordinary-Toyota cadence;
 - Panda safety is the ordinary `toyota` model with the `TSS3` flag (not `ALLOW_DEBUG`):
-  TX whitelist is only `0x0B6` bus 0 DLC32 with a relay check, `controls_allowed` is
-  cruise-derived from `0x08A` bit 27 on bus 2, and the TX hook enforces target ID 0/11,
-  companion percentage bounds, and `steer_angle_cmd_checks` at ±1745 raw with the standard
-  rate limits;
+  TX objects are `0x0B6` bus 0/DLC32, replacement `0x412` bus 0/DLC8, and stock-shaped
+  checksum-valid brake-cancel `0x101` bus 2/DLC8. `controls_allowed` is cruise-derived from
+  `0x08A` bit 27 on bus 2, while B6 enforces target ID 0/11 and `steer_angle_cmd_checks` at
+  ±1745 raw with standard rate limits;
 - interface: angle control, `radarUnavailable`, stock longitudinal, `dashcamOnly=False`,
   `secOcRequired=False` — no SecOC-key availability state is involved in engagement; other
   research TSS3 platforms (Corolla) stay passive `noOutput`/`dashcamOnly`;
@@ -287,8 +298,9 @@ Zero-MAC28 B6 admission is expected to depend on this maintainer EPS's persisten
 patch and remains unproven (VAR-124/125/126 silent non-admission) — no key and no RAM bridge
 are involved. Factory stock-lateral arbitration remains a research question but is not a runtime gate: no
 frame block is justified and `0x08A` Target Lateral ID remains request-plane state, not an
-authority grant/veto. System-generated stock ACC cancel remains unsupported until its exact
-TSS3 transmit contract is recovered.
+authority grant/veto. Stock ACC cancellation is implemented through the recovered `0x101` contract;
+native openpilot longitudinal actuation, automatic resume, radar tracks, and general TSS3 coverage
+remain separate unsupported features.
 
 The latest failed drive, route `0000002a--c5647fd694`, is useful specifically because it
 closes two old bring-up failures rather than creating new safety policy. The deployed build
@@ -371,17 +383,18 @@ so GTS+ cannot name the producer.
 
 ### Exact maintainer vehicle validation
 
-The software sender exists and receiver acceptance is in place on this car via the installed
-persistent Gate-2 patch. The next test is the normal openpilot one: deploy the exact committed
-build, engage through stock ACC/openpilot's ordinary `controls_allowed` path, and drive while
-checking the transmitted B6 target against measured steering response and EPS/DTC state. No
+The software sender exists, but retained drives do **not** prove B6 application admission or a
+causal wheel response even with the installed persistent Gate-2 patch; VAR-124/126 instead show
+wire-valid Panda transmission alongside repeated steering non-response. The next live discriminator
+therefore remains receiver/application admission before any production steering claim. No
 special Target-Lateral-ID arming rule, stationary sequence ritual, receiver-timeout permission
 gate, or guessed driver-override threshold belongs in the implementation.
 
 The recovered ±1745 target envelope, sequence handling, seven-tick receiver loss behavior and
 other F33 receiver facts remain useful for diagnosis if the EPS rejects or faults; they are not
 extra Panda/openpilot authority rules unless an upstream-style safety semantic independently
-requires them. Stock ACC cancel remains unresolved and is not implemented by the port.
+requires them. Stock ACC cancel is already implemented and Panda-constrained through the recovered
+`0x101` shape.
 
 ### Factory-architecture and unsupported-feature research
 
@@ -391,9 +404,12 @@ Production output remains unauthorized. Separately close:
    request/winner/grant state;
 2. exact `0x08A` physical publisher, protected key owner/profile, and source arbitration—now
    bounded to an always-on chassis service, but not uniquely Brake-family versus Gateway;
-3. production-grade source suppression/coexistence, driver override, motor-current response,
-   and live `0x351/0x394/0x4A3` inhibit/fault/recovery policy;
-4. for a shippable volatile route, automatic resident install, execution pivot, heartbeat,
+3. B6 application admission and causal motor/steering response, plus live `0x351/0x394/0x4A3`
+   inhibit/fault/recovery policy; the ordinary 0.6 N.m driver-interaction policy and `0x101`
+   stock-ACC cancel path are already implemented;
+4. target-specific vehicle dynamics/actuator calibration and, separately, native longitudinal/
+   radar behavior if those features are pursued;
+5. for a shippable volatile signer route, automatic resident install, execution pivot, heartbeat,
    re-arm, and reset-to-stock lifecycle.
 
 Do not send `0x08A` to EPS, repeat blind stock-B6-template drives, or infer an

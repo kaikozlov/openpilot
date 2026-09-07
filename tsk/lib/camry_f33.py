@@ -252,29 +252,29 @@ CAMRY_F33_APPLICATION_RUNTIME = {
 
 CAMRY_F33_CHECKPOINT = {
   "target": "2026 Camry / F33",
-  "state": "normal-port-supported-patched-eps",
+  "state": "normal-port-b6-admission-unproven",
   "static_receiver_integration": "closed",
   "cpu_visible_key_recovery": "negative",
   "key_storage": "ICU-S-protected-slot-4-not-ordinary-dataflash",
   "unsupported_feature": (
-    "openpilot-generated stock-ACC cancel has no recovered TSS3 transmit contract; physical CANCEL "
-    + "is decoded normally and no protected switch or acceleration frame is spoofed"
+    "native openpilot longitudinal actuation, automatic resume, radar tracks, and temporary/permanent "
+    + "EPS-fault classification remain unsupported; stock-ACC cancel is implemented through 0x101"
   ),
   "factory_architecture_open": (
-    "FRC request transport and exact always-on 0x08A protected publisher remain unresolved "
-    + "but do not block direct B6 actuation"
+    "FRC request transport and exact always-on 0x08A protected publisher remain unresolved; this is "
+    + "separate from the direct B6 sender and does not prove B6 application admission"
   ),
-  "output": "exact-F33-normal-port",
+  "output": "exact-F33-normal-port-sender",
   "output_detail": (
-    "Ordinary CarParams/CarController/Panda safety on TOYOTA_CAMRY_TSS3. Zero-MAC28 B6 is "
-    + "accepted because this maintainer EPS carries the persistent Gate-2 patch; no key and no "
-    + "RAM bridge are involved. This is custom exact-target support, not an upstream Toyota key-backed path."
+    "Ordinary CarParams/CarController/Panda safety on TOYOTA_CAMRY_TSS3 can transmit zero-MAC28 B6. "
+    + "The persistent exact-F33 Gate-2 patch is installed and CRC-valid, but retained stationary probes "
+    + "and road drives do not prove that the application admits those frames or that B6 causes wheel response."
   ),
 }
 
 CAMRY_F33_LATERAL_PORT = {
   "available": True,
-  "status": "native-port-gate2-patched-eps",
+  "status": "native-port-b6-admission-unproven",
   "superseded": (
     "the private-parameter/ephemeral-bridge/ALLOW_DEBUG arming path (ToyotaEphemeralSecOCBridge, "
     + "ToyotaEphemeralSecOCBridgeF181, ToyotaTss3DevLateral, ToyotaTSS3FrcOracleCapture) is removed; "
@@ -285,27 +285,27 @@ CAMRY_F33_LATERAL_PORT = {
     + "SecOC-key availability state"
   ),
   "sender": (
-    "one zero-MAC28 0x0B6/DLC32 frame per scheduled control frame on Panda bus 0; live "
-    + "SECOC_SYNCHRONIZATION (0x00F) TRIP/RESET freshness; ID11 while active, ID0 with zeroed "
-    + "companions on release; standard angle-rate-limited target angle"
+    "one zero-MAC28 0x0B6/DLC32 frame per scheduled 50-Hz steering update on Panda bus 0; live "
+    + "SECOC_SYNCHRONIZATION (0x00F) TRIP/RESET freshness; ID11 while active, ID0 on release; "
+    + "standard angle-rate-limited target angle"
   ),
   "safety": (
-    "ordinary SafetyModel.toyota with EPS_SCALE|STOCK_LONGITUDINAL|TSS3 (not ALLOW_DEBUG); TSS3 "
-    + "branch TX-whitelists only 0x0B6 bus0 DLC32 with relay check; controls_allowed from 0x08A "
-    + "bit 27 on bus 2; target ID 0/11 only, companion percentages <=100 and zero when inactive, "
-    + "steer_angle_cmd_checks at +/-1745 raw with standard rate limits"
+    "ordinary SafetyModel.toyota with EPS_SCALE|STOCK_LONGITUDINAL|TSS3 (not ALLOW_DEBUG); TSS3 TX "
+    + "objects are B6 bus0/DLC32, replacement HUD 0x412 bus0/DLC8, and stock-shaped brake-cancel "
+    + "0x101 bus2/DLC8. controls_allowed comes from 0x08A bit 27 on bus 2; B6 permits only ID0/ID11 "
+    + "and uses steer_angle_cmd_checks at +/-1745 raw with standard rate limits"
   ),
   "receiver_acceptance": (
-    "zero-MAC28 B6 is accepted because this maintainer EPS carries the persistent exact-F33 "
-    + "Gate-2 patch (CodeFlash compare neutralization with deterministic CRC repair); this does "
-    + "not recover or replace the protected key"
+    "the persistent exact-F33 Gate-2 patch is installed and CRC-valid, but zero-MAC28 B6 application "
+    + "admission remains unproven: retained stationary probes and long road routes show transmission "
+    + "without a causal B6 steering response; the protected key remains unrecovered"
   ),
   "unsupported_features": (
-    "openpilot-generated stock-ACC cancel is unsupported until its exact TSS3 transmit contract is recovered; "
-    + "driver-override threshold and openpilot temporary/permanent EPS-fault classes remain intentionally unmapped"
+    "native openpilot longitudinal actuation, automatic resume, radar tracks, lane-departure/chime HUD "
+    + "semantics, and temporary/permanent EPS-fault classes remain intentionally unsupported or unmapped"
   ),
   "companion_boundary": "no stock B6 was retained; unresolved application bytes remain explicit zero/default candidates rather than Toyota stock claims",
-  "supported_output": True,
+  "supported_output": False,
 }
 
 CAMRY_F33_PRODUCTION_ARCHITECTURE = {
@@ -341,19 +341,20 @@ CAMRY_F33_PRODUCTION_ARCHITECTURE = {
 CAMRY_F33_OPENDBC = {
   "platform": "TOYOTA_CAMRY_TSS3",
   "mode": "normal-port; ordinary CarParams + CarController + Panda safety; no private parameters",
-  "safety": "SafetyModel.toyota with EPS_SCALE|STOCK_LONGITUDINAL|TSS3; TSS3 branch TX-whitelists only 0x0B6 bus0 DLC32",
+  "safety": "SafetyModel.toyota with EPS_SCALE|STOCK_LONGITUDINAL|TSS3; TSS3 TX objects are 0x0B6 bus0, 0x412 bus0, and checked 0x101 brake-cancel on bus2",
   "controller_can_output": True,
-  "supported_output": True,
+  "supported_output": False,
   "exact_f181_binding": True,
   "lateral_request_decoding": True,
 }
 
 CAMRY_F33_REMAINING_RESEARCH_BOUNDARIES = (
-  "openpilot-generated stock-ACC cancel transmit contract is not recovered; do not spoof 0x0FE/0x0C9/0x0CA",
-  "driver-override threshold is not recovered; physical driver torque remains observational",
-  "openpilot temporary/permanent EPS-fault classification is not recovered; physical status remains observational",
-  "0x08A producer/private-middle stock-authority attribution remains research-only and does not gate B6 output",
-  "RAM-only/reset-to-stock signer remains future research to replace the already-verified persistent Gate-2 patch",
+  "B6 application admission and causal steering response remain unproven despite valid Panda transmission and the installed persistent Gate-2 patch",
+  "native openpilot longitudinal actuation, automatic resume, and radar tracks are not implemented; stock-ACC cancel is already recovered through 0x101",
+  "openpilot temporary/permanent EPS-fault classification is not recovered; selected 0x030 and richer 0x351/0x394 status remain policy-neutral",
+  "0x08A producer/private-middle stock-authority attribution remains architecture research and is not a request-plane engage veto",
+  "Camry-specific vehicle dynamics/actuator calibration remains inherited where no target measurement exists",
+  "RAM-only/reset-to-stock signer research remains separate from the current zero-MAC28 sender and does not substitute for proving B6 admission",
 )
 
 def public_camry_f33_status() -> dict:
@@ -378,6 +379,6 @@ def public_camry_f33_status() -> dict:
     "lateral_port": CAMRY_F33_LATERAL_PORT,
     "production_architecture": CAMRY_F33_PRODUCTION_ARCHITECTURE,
     "opendbc": CAMRY_F33_OPENDBC,
-    "supported_output": True,
+    "supported_output": CAMRY_F33_LATERAL_PORT["supported_output"],
     "remaining_research_boundaries": CAMRY_F33_REMAINING_RESEARCH_BOUNDARIES,
   })

@@ -231,13 +231,13 @@ function renderTargetCheckpoint(dashboard) {
   const lateral = status.lateral_port || {};
   const boundaries = status.remaining_research_boundaries || [];
   els.targetCheckpoint.replaceChildren(
-    checkpointItem("Static checkpoint", "B6 receiver + integration closed", "success"),
+    checkpointItem("Static checkpoint", "B6 receiver contract closed · application admission open", "warning"),
     checkpointItem("CPU-visible recovery", checkpoint.cpu_visible_key_recovery || "negative"),
     checkpointItem("Production architecture", architecture.runtime_model || "RAM-only / reset-to-stock", "primary"),
     checkpointItem("Persistent flash", architecture.persistent_flash || "fallback-only"),
-    checkpointItem("Lateral path", lateral.available ? "Native zero-MAC28 B6 · Gate-2 patched EPS" : "Not implemented", "warning"),
+    checkpointItem("Lateral path", lateral.available ? "Zero-MAC28 B6 sender implemented · admission unproven" : "Not implemented", "warning"),
     checkpointItem("Research boundaries", `${boundaries.length} bounded follow-ups`, "warning"),
-    checkpointItem("Output", status.supported_output ? "Supported on verified patched F33" : (checkpoint.output_detail || "Not supported"), status.supported_output ? "success" : "danger"),
+    checkpointItem("Output", status.supported_output ? "Supported on verified F33" : "Not yet supported: B6 admission/actuation unproven", status.supported_output ? "success" : "warning"),
   );
 }
 
@@ -283,7 +283,7 @@ function renderWorkflow(dashboard) {
   const exactF33 = dashboard.target?.kind === "camry_f33";
   els.workflowCardTitle.textContent = exactF33 ? "Remaining research boundaries" : "Recovery progress";
   els.workflowCardSubtitle.textContent = exactF33
-    ? "The patched-F33 lateral port is supported; these are bounded unsupported features or future research."
+    ? "The F33 sender path is implemented, but application admission/causal steering is still an explicit evidence gate."
     : "The generic recovery path stays intentionally explicit.";
   els.workflow.replaceChildren();
 

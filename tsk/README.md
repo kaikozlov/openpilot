@@ -283,9 +283,10 @@ removed**: openpilot no longer carries any private bridge/lateral parameters, or
 capture, or `ALLOW_DEBUG` development safety mode. The exact-F33 Camry instead uses the
 ordinary Toyota/openpilot port shape on `TOYOTA_CAMRY_TSS3` — normal CarParams,
 CarController, and Panda safety with a `TSS3` flag — whose B6 sender marks only its own
-generated `0x0B6` frame with an all-zero MAC28 and live freshness. That frame is accepted
-because this maintainer EPS carries the persistent Gate-2 patch; no key and no RAM bridge
-are involved. See [`OPENPILOT_TARGET_INTEGRATION.md`](OPENPILOT_TARGET_INTEGRATION.md).
+generated `0x0B6` frame with an all-zero MAC28 and live freshness. The persistent Gate-2
+patch is installed and CRC-valid on this maintainer EPS, but retained probes and road routes
+do not prove B6 application admission or causal steering; no key and no RAM bridge are
+involved in the current sender. See [`OPENPILOT_TARGET_INTEGRATION.md`](OPENPILOT_TARGET_INTEGRATION.md).
 
 ## SecurityAccess domains are separate
 

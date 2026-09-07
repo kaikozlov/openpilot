@@ -36,7 +36,7 @@ class TestTSS3ReadOnlyIntegration(unittest.TestCase):
     self.assertEqual(DBC[CAR.TOYOTA_CAMRY_TSS3][Bus.pt], "toyota_tss3_pt_generated")
     # Exact F33 uses the ordinary Toyota/openpilot port shape: normal CarParams,
     # controller, and Panda safety. No private parameters or ALLOW_DEBUG dev mode,
-    # and no SecOC-key availability state (the Gate-2-patched EPS accepts zero-MAC28 B6).
+    # and no SecOC-key availability state. The installed Gate-2 patch is CRC-valid, but retained evidence does not prove zero-MAC28 B6 application admission.
     self.assertFalse(cp.dashcamOnly)
     self.assertFalse(cp.passive)
     self.assertEqual(cp.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.toyota)

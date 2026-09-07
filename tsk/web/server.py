@@ -1017,20 +1017,20 @@ def dashboard_payload() -> dict:
     }
 
   if exact_f33:
-    stage = "f33_stock_acc_cancel"
+    stage = "f33_b6_admission"
     next_action = {
       "id": stage,
-      "title": "Recover stock-ACC cancel transmit contract",
+      "title": "Establish B6 application admission",
       "description": (
-        "The exact patched-F33 lateral port is supported through the normal openpilot path. "
-        + "The remaining standard feature gap is system-generated stock-ACC cancel; physical CANCEL is decoded, "
-        + "but no safe TSS3 transmit PDU is recovered. Do not spoof 0x0FE or reinterpret 0x0C9/0x0CA as cancel."
+        "The exact-F33 software sender and Panda safety path are implemented, but retained stationary probes "
+        + "and road routes do not prove that zero-MAC28 B6 reaches the application command state or causes steering. "
+        + "Stock-ACC cancel is already recovered through 0x101; the next evidence gate is receiver/application admission."
       ),
       "href": "",
       "label": "Open research",
       "action": "research",
-      "vehicle_state": "Any · static/producer RE first",
-      "tone": "primary",
+      "vehicle_state": "Parked / bench-safe · admission observation first",
+      "tone": "warning",
     }
 
   def step_state(done: bool, step_id: str) -> str:
@@ -1043,11 +1043,12 @@ def dashboard_payload() -> dict:
   if exact_f33:
     assert f33_status is not None
     gate_titles = (
-      "Stock-ACC cancel TX",
-      "Driver-override policy",
+      "B6 application admission",
+      "Native longitudinal / radar",
       "EPS fault classification",
       "0x08A / stock-authority attribution",
-      "Volatile signer replacement",
+      "Vehicle calibration",
+      "Volatile signer research",
     )
     steps = [
       {

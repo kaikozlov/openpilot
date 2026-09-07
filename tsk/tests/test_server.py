@@ -179,18 +179,18 @@ class TestServer(unittest.TestCase):
     }
     f33_projection = projected(exact_f33)
     self.assertEqual(f33_projection["target"]["kind"], "camry_f33")
-    self.assertEqual(f33_projection["recovery"]["stage"], "f33_stock_acc_cancel")
+    self.assertEqual(f33_projection["recovery"]["stage"], "f33_b6_admission")
     self.assertEqual(f33_projection["recovery"]["next_action"]["action"], "research")
     self.assertEqual(f33_projection["recovery"]["next_action"]["href"], "")
-    self.assertIn("stock-ACC cancel", f33_projection["recovery"]["next_action"]["title"])
-    self.assertIn("lateral port is supported", f33_projection["recovery"]["next_action"]["description"])
-    self.assertIn("Do not spoof 0x0FE", f33_projection["recovery"]["next_action"]["description"])
-    self.assertEqual(len(f33_projection["recovery"]["steps"]), 5)
+    self.assertIn("B6 application admission", f33_projection["recovery"]["next_action"]["title"])
+    self.assertIn("do not prove", f33_projection["recovery"]["next_action"]["description"])
+    self.assertIn("Stock-ACC cancel is already recovered", f33_projection["recovery"]["next_action"]["description"])
+    self.assertEqual(len(f33_projection["recovery"]["steps"]), 6)
     self.assertEqual(
       tuple(step["detail"] for step in f33_projection["recovery"]["steps"]),
       CAMRY_F33_REMAINING_RESEARCH_BOUNDARIES,
     )
-    self.assertTrue(f33_projection["target"]["status"]["supported_output"])
+    self.assertFalse(f33_projection["target"]["status"]["supported_output"])
 
   def test_can_collector_copy_states_full_window_stop(self):
     html = resolve_asset("/can-collector.html").read_text(encoding="utf-8")
