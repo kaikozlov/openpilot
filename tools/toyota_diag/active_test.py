@@ -1,7 +1,7 @@
 """Rendering helpers for GTS+-derived Active-Test plans.
 
 Rendering never transmits. Runtime execution lives in :mod:`executor` and requires
-an explicit acknowledgement plus a registry row graded ``execution=executable``.
+an explicit user acknowledgement plus a fully materialized executable registry row.
 """
 from __future__ import annotations
 
@@ -107,7 +107,7 @@ def render_plan(profile: Profile, ecu: EcuSpec, test: dict[str, Any]) -> str:
     if examples:
       lines.append(f"minimum examples only: {examples.get('raw_0')} / {examples.get('raw_1')} / {examples.get('return_control')}")
   if not runtime_refusals:
-    lines.append("runtime: executable; transmission still requires explicit --execute and the vehicle identity guard")
+    lines.append("runtime: executable; transmission still requires explicit --execute acknowledgement")
   elif execution == "executable":
     lines.append("runtime: blocked despite complete static geometry")
     lines.extend(f"  refusal: {reason}" for reason in runtime_refusals)

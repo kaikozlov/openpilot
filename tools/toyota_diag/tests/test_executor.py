@@ -74,7 +74,7 @@ class TestPlanResolution(unittest.TestCase):
     self.assertFalse(brake_plan.executable)
     self.assertIn("placeholder 0xFFFF", " ".join(brake_plan.refusals))
 
-  def test_legacy_v3_row_stays_plan_only_without_runtime_authorization(self):
+  def test_legacy_v3_row_stays_plan_only_without_executable_geometry_grade(self):
     profile = support.load_profile(None, active_tests=[executable_routine(execution="plan_only")])
     row = profile.lookup_active_test("ecu", "0x2001")
     plan = resolve_plan(profile.lookup_ecu("ecu"), row)
@@ -142,7 +142,6 @@ class TestPlanResolution(unittest.TestCase):
 class TestRoutineExecution(unittest.TestCase):
   def setUp(self):
     self.scripted = support.ScriptedUds()
-    support.guard_pass(self.scripted)
 
   def run_with(self, row, *, session_control=None, **kwargs):
     profile = support.load_profile(None, session_control=session_control)
@@ -166,26 +165,26 @@ class TestRoutineExecution(unittest.TestCase):
     self.assertEqual(controls[-1], 2)         # stop last
     self.assertEqual(set(controls[1:-1]), {3})  # only status polls in between
     self.assertGreaterEqual(len(controls), 3)
-    self.assertEqual(self.scripted.calls[0], (ADDR, "read_did", 0xF181))  # guard before everything
+    self.assertEqual(self.scripted.calls[0][1], "routine")
 
-  def test_execute_acknowledgement_gates_all_transmission_including_guard(self):
+  def test_execute_acknowledgement_gates_all_transmission(self):
     routine_scripts(self.scripted)
     result = self.run_with(executable_routine(), execute=False)
     self.assertFalse(result.executed)
     self.assertEqual(result.session_requirement, "default")
-    self.assertEqual(self.scripted.calls, [])  # not even the identity guard read
+    self.assertEqual(self.scripted.calls, [])
 
-  def test_identity_guard_precedes_every_mutation(self):
+  def test_identity_witness_is_not_a_second_operation_gate(self):
     routine_scripts(self.scripted)
     self.scripted.did[ADDR] = {0xF181: b"NOT-MY-CAR"}
-    with self.assertRaises(SystemExit):
-      self.run_with(executable_routine(), execute=True)
-    self.assertEqual([call[1] for call in self.scripted.calls], ["read_did"])
+    result = self.run_with(executable_routine(), execute=True)
+    self.assertTrue(result.executed)
+    self.assertNotIn((ADDR, "read_did", 0xF181), self.scripted.calls)
 
   def test_extended_requirement_full_lifecycle_order(self):
     routine_scripts(self.scripted)
     lifecycle = current_p5(keepalive={"kind": "session_did_poll", "interval_s": 30.0})
-    self.scripted.did[ADDR] = {0xF181: support.EXPECTED_EPS_F181, 0xF186: b"\x01"}  # poll reports default
+    self.scripted.did[ADDR] = {0xF186: b"\x01"}  # poll reports default
     profile = support.load_profile(None, session_control=lifecycle)
     with DiagnosticSession(profile, support.synthetic_ecu(profile),
                            client_factory=self.scripted.factory) as session:
@@ -196,7 +195,6 @@ class TestRoutineExecution(unittest.TestCase):
     self.assertEqual(result.session_requirement, "extended")
     calls = list(self.scripted.calls)
     for expected in [
-      (ADDR, "read_did", 0xF181),   # identity guard
       (ADDR, "read_did", 0xF186),   # recovered session-state poll
       (ADDR, "session", 1),         # D1
       (ADDR, "session", 3),         # D2
@@ -216,7 +214,7 @@ class TestRoutineExecution(unittest.TestCase):
     routine_scripts(self.scripted)
     with self.assertRaises(PlanNotExecutable):
       self.run_with(executable_routine(session_requirement="extended"), execute=True)
-    self.assertEqual(self.scripted.calls, [])  # lifecycle refusal happens before even the identity-guard read
+    self.assertEqual(self.scripted.calls, [])  # lifecycle refusal happens before any request
 
   def test_exception_during_hold_still_stops_the_routine(self):
     self.scripted.routine[(ADDR, 1, 0x1105)] = b"\x00"
@@ -306,7 +304,6 @@ class TestRoutineExecution(unittest.TestCase):
 class TestDirectExecution(unittest.TestCase):
   def setUp(self):
     self.scripted = support.ScriptedUds()
-    support.guard_pass(self.scripted)
     self.scripted.io_control.update({
       (ADDR, 0x2801, 3): b"\x01", (ADDR, 0x2801, 0): b"\x00",
     })
@@ -326,7 +323,6 @@ class TestDirectExecution(unittest.TestCase):
     self.assertTrue(result.executed)
     calls = list(self.scripted.calls)
     for expected in [
-      (ADDR, "read_did", 0xF181),                        # guard
       (ADDR, "session", 1), (ADDR, "session", 3),        # D1/D2 SendProc (no poll declared)
       (ADDR, "io_control", 0x2801, 3, b"\x00\x01", b""),  # start with explicit payload
       (ADDR, "io_control", 0x2801, 0, b"", b"\x00\x01"),  # stop with explicit mask

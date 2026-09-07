@@ -10,9 +10,9 @@ length, control mask, option record, or session requirement is ever inferred fro
 partial data, and `plan_only`/unresolved rows stay non-executable.
 
 Run backends are explicit-by-default: `execute=False` (the default) performs a
-plan-only echo with no transmission. A mutation additionally passes the profile
-identity guard and enters the recovered extended session automatically when the
-row's `session_requirement` is `extended`. Started operations are always stopped —
+plan-only echo with no transmission. When execution is acknowledged, the backend
+enters Toyota's recovered extended session automatically when the row's
+`session_requirement` is `extended`. Started operations are always stopped —
 including on exception and KeyboardInterrupt — before the error propagates; the
 caller owns the `DiagnosticSession` context so session cleanup happens after the
 result is returned.
@@ -126,7 +126,7 @@ def _base_refusals(row: dict[str, Any], kind: str, service: int, positive_sid: i
   if row.get("kind") != kind:
     refusals.append(f"kind is {row.get('kind')!r}, expected {kind!r}")
   if row.get("execution") != EXECUTION_EXECUTABLE:
-    reason = row.get("reason") or row.get("error") or "no executable runtime authorization"
+    reason = row.get("reason") or row.get("error") or "runtime request geometry is not fully materialized"
     refusals.append(f"execution is {row.get('execution')!r}, not {EXECUTION_EXECUTABLE!r} ({reason})")
   if row.get("service") != service:
     refusals.append(f"service is {row.get('service')!r}, expected {service:#04x}")
@@ -295,26 +295,19 @@ def _hold(session: DiagnosticSession, *, hold_s: float, status_fn: Callable[[], 
 
 
 # -- run backends ----------------------------------------------------------------------------------------------------
-def _prepare(session: DiagnosticSession, plan: TestPlan, *, execute: bool,
-             echo: Callable[[str], None]) -> str | None:
-  """Guard identity and enter the recovered extended session when the row requires it.
+def _prepare(session: DiagnosticSession, plan: TestPlan, *, execute: bool) -> str | None:
+  """Enter the recovered Toyota lifecycle when an acknowledged operation requires it.
 
-  Without an explicit execute acknowledgement this performs zero transmissions,
-  including the identity guard; the caller gets a plan-only result instead.
-
+  Without an explicit execute acknowledgement this performs zero transmissions and
+  the caller gets a plan-only result instead.
   """
   if not execute:
     return plan.session_requirement
   refusals = runtime_refusals(session.profile, plan)
   if refusals:
     raise PlanNotExecutable(plan, refusals)
-  # Refuse before even the read-only identity guard when the recovered lifecycle
-  # is explicitly bounded to other ECU categories.
   if plan.session_requirement == SESSION_REQUIREMENT_EXTENDED:
-    session.require_lifecycle_supported()
-  session.guard(echo=echo)
-  if plan.session_requirement == SESSION_REQUIREMENT_EXTENDED:
-    session.enter_extended(acknowledge=True)
+    session.enter_extended()
   return plan.session_requirement
 
 
@@ -344,7 +337,7 @@ def run_direct_test(session: DiagnosticSession, plan: DirectTestPlan, *, hold_s:
     if len(control_enable_mask) != plan.runtime_length:
       raise ExecutorError(f"control_enable_mask must be exactly {plan.runtime_length} byte(s), got {len(control_enable_mask)}")
 
-  session_requirement = _prepare(session, plan, execute=execute, echo=echo)
+  session_requirement = _prepare(session, plan, execute=execute)
   if not execute:
     return ActiveTestResult(plan=plan, executed=False, session_requirement=session_requirement)
 
@@ -389,7 +382,7 @@ def run_routine_test(session: DiagnosticSession, plan: RoutineTestPlan, *, hold_
   if hold_s <= 0:
     raise ExecutorError("hold_s must be positive")
   if not execute:
-    session_requirement = _prepare(session, plan, execute=False, echo=echo)
+    session_requirement = _prepare(session, plan, execute=False)
     return ActiveTestResult(plan=plan, executed=False, session_requirement=session_requirement)
 
   refusals = runtime_refusals(session.profile, plan)
@@ -401,7 +394,7 @@ def run_routine_test(session: DiagnosticSession, plan: RoutineTestPlan, *, hold_
   elif option_record:
     raise ExecutorError("fixed routine takes no runtime option record")
 
-  session_requirement = _prepare(session, plan, execute=True, echo=echo)
+  session_requirement = _prepare(session, plan, execute=True)
   client = session.client()
   start_option = plan.start_option_prefix + (option_record if plan.parameterized else b"")
 
@@ -436,7 +429,7 @@ def stop_test(session: DiagnosticSession, plan: TestPlan, *, control_enable_mask
   an explicit control-enable mask of exactly the recovered runtime length. Like
   normal execution, no transmission occurs without `execute=True`.
   """
-  session_requirement = _prepare(session, plan, execute=execute, echo=echo)
+  session_requirement = _prepare(session, plan, execute=execute)
   if not execute:
     return ActiveTestResult(plan=plan, executed=False, session_requirement=session_requirement)
 

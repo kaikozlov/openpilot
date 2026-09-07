@@ -184,10 +184,6 @@ class Profile:
       raise RegistryError(f"session_control category {spec.category_id}: CommSet {comm_set_id} is not present")
     return comm_set_id, row
 
-  def guard_specs(self) -> tuple[tuple[int, str, Guard], ...]:
-    ecu = self.lookup_ecu(self.guard.ecu_key)
-    return ((ecu.address, ecu.name, self.guard),)
-
   def observed_identity(self, ecu: EcuSpec | str | int) -> dict[str, Any] | None:
     spec = ecu if isinstance(ecu, EcuSpec) else self.lookup_ecu(ecu)
     raw = next(row for row in self.document["profile"]["ecus"] if row["key"] == spec.key)

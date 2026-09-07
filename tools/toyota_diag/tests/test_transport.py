@@ -67,10 +67,10 @@ class TestTransport(unittest.TestCase):
   def state(*, safety=CarParams.SafetyModel.elm327, param=1, controls=False):
     return types.SimpleNamespace(safetyModel=safety, safetyParam=param, controlsAllowed=controls)
 
-  def test_managed_ready_is_exact_bus0_elm327_param1_no_controls(self):
+  def test_managed_ready_requires_elm327_not_a_specific_param_or_controls_state(self):
     self.assertTrue(transport.managed_diagnostic_ready([self.state()], self.profile))
-    self.assertFalse(transport.managed_diagnostic_ready([self.state(param=0)], self.profile))
-    self.assertFalse(transport.managed_diagnostic_ready([self.state(controls=True)], self.profile))
+    self.assertTrue(transport.managed_diagnostic_ready([self.state(param=0)], self.profile))
+    self.assertTrue(transport.managed_diagnostic_ready([self.state(controls=True)], self.profile))
     self.assertFalse(transport.managed_diagnostic_ready([self.state(safety=CarParams.SafetyModel.noOutput)], self.profile))
     self.assertFalse(transport.managed_diagnostic_ready([], self.profile))
     self.assertFalse(transport.managed_diagnostic_ready([self.state(), self.state()], self.profile))
@@ -97,15 +97,15 @@ class TestTransport(unittest.TestCase):
     adapter.can_clear(0xFFFF)
     self.assertEqual(messaging.drains, [False, False])
 
-  def test_managed_adapter_rechecks_safety_before_each_tx(self):
+  def test_managed_adapter_rechecks_diagnostic_safety_before_each_tx(self):
     state = self.state()
     messaging = _FakeMessaging([state])
     adapter = transport.ManagedPandaAdapter(
       self.profile, messaging_module=messaging,
       can_serializer=lambda msgs, msgtype: b"unused", sleep=lambda _: None,
     )
-    state.controlsAllowed = True
-    with self.assertRaisesRegex(SystemExit, "not in diagnostic-safe ELM327/param1"):
+    state.safetyModel = CarParams.SafetyModel.toyota
+    with self.assertRaisesRegex(SystemExit, "not in ELM327 diagnostic safety"):
       adapter.can_send(0x792, bytes(8), 0)
     self.assertEqual(messaging.pub.sent, [])
 

@@ -111,22 +111,21 @@ class TestDiagnosticSession(unittest.TestCase):
     profile = support.load_profile(None)
     with self.open(profile) as sess:
       with self.assertRaises(LifecycleUnsupported):
-        sess.enter_extended(acknowledge=True)
-      self.assertEqual(self.scripted.calls, [])
-
-  def test_acknowledgement_is_required_before_any_transition(self):
-    profile = support.load_profile(None, session_control=current_p5_lifecycle())
-    with self.open(profile) as sess:
-      with self.assertRaises(LifecycleError):
         sess.enter_extended()
       self.assertEqual(self.scripted.calls, [])
+
+  def test_enter_extended_follows_toyota_lifecycle_without_second_permission_gate(self):
+    profile = support.load_profile(None, session_control=current_p5_lifecycle())
+    with self.open(profile) as sess:
+      sess.enter_extended()
+      self.assertEqual([call[1:] for call in self.scripted.calls], [("session", 1), ("session", 3)])
 
   def test_sendproc_runs_poll_d1_d2_and_context_exit_restores_default(self):
     lifecycle = current_p5_lifecycle(keepalive={"kind": "session_did_poll", "interval_s": 5.0})
     profile = support.load_profile(None, session_control=lifecycle)
     with self.open(profile) as sess:
       self.scripted.did[support.SYNTH_ECU_ADDRESS] = {0xF186: b"\x01"}  # ECU reports default
-      sess.enter_extended(acknowledge=True)
+      sess.enter_extended()
       self.assertEqual([call[1:] for call in self.scripted.calls],
                        [("read_did", 0xF186), ("session", 1), ("session", 3)])
       self.assertTrue(sess.extended)
@@ -137,7 +136,7 @@ class TestDiagnosticSession(unittest.TestCase):
     profile = support.load_profile(None, session_control=lifecycle)
     with self.open(profile) as sess:
       self.scripted.did[support.SYNTH_ECU_ADDRESS] = {0xF186: b"\x03"}
-      sess.enter_extended(acknowledge=True)
+      sess.enter_extended()
       self.assertEqual([call[1:] for call in self.scripted.calls], [("read_did", 0xF186)])
       self.assertEqual(sess.active_session, 3)
     self.assertEqual(self.scripted.calls[-1], (support.SYNTH_ECU_ADDRESS, "session", 1))
@@ -147,7 +146,7 @@ class TestDiagnosticSession(unittest.TestCase):
     profile = support.load_profile(None, session_control=lifecycle)
     with self.open(profile) as sess:
       self.scripted.did[support.SYNTH_ECU_ADDRESS] = {0xF186: MessageTimeoutError()}
-      sess.enter_extended(acknowledge=True)
+      sess.enter_extended()
       self.assertEqual([call[1:] for call in self.scripted.calls],
                        [("read_did", 0xF186), ("session", 1), ("session", 3)])
 
@@ -156,7 +155,7 @@ class TestDiagnosticSession(unittest.TestCase):
     with self.open(profile) as sess:
       self.scripted.session[(support.SYNTH_ECU_ADDRESS, 3)] = MessageTimeoutError()
       with self.assertRaises(MessageTimeoutError):
-        sess.enter_extended(acknowledge=True)
+        sess.enter_extended()
       calls = [call[1:] for call in self.scripted.calls]
       self.assertEqual(calls, [("session", 1), ("session", 3), ("session", 1)])
       self.assertFalse(sess.extended)
@@ -175,7 +174,7 @@ class TestDiagnosticSession(unittest.TestCase):
     self.scripted.session[(support.SYNTH_ECU_ADDRESS, 1)] = default_session_script
     with self.assertRaises(RuntimeError):
       with sess:
-        sess.enter_extended(acknowledge=True)
+        sess.enter_extended()
         raise RuntimeError("boom")
     self.assertEqual([call[1:] for call in self.scripted.calls], [("session", 1), ("session", 3), ("session", 1)])
     self.assertTrue(sess.cleanup_errors)
@@ -187,7 +186,7 @@ class TestDiagnosticSession(unittest.TestCase):
     with self.open(profile) as sess:
       self.scripted.did[support.SYNTH_ECU_ADDRESS] = {0xF186: b"\x03"}
       self.assertEqual(sess.poll_active_session(), 3)
-      sess.enter_extended(acknowledge=True)  # already extended: no transition TX
+      sess.enter_extended()  # already extended: no transition TX
       sess.keepalive()
       self.assertEqual(self.scripted.calls[-1], (support.SYNTH_ECU_ADDRESS, "read_did", 0xF186))
 
@@ -208,23 +207,10 @@ class TestDiagnosticSession(unittest.TestCase):
     profile = support.load_profile(None, session_control=current_p5_lifecycle(
       keepalive={"kind": "session_did_poll", "interval_s": 5.0}))
     with self.open(profile) as sess:
-      sess.enter_extended(acknowledge=True)
+      sess.enter_extended()
       self.scripted.did[support.SYNTH_ECU_ADDRESS] = {0xF186: b"\x01"}  # dropped to default
       with self.assertRaises(LifecycleError):
         sess.keepalive()
-
-  def test_guard_uses_profile_identity_guard(self):
-    profile = support.load_profile(None)
-    support.guard_pass(self.scripted)
-    with self.open(profile) as sess:
-      sess.guard(echo=lambda text: None)
-    self.assertEqual(self.scripted.calls, [(support.SYNTH_ECU_ADDRESS, "read_did", 0xF181)])
-    self.setUp()
-    profile = support.load_profile(None)
-    self.scripted.did[support.SYNTH_ECU_ADDRESS] = {0xF181: b"OTHER"}
-    with self.open(profile) as sess:
-      with self.assertRaises(SystemExit):
-        sess.guard(echo=lambda text: None)
 
   def test_operation_row_commset_applies_to_session_timeouts(self):
     profile = support.load_profile(None, session_control=current_p5_lifecycle(

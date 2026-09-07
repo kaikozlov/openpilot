@@ -1,10 +1,10 @@
 """Live Toyota diagnostic transports.
 
-When pandad is stopped, use direct Panda ownership and the exact Camry-validated
-ELM327 setup. When pandad is already running, reuse openpilot's can/sendcan
-messaging path only if the live Panda is already in the validated non-OBD
-ELM327 diagnostic state with controls disallowed. The managed path never
-changes Panda safety itself.
+When pandad is stopped, use direct Panda ownership in Panda's ordinary ELM327
+diagnostic safety mode. When pandad is already running, reuse openpilot's
+can/sendcan messaging path if the live Panda is already in ELM327 safety. The
+managed path never changes Panda safety itself; Panda's ELM327 TX hook remains
+the diagnostic-address/frame enforcement boundary.
 """
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ from opendbc.car.uds import IsoTpMessage, UdsClient
 from tools.toyota_diag import registry
 from tools.toyota_diag.registry import Profile
 
-ELM327_PARAM_NORMAL = 1
 MANAGED_READY_TIMEOUT = 1.0
 SENDCAN_WARMUP = 0.15
 QUERY_RECV_WAIT = 0.1
@@ -41,13 +40,11 @@ def pandad_running() -> bool:
 
 
 def managed_diagnostic_ready(panda_states: Any, profile: Profile) -> bool:
-  """Return whether sendcan is in the exact fail-closed state used for F33 diagnostics."""
-  if profile.bus != 0 or len(panda_states) != 1:
+  """Return whether pandad's Panda is already in the diagnostic safety model."""
+  del profile
+  if len(panda_states) != 1:
     return False
-  state = panda_states[0]
-  return (state.safetyModel == CarParams.SafetyModel.elm327 and
-          state.safetyParam == ELM327_PARAM_NORMAL and
-          not state.controlsAllowed)
+  return panda_states[0].safetyModel == CarParams.SafetyModel.elm327
 
 
 def _wait_panda_states(messaging_module, timeout: float = MANAGED_READY_TIMEOUT):
@@ -61,13 +58,12 @@ def _wait_panda_states(messaging_module, timeout: float = MANAGED_READY_TIMEOUT)
 
 
 def _managed_refusal(panda_states: Any, profile: Profile) -> str:
-  if profile.bus != 0:
-    return f"profile Panda bus {profile.bus} is not validated for managed diagnostics"
+  del profile
   if len(panda_states) != 1:
     return f"expected one Panda for managed diagnostics, got {len(panda_states)}"
   state = panda_states[0]
   return "".join((
-    "pandad is running but Panda is not in diagnostic-safe ELM327/param1 state ",
+    "pandad is running but Panda is not in ELM327 diagnostic safety ",
     f"(safetyModel={state.safetyModel}, safetyParam={state.safetyParam}, controlsAllowed={state.controlsAllowed}); ",
     "stop openpilot/manager for direct Panda diagnostics",
   ))
@@ -146,7 +142,7 @@ def status(profile: Profile, *, messaging_module=None) -> dict[str, Any]:
     "pandad_running": True,
     "mode": "managed-sendcan" if ready else "blocked",
     "ready": ready,
-    "detail": "pandad already owns Panda in validated diagnostic-safe ELM327/param1 state" if ready else _managed_refusal(states, profile),
+    "detail": "pandad already owns Panda in ELM327 diagnostic safety" if ready else _managed_refusal(states, profile),
   }
 
 
@@ -164,8 +160,8 @@ def connect(profile: Profile):
 
   from panda import Panda  # lazy: offline commands must not import Panda
   panda = Panda()
-  # Param 0 is the exact live-validated Camry DTC-clear setup. The current
-  # profile uses bus 0, so the bus-1 OBD multiplex side effect is irrelevant.
+  # ELM327 param 0 multiplexes bus 1 to OBD; this profile uses bus 0, so that
+  # harness-side distinction does not alter the diagnostic route.
   panda.set_safety_mode(CarParams.SafetyModel.elm327, 0)
   return panda
 

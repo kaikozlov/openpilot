@@ -24,7 +24,7 @@ from opendbc.car.uds import (
   get_dtc_num_as_str,
 )
 
-from tools.toyota_diag.registry import Guard, decode_status_bits
+from tools.toyota_diag.registry import decode_status_bits
 
 FUNCTIONAL_OBD_REQUEST_ADDR = 0x7DF
 
@@ -66,19 +66,6 @@ def scan(client_factory: Callable[[int], UdsClient], ecus: Sequence[tuple[int, s
       for dtc, status in active:
         echo(f"  {dtc} status={status:#04x} {' '.join(decode_status_bits(status))}")
   return responding, faults
-
-
-def verify_vehicle_identity(client_factory: Callable[[int], UdsClient], guards: Sequence[tuple[int, str, Guard]], *,
-                            echo: Callable[[str], None] = print) -> None:
-  """Refuse to continue unless every identity guard's DID contains its expected needle."""
-  for address, name, guard in guards:
-    try:
-      value = client_factory(address).read_data_by_identifier(guard.did)
-    except Exception as e:
-      raise SystemExit(f"refusing: could not verify {name} DID {guard.did:#06x} at {address:#05x}: {e}") from e
-    if guard.contains not in value:
-      raise SystemExit(f"refusing: {name} DID {guard.did:#06x} does not contain {guard.contains_hex!r}: {value!r}")
-    echo(f"vehicle guard: {name} DID {guard.did:#06x} contains {guard.contains_hex}")
 
 
 def clear_physical_uds(client_factory: Callable[[int], UdsClient], responders: Mapping[int, str], *,

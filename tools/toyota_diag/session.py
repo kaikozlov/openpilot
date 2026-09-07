@@ -15,8 +15,8 @@ or managed pandad via `transport.connect`) and models the recovered lifecycle:
   (`22 F1 86` -> `62 F1 86` session byte) or tester-present cadence.
 - Deterministic cleanup: context exit returns the ECU to the default session
   after extended-session operation, best-effort, never masking an in-flight
-  exception. `__enter__` itself never transmits; transitions are gated by the
-  executor's explicit execute acknowledgement.
+  exception. `__enter__` itself never transmits; callers enter the Toyota lifecycle
+  when their operation requires it.
 
 Unrecognized or malformed lifecycle metadata fails closed (`LifecycleUnsupported`
 / `RegistryError`); no session byte, SendProc step, or keepalive kind is inferred.
@@ -29,7 +29,7 @@ from typing import Any
 
 from opendbc.car.uds import MessageTimeoutError, NegativeResponseError, UdsClient
 
-from tools.toyota_diag import dtc, registry
+from tools.toyota_diag import registry
 from tools.toyota_diag.registry import EcuSpec, Profile
 
 SUPPORTED_SESSION_GENERATIONS = frozenset({"current-p5"})
@@ -253,10 +253,6 @@ class DiagnosticSession:
       self._clients[addr] = self._factory(addr)
     return self._clients[addr]
 
-  def guard(self, *, echo: Callable[[str], None] = print) -> None:
-    """Run the profile identity guard (e.g. EPS F181) before any mutation."""
-    dtc.verify_vehicle_identity(lambda addr: self.client(addr), self.profile.guard_specs(), echo=echo)
-
   # -- lifecycle -------------------------------------------------------------------
   @property
   def lifecycle(self) -> SessionLifecycle | None:
@@ -287,16 +283,14 @@ class DiagnosticSession:
     validate_lifecycle_for_ecu(self.profile, self.ecu, lifecycle)
     return lifecycle
 
-  def enter_extended(self, *, acknowledge: bool = False) -> None:
-    """TMS-077 SendProc entry into the extended session; requires an explicit acknowledgement.
+  def enter_extended(self) -> None:
+    """TMS-077 SendProc entry into the extended session.
 
     When the metadata declares the session-DID poll, the ECU's reported state is
     preferred: an ECU already reporting the extended session skips the D1/D2
     transition. Otherwise the recovered sequence (D1 `10 01` then D2 `10 03`) is
     sent verbatim. Never a direct `10 03`.
     """
-    if not acknowledge:
-      raise LifecycleError("entering the extended session requires an explicit acknowledgement")
     lifecycle = self.require_lifecycle_supported()
     if self._active_session == lifecycle.extended_session:
       return
@@ -346,7 +340,7 @@ class DiagnosticSession:
 
   # -- context manager ---------------------------------------------------------------
   def __enter__(self) -> DiagnosticSession:
-    return self  # no transmission: transitions are gated by the explicit execute acknowledgement
+    return self  # no transmission; callers invoke Toyota's lifecycle when the operation requires it
 
   def __exit__(self, *exc_info) -> bool:
     self.close()

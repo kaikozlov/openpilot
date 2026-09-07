@@ -186,7 +186,6 @@ class TestLiveCli(unittest.TestCase):
   @staticmethod
   def scripted_clear(post_clear_clean=True):
     scripted = support.ScriptedUds()
-    scripted.did[0x7A1] = {0xF181: b"\x00" + support.EXPECTED_EPS_F181 + b"\x00"}
     reads = {"count": 0}
     def engine_dtc():
       reads["count"] += 1
@@ -203,7 +202,6 @@ class TestLiveCli(unittest.TestCase):
     import json
 
     scripted = support.ScriptedUds()
-    scripted.did[0x7A1] = {0xF181: support.EXPECTED_EPS_F181}
     panda = support.FakePanda()
 
     with self.patch_live(panda, scripted), mock.patch(
@@ -237,7 +235,6 @@ class TestLiveCli(unittest.TestCase):
     import json
 
     scripted = support.ScriptedUds()
-    scripted.did[0x7A1] = {0xF181: support.EXPECTED_EPS_F181}
     panda = support.FakePanda()
     seed = bytes.fromhex("690f82163710")
     responses = [bytes.fromhex("6703") + seed, bytes.fromhex("6704"), bytes.fromhex("eb3128222821")]
@@ -251,9 +248,7 @@ class TestLiveCli(unittest.TestCase):
     self.assertEqual([call.args[1].hex() for call in raw.call_args_list], [
       "2703", "2704e1ff8791db01", "ab31",
     ])
-    self.assertEqual([call[1:] for call in scripted.calls], [
-      ("read_did", 0xF181), ("session", 3), ("session", 1),
-    ])
+    self.assertEqual([call[1:] for call in scripted.calls], [("session", 3), ("session", 1)])
 
   def test_can_sniff_is_receive_only_and_filters_bus_and_address(self):
     import json
@@ -391,9 +386,8 @@ class TestLiveCli(unittest.TestCase):
       with self.assertRaisesRegex(SystemExit, "placeholder 0xFFFF"):
         run_cli(["active-test", "run", "brake", "42001", "--execute"])
 
-  def test_active_test_run_and_stop_use_guarded_recovered_lifecycle(self):
+  def test_active_test_run_and_stop_use_recovered_lifecycle_without_identity_gate(self):
     scripted = support.ScriptedUds()
-    scripted.did[0x7A1] = {0xF181: support.EXPECTED_EPS_F181}
     # F186 intentionally absent: the recovered SendProc falls through to D1→D2.
     panda = support.FakePanda()
     with self.patch_live(panda, scripted):
@@ -402,7 +396,6 @@ class TestLiveCli(unittest.TestCase):
       ])
     self.assertEqual(rc, 0, output)
     self.assertEqual([call[1:] for call in scripted.calls], [
-      ("read_did", 0xF181),
       ("read_did", 0xF186),
       ("session", 1), ("session", 3),
       ("routine", 1, 0x1588, b""),
@@ -416,7 +409,6 @@ class TestLiveCli(unittest.TestCase):
       rc, output = run_cli(["active-test", "stop", "frc", "0xA429", "--execute"])
     self.assertEqual(rc, 0, output)
     self.assertEqual([call[1:] for call in scripted.calls], [
-      ("read_did", 0xF181),
       ("read_did", 0xF186),
       ("session", 1), ("session", 3),
       ("routine", 2, 0x1588, b""),
@@ -546,27 +538,27 @@ class TestLiveCli(unittest.TestCase):
     self.assertIn("CONFIRMED_DTC", dtc_row["status_bits"])
     self.assertEqual(dtc_row["descriptions"][0]["failure"], "Missing Message")
 
-  def test_dtc_clear_preserves_exact_route_and_verifies(self):
+  def test_dtc_clear_preserves_exact_maintenance_route_without_identity_gate(self):
     scripted = self.scripted_clear()
     panda = self.mode04_panda()
     with self.patch_live(panda, scripted):
       rc, output = run_cli(["dtc", "clear"])
     self.assertEqual(rc, 0, output)
-    self.assertEqual(scripted.calls[0], (0x7A1, "read_did", 0xF181))
+    self.assertNotIn((0x7A1, "read_did", 0xF181), scripted.calls)
     self.assertEqual([call[0] for call in scripted.calls if call[1] == "read_dtc"], [address for _, address in support.CAMRY_ECUS] * 2)
     self.assertEqual([call[:2] for call in scripted.calls if call[1] == "clear"], [(0x700, "clear")])
     self.assertEqual(panda.sent, [(0x7DF, bytes.fromhex("0104000000000000"), 0)])
     self.assertIn("PASS: all responding ECUs are clear", output)
 
-  def test_wrong_identity_blocks_mutation(self):
-    scripted = support.ScriptedUds()
+  def test_identity_witness_does_not_gate_dtc_clear(self):
+    scripted = self.scripted_clear()
     scripted.did[0x7A1] = {0xF181: b"wrong"}
     panda = self.mode04_panda()
     with self.patch_live(panda, scripted):
-      with self.assertRaisesRegex(SystemExit, "does not contain"):
-        run_cli(["dtc", "clear"])
-    self.assertEqual(panda.sent, [])
-    self.assertFalse([call for call in scripted.calls if call[1] == "clear"])
+      rc, output = run_cli(["dtc", "clear"])
+    self.assertEqual(rc, 0, output)
+    self.assertNotIn((0x7A1, "read_did", 0xF181), scripted.calls)
+    self.assertIn("PASS: all responding ECUs are clear", output)
 
   def test_raw_read_only_accepts_unregistered_numeric_address(self):
     scripted = support.ScriptedUds()
@@ -577,27 +569,30 @@ class TestLiveCli(unittest.TestCase):
     self.assertIn("request:  221033", output)
     self.assertIn("response: 621033", output)
 
-  def test_raw_mutation_rejects_unregistered_numeric_address_even_with_force(self):
-    with mock.patch("tools.toyota_diag.transport.connect", side_effect=AssertionError("must not connect")):
-      with self.assertRaisesRegex(SystemExit, "unregistered address 0x763"):
-        run_cli(["uds", "raw", "0x763", "0x2E", "103500", "--force"])
+  def test_raw_mutation_accepts_explicit_numeric_address_with_force(self):
+    scripted = support.ScriptedUds()
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted, raw_response=b"\x6E\x10\x35"):
+      rc, output = run_cli(["uds", "raw", "0x763", "0x2E", "103500", "--force"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("request:  2e103500", output)
+    self.assertIn("response: 6e1035", output)
 
-  def test_raw_and_functional_mutations_require_force_and_guard(self):
+  def test_raw_and_functional_mutations_require_explicit_force_only(self):
     with mock.patch("tools.toyota_diag.transport.connect", side_effect=AssertionError("must not connect")):
-      with self.assertRaisesRegex(SystemExit, "pass --force"):
+      with self.assertRaisesRegex(SystemExit, "--force acknowledgement"):
         run_cli(["uds", "raw", "eps", "0xB0", "0102"])
-      with self.assertRaisesRegex(SystemExit, "pass --force"):
+      with self.assertRaisesRegex(SystemExit, "--force acknowledgement"):
         run_cli(["functional", "obd", "0x04"])
 
     scripted = support.ScriptedUds()
-    scripted.did[0x7A1] = {0xF181: support.EXPECTED_EPS_F181}
     panda = support.FakePanda()
     with self.patch_live(panda, scripted, raw_response=b"\xF0\x01"):
       rc, output = run_cli(["uds", "raw", "eps", "0xB0", "0102", "--force"])
     self.assertEqual(rc, 0, output)
     self.assertIn("request:  b00102", output)
     self.assertIn("response: f001", output)
-    self.assertEqual(scripted.calls[0], (0x7A1, "read_did", 0xF181))
+    self.assertNotIn((0x7A1, "read_did", 0xF181), scripted.calls)
 
 
 if __name__ == "__main__":

@@ -41,15 +41,6 @@ def _live_transport():
   return transport
 
 
-def _guard_specs(profile: Profile):
-  ecu = profile.lookup_ecu(profile.guard.ecu_key)
-  return [(ecu.address, ecu.name, profile.guard)]
-
-
-def _guard(profile: Profile, client_factory) -> None:
-  dtc.verify_vehicle_identity(client_factory, _guard_specs(profile))
-
-
 def _format_signal(row: dict[str, Any]) -> str:
   bits = f"bits {row.get('bit_start')}..{row.get('bit_end')}"
   scale = f"scale {row.get('mul')}/{row.get('div')} offset {row.get('offset')}"
@@ -109,7 +100,7 @@ def cmd_vehicle_show(args, profile: Profile) -> int:
     "panda_bus": profile.bus,
     "registry": str(profile.path),
     "vehicle_resolution": resolver_summary,
-    "identity_guard": {
+    "identity_witness": {
       "ecu": profile.guard.ecu_key,
       "did": profile.guard.did,
       "contains_ascii": profile.guard.contains_ascii,
@@ -126,7 +117,7 @@ def cmd_vehicle_show(args, profile: Profile) -> int:
     summary = f"Toyota resolver: type {resolver_summary['vehicle_type']} {resolver_summary['vehicle_name']}; install sets {install_sets}; "
     summary += f"{resolver_summary['mount_candidate_count']} logical ECU candidates"
     lines.append(summary)
-  lines.append(f"mutation guard: {profile.guard.ecu_key} DID 0x{profile.guard.did:04X} contains {profile.guard.contains_ascii}")
+  lines.append(f"identity witness: {profile.guard.ecu_key} DID 0x{profile.guard.did:04X} contains {profile.guard.contains_ascii}")
   return _json_or_text(args, document, "\n".join(lines))
 
 
@@ -156,7 +147,7 @@ def cmd_vehicle_detect(args, profile: Profile) -> int:
     vin_info = resolver.read_vehicle_vin(can_recv, can_send, profile.bus)
   except Exception as e:
     # Keep one clear command-level failure; vehicle detection is read-only and has
-    # no reason to fall back to the old profile-by-profile F181 mutation guard.
+    # no reason to fall back to the old profile-by-profile F181 discriminator.
     raise SystemExit(f"vehicle detection failed: {e}") from e
 
   matches = []
@@ -334,7 +325,7 @@ def cmd_ecu_info(args, profile: Profile) -> int:
       "profile": profile.name, "vehicle": profile.vehicle, "panda_bus": profile.bus,
       "ecu": _ecu_document(ecu), "counts": counts, "observed_identity": identity,
       "gts_category": category.get("category") if category is not None else None,
-      "mutation_guard": ({
+      "identity_witness": ({
         "did": profile.guard.did, "contains_ascii": profile.guard.contains_ascii,
       } if ecu.key == profile.guard.ecu_key else None),
     }
@@ -364,7 +355,7 @@ def cmd_ecu_info(args, profile: Profile) -> int:
     print(f"obs route: Panda bus {identity['panda_bus_at_observation']}, ELM327 param {identity['elm327_param']}")
     print(f"route note: {identity['route_note']}")
   if ecu.key == profile.guard.ecu_key:
-    print(f"mutation guard: DID 0x{profile.guard.did:04X} contains {profile.guard.contains_ascii}")
+    print(f"identity witness: DID 0x{profile.guard.did:04X} contains {profile.guard.contains_ascii}")
   return 0
 
 
@@ -662,7 +653,7 @@ def cmd_utility_plan(args, profile: Profile) -> int:
     if template:
       for key, value in template.items():
         print(f"{key}: {value}")
-    print("runtime: metadata/plan only; no concrete per-ECU utility operation is authorized by this family binding")
+    print("runtime: metadata/plan only; this family binding does not materialize a concrete per-ECU utility operation")
   return 0
 
 
@@ -856,7 +847,6 @@ def cmd_dtc_clear(args, profile: Profile) -> int:
   client_factory = transport.uds_client_factory(panda, profile)
   scan_set = _scan_set(profile, None)
 
-  _guard(profile, client_factory)
   print("\npre-clear scan:")
   responders, faults = dtc.scan(client_factory, scan_set, profile.fault_status_mask)
   print(f"responding ECUs: {len(responders)}; fault-status records: {len(faults)}")
@@ -1096,10 +1086,10 @@ def cmd_monitor(args, profile: Profile) -> int:
     with session:
       lifecycle = session.lifecycle
       if lifecycle is not None:
-        # This is read-only Data Monitor lifecycle, not actuator authorization: mirror
-        # Techstream's recovered D1→D2 entry and deterministically restore D1 on exit.
-        # DiagnosticSession applies Toyota's recovered generation gate.
-        session.enter_extended(acknowledge=True)
+        # This is read-only Data Monitor lifecycle: mirror Techstream's recovered
+        # D1→D2 entry and deterministically restore D1 on exit. DiagnosticSession
+        # applies Toyota's recovered generation dispatch.
+        session.enter_extended()
       client = session.client()
       keepalive = lifecycle.keepalive if lifecycle is not None else None
       next_keepalive = time.monotonic() + keepalive.interval_s if keepalive is not None else float("inf")
@@ -1165,7 +1155,7 @@ def cmd_observe(args, profile: Profile) -> int:
         session = stack.enter_context(DiagnosticSession(profile, ecu, panda=panda))
         lifecycle = session.lifecycle
         if lifecycle is not None:
-          session.enter_extended(acknowledge=True)
+          session.enter_extended()
         keepalive = lifecycle.keepalive if lifecycle is not None else None
         rows.append({
           "ecu": ecu,
@@ -1220,7 +1210,7 @@ def cmd_scan(args, profile: Profile) -> int:
   return 1 if document["fault_status_records"] else 0
 
 
-def _raw_uds_target(profile: Profile, ref: str, *, mutating: bool):
+def _raw_uds_target(profile: Profile, ref: str):
   try:
     return profile.lookup_ecu(ref)
   except registry.RegistryError as lookup_error:
@@ -1229,9 +1219,7 @@ def _raw_uds_target(profile: Profile, ref: str, *, mutating: bool):
     except registry.RegistryError:
       raise SystemExit(str(lookup_error)) from lookup_error
     if not 0 <= address <= 0x7FF:
-      raise SystemExit(f"read-only raw UDS numeric address must be an 11-bit CAN ID, got {address:#x}") from lookup_error
-    if mutating:
-      raise SystemExit(f"refusing mutating raw UDS to unregistered address {address:#05x}; add a registry ECU/identity guard before mutation") from lookup_error
+      raise SystemExit(f"raw UDS numeric address must be an 11-bit CAN ID, got {address:#x}") from lookup_error
     return registry.EcuSpec(key=f"raw_{address:03x}", name=f"ECU {address:#05x}", address=address)
 
 
@@ -1244,20 +1232,21 @@ def cmd_uds_raw(args, profile: Profile) -> int:
     raise SystemExit("subfunction must be one byte")
   mutating = service not in READ_ONLY_UDS_SERVICES
   if mutating and not args.force:
-    raise SystemExit(f"refusing mutating service 0x{service:02X}; pass --force (identity guard still applies)")
+    raise SystemExit(f"mutating service 0x{service:02X} requires explicit --force acknowledgement")
   try:
     data = registry.parse_bytes(args.data, "data") if args.data else b""
   except registry.RegistryError as e:
     raise SystemExit(str(e)) from e
-  ecu = _raw_uds_target(profile, args.ecu, mutating=mutating)
+  ecu = _raw_uds_target(profile, args.ecu)
+  raw_sub_addr = None if args.sub_address is None else _cli_int(args.sub_address, "sub-address")
+  if raw_sub_addr is not None and not 0 <= raw_sub_addr <= 0xFF:
+    raise SystemExit("sub-address must be one byte")
 
   transport = _live_transport()
   panda = transport.connect(profile)
   client_factory = transport.uds_client_factory(panda, profile)
-  if mutating:
-    _guard(profile, client_factory)
   request = bytes([service]) + (bytes([subfunction]) if subfunction is not None else b"") + data
-  response = transport.raw_isotp(client_factory(ecu.address), request)
+  response = transport.raw_isotp(client_factory(ecu.address, raw_sub_addr), request)
   print(f"request:  {request.hex()}")
   print(f"response: {response.hex()}")
   return 0
@@ -1274,9 +1263,6 @@ def _ffd_connect(profile: Profile):
   live = _live_transport()
   panda = live.connect(profile)
   factory = live.uds_client_factory(panda, profile)
-  # The FFD commands have clean JSON output; verify the exact vehicle silently
-  # rather than interleaving the guard status line with the machine payload.
-  dtc.verify_vehicle_identity(factory, _guard_specs(profile), echo=lambda _: None)
   return live, factory(_ffd_target(profile).address)
 
 
@@ -1510,12 +1496,10 @@ def cmd_functional_obd(args, profile: Profile) -> int:
     raise SystemExit("payload longer than six bytes does not fit the standard 8-byte functional frame")
   mutating = mode not in READ_ONLY_OBD_MODES
   if mutating and not args.force:
-    raise SystemExit(f"refusing mutating OBD mode 0x{mode:02X}; pass --force (identity guard still applies)")
+    raise SystemExit(f"mutating OBD mode 0x{mode:02X} requires explicit --force acknowledgement")
 
   transport = _live_transport()
   panda = transport.connect(profile)
-  if mutating:
-    _guard(profile, transport.uds_client_factory(panda, profile))
   positives = dtc.functional_obd_request(panda, mode, payload, profile.legislated_responders, profile.bus, args.window)
   missing = set(profile.legislated_responders) - positives
   if missing:
@@ -1697,7 +1681,8 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("service")
   p.add_argument("data", nargs="?")
   p.add_argument("--subfunction")
-  p.add_argument("--force", action="store_true")
+  p.add_argument("--sub-address", help="optional ISO-TP address-extension byte for raw Toyota routes")
+  p.add_argument("--force", action="store_true", help="explicitly acknowledge a mutating diagnostic request")
   p.set_defaults(func=cmd_uds_raw)
 
   ffd = commands.add_parser("ffd", help="browse and acquire current TSS3 Operation/Image freeze-frame recorders")
@@ -1764,7 +1749,7 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("--kind", choices=("direct", "routine"))
   p.add_argument("--json", action="store_true", help="emit the zero-transmit plan and runtime refusal reasons as JSON")
   p.set_defaults(func=cmd_active_test_plan)
-  p = at_sub.add_parser("run", help="run only a runtime-authorized recovered Active Test")
+  p = at_sub.add_parser("run", help="run a recovered Active Test with fully materialized runtime geometry")
   p.add_argument("ecu")
   p.add_argument("item")
   p.add_argument("--kind", choices=("direct", "routine"))
