@@ -301,8 +301,9 @@ CAMRY_F33_LATERAL_PORT = {
     + "without a causal B6 steering response; the protected key remains unrecovered"
   ),
   "unsupported_features": (
-    "native openpilot longitudinal actuation, automatic resume, radar tracks, lane-departure/chime HUD "
-    + "semantics, and temporary/permanent EPS-fault classes remain intentionally unsupported or unmapped"
+    "native openpilot longitudinal actuation, automatic resume, radar tracks, lane-side orientation/state-3/"
+    + "lane-departure/chime HUD semantics, literal 0x610-to-meter-display identity, and temporary/permanent "
+    + "EPS-fault classes remain intentionally unsupported or unmapped"
   ),
   "companion_boundary": "no stock B6 was retained; unresolved application bytes remain explicit zero/default candidates rather than Toyota stock claims",
   "supported_output": False,

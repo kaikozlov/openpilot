@@ -271,23 +271,31 @@ with no private arming parameters:
 - CarState consumes live `SECOC_SYNCHRONIZATION`, `0x025` steering, `0x030` physical N·m
   driver torque plus its validity/fault-inhibit observables, `0x51E` Ready, `0x127`
   P/R/N/D/B, body/chassis/BSM state, and independently checked periodic liveness. Cruise uses
-  `0x251 B1[4]` for persistent main/availability, `0x08A B3[3]` for operation, B7 states
-  `0x66/0x67` for source-real stock-ACC hold/standstill, `0x08A B10` for internal set speed,
-  and `0x251 B2` for the cluster-domain set speed; `steeringPressed` uses the same-car-validated
+  `0x251 B1[4]` for a persistent availability latch distinct from the physical MAIN switch,
+  `0x08A B3[3]` for operation, B7 states `0x66/0x67` for source-real stock-ACC hold/standstill,
+  `0x08A B10` for internal set speed, and `0x251 B2` for the cluster-domain set speed;
+  ignition-off/reset semantics of B1[4] remain unjoined. `steeringPressed` uses the same-car-validated
   physical-torque sign and a 0.6 N.m openpilot policy threshold;
 - CarController sends one zero-MAC28 `0x0B6`/DLC32 frame per scheduled control frame on
   Panda bus 0 with live `0x00F` TRIP/RESET freshness, ID11 while `latActive`, ID0 with
   zeroed companions on release, and a standard angle-rate-limited target;
 - CarController also owns the camera-side `0x412` replacement surface and the recovered stock-ACC
-  cancel. The HUD renders only recovered per-side lane states, suppresses Toyota's later B2[6]
-  escalation/chime stage, and maps openpilot `steerRequired` onto the source-real B1[3:2]
-  steering-warning visual. Stable replacement traffic follows the Camry's ~1 Hz native heartbeat,
-  with display changes rate-bounded to 10 Hz instead of the prior constant 5 Hz ordinary-Toyota cadence;
+  cancel. The HUD renders the recovered lane-state alphabet without claiming a left/right nibble
+  orientation: symmetric states are direct, asymmetric states preserve the live stock high/low
+  orientation while translating recognized state `1↔4`; route 3b proves state 3 exists but its
+  semantics remain unmapped. Noncanonical B0=`0x10` modes pass through byte-for-byte. The controller
+  suppresses Toyota's later B2[6] escalation/chime stage and maps openpilot `steerRequired` onto the
+  source-real B1[3:2] steering-warning visual. Stable replacement traffic follows the Camry's ~1 Hz
+  native heartbeat, with display changes rate-bounded to 10 Hz instead of the prior constant 5 Hz
+  ordinary-Toyota cadence;
 - Panda safety is the ordinary `toyota` model with the `TSS3` flag (not `ALLOW_DEBUG`):
   TX objects are `0x0B6` bus 0/DLC32, replacement `0x412` bus 0/DLC8, and stock-shaped
   checksum-valid brake-cancel `0x101` bus 2/DLC8. `controls_allowed` is cruise-derived from
   `0x08A` bit 27 on bus 2, while B6 enforces target ID 0/11 and `steer_angle_cmd_checks` at
   ±1745 raw with standard rate limits;
+- retained `0x610.UI_SPEED` is tightly wheel-speed correlated and used for `vEgoCluster`, but no
+  synchronized physical-meter observation proves it is the literal dash indication; Toyota
+  Operation-FFD `5235/5236` remains the passive meter oracle;
 - interface: angle control, `radarUnavailable`, stock longitudinal, `dashcamOnly=False`,
   `secOcRequired=False` — no SecOC-key availability state is involved in engagement; other
   research TSS3 platforms (Corolla) stay passive `noOutput`/`dashcamOnly`;

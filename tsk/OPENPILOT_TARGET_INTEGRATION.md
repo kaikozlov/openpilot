@@ -8,17 +8,19 @@ installation.
 ## 2026-09-07 Camry/F33 reverse-engineering sync status
 
 This fork is synchronized to the exact maintainer 2026 Camry/F33 evidence through
-`ghidra_rh850_analysis` VAR-141, including the current application-runtime placement,
-relay-correct B6 route, FRC-output boundary, driver-state calibration, HUD cadence, parser
-liveness, and always-on `0x08A` signer-continuity results. The durable target summary is
+`ghidra_rh850_analysis` VAR-141 plus CORR-171..173 (`fb6fec2`), including the current
+application-runtime placement, relay-correct B6 route, FRC-output boundary, driver-state
+calibration, bounded HUD semantics, parser liveness, wheel-correlated `0x610` UI speed, and
+always-on `0x08A` signer-continuity results. The durable target summary is
 [`CAMRY_2026_FINDINGS.md`](CAMRY_2026_FINDINGS.md). Corolla H/F remains useful prior
 art, but the Camry port does not depend on transferred addresses or family matching.
 
 The passive Camry port entered the root at baseline commit
 `d7d7dfd7e49961e9d35eb7a7681e8756ceee8d04`. The current cutover is root `2cfa9274c`
 ("opendbc: use native F33 lateral authority") with nested opendbc `21d165da` ("toyota: use
-native lateral authority for F33"). The current nested checkpoint is opendbc `120c2d00`
-(parser liveness grounded in retained Camry captures) and Panda `5236f370`; the request
+native lateral authority for F33"). The current nested checkpoint is opendbc `870d5aa4`
+(bounded Camry HUD/cruise/cluster semantics, building on source-real parser liveness) and
+Panda `5236f370`; the request
 decoder entered at `b9e86924`, and the
 interim private-parameter/ephemeral-bridge/`ALLOW_DEBUG` development path — root
 `5fee63cfc`/opendbc `c98872c6`, hardened at root `6dd58cf5e`/opendbc `8da4bb9b` — is
@@ -47,13 +49,14 @@ means no correct implementation primitive has yet been recovered.
 | F33 Ready / full gear state | **implemented-read-only** | source-real `0x51E B0[7]` NRTD/READY and `0x127` `P/R/N/D/B = 0/1/2/3/4` are parsed and replay-tested |
 | F33 cruise switch observation | **implemented-read-only** | FRC P5 DIDs and the pre-repin Panda-bus1 `0x0FE/32` MAIN/RES+/SET-/CANCEL carrier are retained; following-distance `0x251/0x5AF` joins remain candidates |
 | F33 protected B6 receiver / SecOC geometry | **implemented-static / admission-unproven** | exact PDU44, 28-byte application + FV4/CMAC28, FV46/CMAC128, slot4/command7, Target Lateral ID, signed target angle, sequence, companion fields and exact target limits/timing are represented in opendbc helpers/DBC. The installed exact-F33 Gate-2 patch is CRC-valid, but retained probes do not prove zero-MAC28 application delivery |
-| F33 port / DBC / CarState | **implemented** | `TOYOTA_CAMRY_TSS3` is a normal platform: exact F181 in production `FW_VERSIONS` plus the exact CAN census in `FINGERPRINTS`, generated TSS3 DBC, source-real Ready/gear/body/cruise state, live `SECOC_SYNCHRONIZATION`, source-real cluster speed, physical `0x030` N·m driver torque, and camera-bus request/HUD state. Same-car road evidence selects the normal openpilot `steeringPressed` policy at 0.6 N·m with validated left-positive/right-negative sign. Raw fault/inhibit signals remain DBC observables while temporary/permanent fault policy stays neutral. Other research TSS3 platforms (Corolla) remain passive `noOutput`/`dashcamOnly` |
+| F33 port / DBC / CarState | **implemented** | `TOYOTA_CAMRY_TSS3` is a normal platform: exact F181 in production `FW_VERSIONS` plus the exact CAN census in `FINGERPRINTS`, generated TSS3 DBC, source-real Ready/gear/body/cruise state, live `SECOC_SYNCHRONIZATION`, wheel-correlated `0x610.UI_SPEED` for `vEgoCluster` (literal meter-display identity still unproved), physical `0x030` N·m driver torque, and camera-bus request/HUD state. Same-car road evidence selects the normal openpilot `steeringPressed` policy at 0.6 N·m with validated left-positive/right-negative sign. Raw fault/inhibit signals remain DBC observables while temporary/permanent fault policy stays neutral. Other research TSS3 platforms (Corolla) remain passive `noOutput`/`dashcamOnly` |
 | F33 synchronized FRC operating-state capture | **superseded-removed** | the root `ToyotaTSS3FrcOracleCapture` param and `toyota_tss3_oracle.py` capture path were removed with the private-parameter architecture; the decisive Operation-FFD `5282/5285/57DE/5265` synchronized capture is still absent and must be re-acquired with separate read-only tooling when needed |
 | FRC public-output boundary | **implemented-read-only** | native Panda bus 1 carries the 22-stream `0x020/0x123/0x160/0x180..0x18C/0x1A0/0x200/0x201/0x230/0x440/0x450` camera/radar census and plaintext perception records; no consecutive `5282`, no `0x08A`, and no proved public lateral-request carrier. Internal FRC request ownership does not identify its private handoff to the chassis signer |
 | F33 generated Tx/status + `0x394` classifier | **implemented-read-only / analysis-only** | exact `0x030/0x351/0x394/0x4A3/0x4C8` Tx/packer geometry and the 17-row `0x394` classifier remain in the analysis evidence. The native runtime port does not promote the unresolved classifier into CarState temporary/permanent faults. |
 | F33 lateral sender / safety | **implemented sender / admission-unproven** | ordinary openpilot lateral engagement (`CC.latActive`): CarController sends zero-MAC28 `0x0B6`/DLC32 at the scheduled steering cadence on Panda bus 0 with live `SECOC_SYNCHRONIZATION` freshness, ID11 while active and ID0 on release. It also replaces camera HUD `0x412` at the native ~1 Hz heartbeat with bounded event updates and emits recovered stock-ACC cancel through cloned `0x101` on bus 2. Panda safety uses the ordinary `toyota` model with `TSS3`, checks the three TX objects, derives `controls_allowed` from `0x08A` bit 27, and applies normal angle-command checks. Native openpilot longitudinal output remains disabled |
 | F33 application-retained RAM bridge | **implemented-static / research-only** | exact-F33 resident re-admits only rejected zero-MAC28 B6, fits before heartbeat `0xFEBFFBEC`, and resets to stock; no automatic install/execution-pivot/heartbeat/arm path was ever built, and the openpilot port no longer references it in any way |
 | persistent Gate-2 patching | **installed on the maintainer EPS / effect bounded** | the exact-F33 compare/check changes with deterministic CRC repair are present on this maintainer car. Their persistence is verified, but retained stage probes and road routes do not establish that zero-MAC28 B6 reaches the application command state. Persistent flash risk and upstream acceptability remain separate policy questions; this route does not recover the protected key |
+| post-session HUD evidence corrections | **implemented / bounded** | route-3b retained `0x412 B0=0x10/B4=2` passes through byte-for-byte unchanged; only the recovered road-state shapes (`B0=0x12/0x14`, `B4=1/2`) are rewritten. Route 3b also proves nibble value 3 exists, while current road/model joins do not conclusively prove B3 high-vs-low left/right orientation. Symmetric visibility is rendered directly; asymmetric visibility preserves the live stock nibble orientation and only translates recognized state `1↔4`. `test_controller_preserves_noncanonical_hud_mode` regression-pins the pass-through boundary |
 
 ### Normal port shape
 
@@ -69,8 +72,10 @@ The exact Camry implementation is now an ordinary openpilot platform — the int
   decoding remains observation/state-input only; there is no `0x08A -> B6` transform.
 - CarState consumes live `SECOC_SYNCHRONIZATION`, source-real steering angle/rate, wheel
   speed, brake/gas, `0x030` physical N·m driver torque, full P/R/N/D/B, Ready, and cruise
-  state from camera-side `0x251/0x08A`, including persistent cruise availability, the
-  operation latch, source-real set speeds, and the delayed `0x66/0x67` ACC hold state.
+  state from camera-side `0x251/0x08A`, including the persistent `0x251 B1[4]`
+  availability latch (proven distinct from the physical MAIN switch), the operation latch,
+  source-real set speeds, and the delayed `0x66/0x67` ACC hold state. Ignition-off/reset
+  semantics for B1[4] remain unjoined.
   Same-car routes validate steering-torque sign and select a 0.6 N·m stateless openpilot
   `steeringPressed` threshold. Raw torque-invalid/fault-inhibit signals remain in the DBC;
   temporary/permanent steering-fault policy remains neutral because asserted/recovery class is not recovered.
