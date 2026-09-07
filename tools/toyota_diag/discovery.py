@@ -6,7 +6,8 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
-from tools.toyota_diag.registry import EcuSpec, Profile
+from tools.toyota_diag import recorder
+from tools.toyota_diag.registry import EcuSpec, Profile, RegistryError
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,27 @@ def search(profile: Profile, query: str, limit: int = 50) -> list[SearchResult]:
       score = _score(query, (ident, name, str(row.get("kind") or "")))
       if score:
         results.append(SearchResult("utility", ecu, ident, name or "Utility", str(row.get("execution") or ""), score))
+
+  # PCS Data Viewer carries a separate TSS3 Operation-FFD namespace that is
+  # not part of the ordinary P5 Data Monitor DDB.  Search it alongside the
+  # registry so Toyota's arbitration/request names are discoverable from the
+  # same entry point.
+  try:
+    frc = profile.lookup_ecu("frc")
+  except RegistryError:
+    frc = None
+  if frc is not None:
+    for data_id, signal in recorder.search_signals(query):
+      name = str(signal.get("DataName") or "")
+      score = _score(query, (f"0x{data_id:04X}", name))
+      if score:
+        results.append(SearchResult("ffd-signal", frc, f"0x{data_id:04X}", name, "TSS3 Operation FFD", score))
+    for rob, row in recorder.search_robs(query):
+      name = str(row.get("DataName") or "")
+      system = str(row.get("SystemName") or "")
+      score = _score(query, (f"0x{rob:04X}", name, system))
+      if score:
+        results.append(SearchResult("ffd-rob", frc, f"0x{rob:04X}", name, f"{system} Operation FFD trigger".strip(), score))
 
   for row in profile.utility_bindings():
     role = row.get("role")

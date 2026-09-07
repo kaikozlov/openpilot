@@ -2,16 +2,24 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import sys
 from typing import Any
 
-from tools.toyota_diag import active_test, decode, discovery, dtc, executor, monitor, registry, snapshot, utility
+from tools.toyota_diag import active_test, decode, discovery, dtc, executor, monitor, recorder, registry, snapshot, utility
 from tools.toyota_diag.registry import Profile
 from tools.toyota_diag.session import DiagnosticSession, LifecycleError
 
 READ_ONLY_UDS_SERVICES = frozenset({0x19, 0x22, 0x23, 0x24, 0x3E})
 READ_ONLY_OBD_MODES = frozenset({0x01, 0x02, 0x03, 0x05, 0x06, 0x07, 0x09, 0x0A})
+
+OBSERVE_PRESETS = {
+  "tss3-longitudinal": (
+    "frc:0x1B03", "frc:0x1B04", "frc:0x1B05", "frc:0x1B06", "frc:0x1B07",
+    "brake:0x10A1", "brake:0x10A2", "brake:0x10A3", "brake:0x10A4",
+  ),
+}
 
 
 def _cli_int(value: str, what: str) -> int:
@@ -998,6 +1006,92 @@ def cmd_monitor(args, profile: Profile) -> int:
     raise SystemExit(f"monitor refused/failed: {e}") from e
 
 
+def _resolve_observe_targets(profile: Profile, items: list[str]):
+  specs = list(OBSERVE_PRESETS.get(items[0], ())) if len(items) == 1 and items[0] in OBSERVE_PRESETS else items
+  grouped: dict[str, list[str]] = {}
+  order: list[str] = []
+  for spec in specs:
+    if ":" not in spec:
+      presets = ", ".join(sorted(OBSERVE_PRESETS))
+      raise registry.RegistryError(f"observe item must be ECU:DID_OR_TERM or a preset ({presets}): {spec!r}")
+    ecu_ref, query = spec.split(":", 1)
+    if not ecu_ref or not query:
+      raise registry.RegistryError(f"invalid observe item {spec!r}; expected ECU:DID_OR_TERM")
+    key = profile.lookup_ecu(ecu_ref).key
+    if key not in grouped:
+      grouped[key] = []
+      order.append(key)
+    grouped[key].append(query)
+
+  targets = []
+  for key in order:
+    ecu = profile.lookup_ecu(key)
+    targets.append((ecu, _resolve_monitor_queries(profile, ecu, grouped[key])))
+  return targets
+
+
+def cmd_observe(args, profile: Profile) -> int:
+  import time
+  try:
+    targets = _resolve_observe_targets(profile, args.item)
+  except registry.RegistryError as e:
+    raise SystemExit(str(e)) from e
+
+  transport = _live_transport()
+  panda = transport.connect(profile)
+  rows = []
+  try:
+    with ExitStack() as stack:
+      for ecu, dids in targets:
+        session = stack.enter_context(DiagnosticSession(profile, ecu, panda=panda))
+        lifecycle = session.lifecycle
+        proven = (
+          lifecycle is not None
+          and (lifecycle.wire_proven_categories is None or ecu.category_id in lifecycle.wire_proven_categories)
+        )
+        if proven:
+          session.enter_extended(acknowledge=True)
+        keepalive = lifecycle.keepalive if proven and lifecycle is not None else None
+        rows.append({
+          "ecu": ecu,
+          "dids": dids,
+          "session": session,
+          "client": session.client(),
+          "keepalive": keepalive,
+          "next_keepalive": time.monotonic() + keepalive.interval_s if keepalive is not None else float("inf"),
+        })
+
+      def read_values():
+        now = time.monotonic()
+        values = []
+        for row in rows:
+          keepalive = row["keepalive"]
+          if keepalive is not None and now >= row["next_keepalive"]:
+            row["session"].keepalive()
+            row["next_keepalive"] = now + keepalive.interval_s
+          ecu = row["ecu"]
+          client = row["client"]
+          values.extend(
+            _did_value_record(ecu, did, signals, client.read_data_by_identifier(did))
+            for did, signals in row["dids"]
+          )
+        return values
+
+      preset = args.item[0] if len(args.item) == 1 and args.item[0] in OBSERVE_PRESETS else None
+      label = preset or " + ".join(row["ecu"].key for row in rows)
+      return monitor.run(
+        label, read_values,
+        interval=args.interval,
+        count=args.count,
+        changed=args.changed,
+        jsonl=args.jsonl,
+        csv_output=args.csv,
+        clear=False if args.no_clear else None,
+      )
+  except (ValueError, LifecycleError, registry.RegistryError) as e:
+    raise SystemExit(f"observe refused/failed: {e}") from e
+
+
 def cmd_scan(args, profile: Profile) -> int:
   transport = _live_transport()
   state = transport.status(profile)
@@ -1054,6 +1148,241 @@ def cmd_uds_raw(args, profile: Profile) -> int:
   return 0
 
 
+def _ffd_target(profile: Profile):
+  try:
+    return profile.lookup_ecu("frc")
+  except registry.RegistryError as e:
+    raise SystemExit("this profile has no FRC endpoint for TSS3 FFD") from e
+
+
+def _ffd_connect(profile: Profile):
+  live = _live_transport()
+  panda = live.connect(profile)
+  factory = live.uds_client_factory(panda, profile)
+  # The FFD commands have clean JSON output; verify the exact vehicle silently
+  # rather than interleaving the guard status line with the machine payload.
+  dtc.verify_vehicle_identity(factory, _guard_specs(profile), echo=lambda _: None)
+  return live, factory(_ffd_target(profile).address)
+
+
+def _ffd_int(value: str, what: str, maximum: int = 0xFFFF) -> int:
+  # Toyota exposes recorder behavior/record/frame identifiers as hexadecimal
+  # even when every digit happens to be numeric (e.g. 2818 / 0100 / 0201).
+  # Accept both the native notation and an explicit 0x prefix.
+  text = value.strip().removeprefix("0x").removeprefix("0X")
+  try:
+    result = int(text, 16)
+  except ValueError as e:
+    raise SystemExit(f"invalid {what}: {value!r}") from e
+  if not 0 <= result <= maximum:
+    raise SystemExit(f"{what} must be in 0..0x{maximum:X}")
+  return result
+
+
+def _ffd_signal_matches(block: dict[str, Any], query: str | None) -> bool:
+  if not query:
+    return True
+  needle = query.casefold()
+  if needle in f"0x{block['data_id']:04x} {block['data_hex']}".casefold():
+    return True
+  return any(needle in str(signal.get("name") or "").casefold() for signal in block.get("signals", []))
+
+
+def cmd_ffd_data(args, profile: Profile) -> int:
+  del profile
+  query = args.query or ""
+  rows = recorder.search_signals(query)
+  if args.json:
+    print(json.dumps({
+      "total": len(rows),
+      "signals": [{"data_id": data_id, **row} for data_id, row in rows[:args.limit]],
+    }, sort_keys=True))
+    return 0 if rows else 1
+  for data_id, row in rows[:args.limit]:
+    signed = " signed" if row.get("Type") == "s" else ""
+    print(
+      f"0x{data_id:04X}  {row.get('DataName') or '(unnamed)'}  "
+      + f"byte={row.get('BytePosition')} bit={row.get('BitPosition')} len={row.get('BitLength')}"
+      + f"{signed} lsb={row.get('Lsb')} offset={row.get('Offset')}"
+    )
+  if len(rows) > args.limit:
+    print(f"... {len(rows) - args.limit} more; raise --limit")
+  return 0 if rows else 1
+
+
+def cmd_ffd_robs(args, profile: Profile) -> int:
+  del profile
+  rows = recorder.search_robs(args.query or "")
+  if args.json:
+    print(json.dumps({"total": len(rows), "robs": [{"rob": code, **row} for code, row in rows[:args.limit]]}, sort_keys=True))
+    return 0 if rows else 1
+  for code, row in rows[:args.limit]:
+    timing = f"sample={row.get('Sampling')} pre={row.get('PreTriggerNumber')} post={row.get('PostTriggerNumber')}"
+    print(f"0x{code:04X}  {row.get('DataName') or '(unnamed)'}  [{row.get('SystemName') or '?'}; {timing}]")
+  if len(rows) > args.limit:
+    print(f"... {len(rows) - args.limit} more; raise --limit")
+  return 0 if rows else 1
+
+
+def _render_ffd_behavior(code: int) -> str:
+  row = recorder.rob_row(code)
+  return f"0x{code:04X}  {row['DataName']}" if row else f"0x{code:04X}  (OEM trigger name unrecovered)"
+
+
+def cmd_ffd_operation_list(args, profile: Profile) -> int:
+  try:
+    live, client = _ffd_connect(profile)
+    response = live.raw_isotp(client, b"\xAB\x11")
+    codes = recorder.parse_operation_behaviors(response)
+  except recorder.RecorderError as e:
+    raise SystemExit(str(e)) from e
+  document = [{"behavior": code, "metadata": recorder.rob_row(code)} for code in codes]
+  if args.json:
+    print(json.dumps({"behaviors": document, "total": len(document)}, sort_keys=True))
+  else:
+    for code in codes:
+      print(_render_ffd_behavior(code))
+  return 0
+
+
+def cmd_ffd_operation_records(args, profile: Profile) -> int:
+  behavior = _ffd_int(args.behavior, "behavior")
+  try:
+    live, client = _ffd_connect(profile)
+    request = b"\xAB\x12" + behavior.to_bytes(2, "big")
+    response = live.raw_isotp(client, request)
+    records = recorder.parse_operation_records(response, behavior)
+  except recorder.RecorderError as e:
+    raise SystemExit(str(e)) from e
+  document = {"behavior": behavior, "behavior_metadata": recorder.rob_row(behavior), "records": records, "total": len(records)}
+  if args.json:
+    print(json.dumps(document, sort_keys=True))
+  else:
+    print(_render_ffd_behavior(behavior))
+    print("records: " + " ".join(f"0x{record:04X}" for record in records))
+  return 0
+
+
+def cmd_ffd_operation_read(args, profile: Profile) -> int:
+  behavior = _ffd_int(args.behavior, "behavior")
+  record_id = _ffd_int(args.record, "record")
+  try:
+    live, client = _ffd_connect(profile)
+    request = b"\xAB\x13" + behavior.to_bytes(2, "big") + record_id.to_bytes(2, "big")
+    response = live.raw_isotp(client, request)
+    parsed = recorder.parse_operation_record(response, behavior, record_id)
+    decoded = recorder.decode_operation_record(parsed)
+  except recorder.RecorderError as e:
+    raise SystemExit(str(e)) from e
+  decoded["behavior_metadata"] = recorder.rob_row(behavior)
+  if args.query:
+    decoded["blocks"] = [block for block in decoded["blocks"] if _ffd_signal_matches(block, args.query)]
+  if args.json:
+    print(json.dumps(decoded, sort_keys=True))
+    return 0
+  print(_render_ffd_behavior(behavior) + f"  record=0x{record_id:04X}  blocks={parsed['block_count']}")
+  for block in decoded["blocks"]:
+    values = "; ".join(f"{signal['name']}={signal['formatted']}" for signal in block["signals"])
+    suffix = f"  {values}" if values else ""
+    print(f"0x{block['data_id']:04X}  {block['data_hex']}{suffix}")
+  return 0
+
+
+def _ffd_image_unlock(live, client) -> dict[str, Any]:
+  # Exact current-Camry path validated 2026-09-01: extended session, 27 03
+  # six-byte seed, current level-49 calculation, then 27 04 six-byte key.
+  client.diagnostic_session_control(3)
+  seed_response = live.raw_isotp(client, b"\x27\x03")
+  if not seed_response.startswith(b"\x67\x03") or len(seed_response) != 8:
+    raise recorder.RecorderError(f"Image FFD SecurityAccess: expected 67 03 + 6-byte seed, got {seed_response.hex().upper()}")
+  seed = seed_response[2:]
+  key = recorder.level49_key(seed)
+  key_response = live.raw_isotp(client, b"\x27\x04" + key)
+  if not key_response.startswith(b"\x67\x04"):
+    raise recorder.RecorderError(f"Image FFD SecurityAccess key rejected: {key_response.hex().upper()}")
+  return {"seed_hex": seed.hex(), "key_hex": key.hex()}
+
+
+def _ffd_default_session(client) -> None:
+  try:
+    client.diagnostic_session_control(1)
+  except Exception:
+    pass
+
+
+def cmd_ffd_image_info(args, profile: Profile) -> int:
+  live, client = _ffd_connect(profile)
+  try:
+    client.diagnostic_session_control(3)
+    spec = bytes(client.read_data_by_identifier(0x1103))
+    availability = bytes(client.read_data_by_identifier(0x1101))
+    # _ffd_image_unlock reasserts the validated extended session before SA.
+    security = _ffd_image_unlock(live, client)
+    encryption = bytes(client.read_data_by_identifier(0x2081))
+  except recorder.RecorderError as e:
+    raise SystemExit(str(e)) from e
+  finally:
+    _ffd_default_session(client)
+  document = {
+    "spec_information_hex": spec.hex(), "availability_hex": availability.hex(),
+    "encryption_method_hex": encryption.hex(), **security,
+  }
+  if args.json:
+    print(json.dumps(document, sort_keys=True))
+  else:
+    print(f"spec 0x1103:         {spec.hex()}")
+    print(f"availability 0x1101: {availability.hex()}")
+    print(f"encryption 0x2081:   {encryption.hex()}" + (" (unencrypted)" if encryption == b"\x01" else " (viewer decrypt transform required)"))
+    print(f"level-49 seed/key:    {security['seed_hex']} -> {security['key_hex']}")
+  return 0
+
+
+def cmd_ffd_image_list(args, profile: Profile) -> int:
+  live, client = _ffd_connect(profile)
+  try:
+    security = _ffd_image_unlock(live, client)
+    response = live.raw_isotp(client, b"\xAB\x31")
+    robs = recorder.parse_image_robs(response)
+  except recorder.RecorderError as e:
+    raise SystemExit(str(e)) from e
+  finally:
+    _ffd_default_session(client)
+  if args.json:
+    print(json.dumps({"robs": robs, "total": len(robs), "security": security}, sort_keys=True))
+  else:
+    print("RoBs: " + " ".join(f"0x{rob:04X}" for rob in robs))
+  return 0
+
+
+def cmd_ffd_image_read(args, profile: Profile) -> int:
+  rob = _ffd_int(args.rob, "RoB")
+  frame = _ffd_int(args.frame, "frame", 0xFFFFFFFF)
+  live, client = _ffd_connect(profile)
+  try:
+    _ffd_image_unlock(live, client)
+    request = b"\xAB\x33" + rob.to_bytes(2, "big") + frame.to_bytes(4, "big")
+    response = live.raw_isotp(client, request)
+    record = recorder.parse_image_record(response, rob, frame)
+  except recorder.RecorderError as e:
+    raise SystemExit(str(e)) from e
+  finally:
+    _ffd_default_session(client)
+  document = {
+    "rob": rob, "frame": frame, "block_count": record["block_count"],
+    "blocks": [{"data_id": block["data_id"], "length": block["length"], "data_hex": block["data"].hex()} for block in record["blocks"]],
+  }
+  if args.json:
+    print(json.dumps(document, sort_keys=True))
+  else:
+    print(f"Image FFD RoB=0x{rob:04X} frame=0x{frame:08X} blocks={record['block_count']}")
+    for block in record["blocks"]:
+      preview = block["data"][:32].hex()
+      if len(block["data"]) > 32:
+        preview += "..."
+      print(f"0x{block['data_id']:04X}  len={block['length']:<6} {preview}")
+  return 0
+
+
 def cmd_functional_obd(args, profile: Profile) -> int:
   mode = _cli_int(args.mode, "mode")
   if not 0 < mode <= 0xFF:
@@ -1087,7 +1416,7 @@ def build_parser() -> argparse.ArgumentParser:
   )
   commands = parser.add_subparsers(dest="command", required=True)
 
-  p = commands.add_parser("search", help="search ECUs, Data List items, DTCs, functions, and Active Tests")
+  p = commands.add_parser("search", help="search ECUs, Data List/FFD items, DTCs, functions, and Active Tests")
   p.add_argument("query")
   p.add_argument("--limit", type=int, default=50)
   p.add_argument("--json", action="store_true")
@@ -1124,6 +1453,17 @@ def build_parser() -> argparse.ArgumentParser:
   output.add_argument("--csv", action="store_true", help="emit one CSV row per decoded signal sample")
   p.add_argument("--no-clear", action="store_true", help="never redraw an interactive terminal in-place")
   p.set_defaults(func=cmd_monitor)
+
+  p = commands.add_parser("observe", help="monitor decoded Data List values across multiple ECUs")
+  p.add_argument("item", nargs="+", help="ECU:DID_OR_TERM entries, or preset: tss3-longitudinal")
+  p.add_argument("--interval", type=float, default=0.25)
+  p.add_argument("--count", type=int, default=0, help="sample groups; 0 means until interrupted")
+  p.add_argument("--changed", action="store_true", help="show only signals whose value changed")
+  output = p.add_mutually_exclusive_group()
+  output.add_argument("--jsonl", action="store_true", help="emit one JSON object per sample group")
+  output.add_argument("--csv", action="store_true", help="emit one CSV row per decoded signal sample")
+  p.add_argument("--no-clear", action="store_true", help="never redraw an interactive terminal in-place")
+  p.set_defaults(func=cmd_observe)
 
   transport_parser = commands.add_parser("transport")
   transport_sub = transport_parser.add_subparsers(required=True)
@@ -1237,6 +1577,49 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("--force", action="store_true")
   p.set_defaults(func=cmd_uds_raw)
 
+  ffd = commands.add_parser("ffd", help="browse and acquire current TSS3 Operation/Image freeze-frame recorders")
+  ffd_sub = ffd.add_subparsers(required=True)
+  p = ffd_sub.add_parser("data", help="search PCS Data Viewer TSS3 Operation-FFD signal definitions")
+  p.add_argument("query", nargs="?")
+  p.add_argument("--limit", type=int, default=100)
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_ffd_data)
+  p = ffd_sub.add_parser("robs", help="search recovered TSS3 Operation-FFD trigger/RoB definitions")
+  p.add_argument("query", nargs="?")
+  p.add_argument("--limit", type=int, default=100)
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_ffd_robs)
+
+  operation = ffd_sub.add_parser("operation", help="read FRC TSS3 Operation FFD (AB11/12/13)")
+  operation_sub = operation.add_subparsers(required=True)
+  p = operation_sub.add_parser("list", help="enumerate stored behavior/RoB codes")
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_ffd_operation_list)
+  p = operation_sub.add_parser("records", help="enumerate records for one behavior/RoB code")
+  p.add_argument("behavior")
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_ffd_operation_records)
+  p = operation_sub.add_parser("read", help="fetch and decode one Operation-FFD record")
+  p.add_argument("behavior")
+  p.add_argument("record")
+  p.add_argument("--query", help="show only blocks matching this DID/name substring")
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_ffd_operation_read)
+
+  image = ffd_sub.add_parser("image", help="read live-validated FRC TSS3 Image FFD (level-49 + AB31/33)")
+  image_sub = image.add_subparsers(required=True)
+  p = image_sub.add_parser("info", help="read image spec/availability/encryption metadata and validate level-49 unlock")
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_ffd_image_info)
+  p = image_sub.add_parser("list", help="enumerate stored Image-FFD RoB codes")
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_ffd_image_list)
+  p = image_sub.add_parser("read", help="fetch one split Image-FFD EB33 record")
+  p.add_argument("rob")
+  p.add_argument("frame", help="32-bit frame selector; e.g. 0x201 for split1/set1/trigger1")
+  p.add_argument("--json", action="store_true")
+  p.set_defaults(func=cmd_ffd_image_read)
+
   functional = commands.add_parser("functional")
   functional_sub = functional.add_subparsers(required=True)
   p = functional_sub.add_parser("obd")
@@ -1316,12 +1699,18 @@ def _normalize_argv(argv: list[str]) -> list[str]:
   tail = argv[index:]
   ecu_actions = {"list", "info", "functions", "plugins", "data", "dtcs", "active-tests"}
   top_level = {
-    "search", "vehicle", "scan", "monitor", "transport", "can", "ecu", "did", "dtc",
-    "uds", "functional", "active-test", "utility",
+    "search", "vehicle", "scan", "monitor", "observe", "transport", "can", "ecu", "did", "dtc",
+    "uds", "ffd", "functional", "active-test", "utility",
   }
+  live_ecu_actions = {"monitor", "read", "watch"}
   if len(tail) >= 2 and tail[0] == "ecu":
     if tail[1] not in ecu_actions and not tail[1].startswith("-"):
       ref = tail[1]
+      if len(tail) >= 3 and ref.casefold() == "frc" and tail[2] == "ffd":
+        return [*prefix, "ffd", *tail[3:]]
+      if len(tail) >= 3 and tail[2] in live_ecu_actions:
+        action = tail[2]
+        return [*prefix, "monitor", ref, *tail[3:]] if action == "monitor" else [*prefix, "did", action, ref, *tail[3:]]
       if len(tail) >= 3 and tail[2] in ecu_actions - {"list", "info"}:
         return [*prefix, "ecu", tail[2], ref, *tail[3:]]
       return [*prefix, "ecu", "info", ref, *tail[2:]]
@@ -1329,6 +1718,11 @@ def _normalize_argv(argv: list[str]) -> list[str]:
     # Direct ECU shorthand: `toyota frc`, `toyota frc data LTA`, etc. Unknown
     # words intentionally flow through ECU lookup so its close-match suggestions apply.
     ref = tail[0]
+    if len(tail) >= 2 and ref.casefold() == "frc" and tail[1] == "ffd":
+      return [*prefix, "ffd", *tail[2:]]
+    if len(tail) >= 2 and tail[1] in live_ecu_actions:
+      action = tail[1]
+      return [*prefix, "monitor", ref, *tail[2:]] if action == "monitor" else [*prefix, "did", action, ref, *tail[2:]]
     if len(tail) >= 2 and tail[1] in ecu_actions - {"list", "info"}:
       return [*prefix, "ecu", tail[1], ref, *tail[2:]]
     return [*prefix, "ecu", "info", ref, *tail[1:]]

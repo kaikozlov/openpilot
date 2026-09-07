@@ -23,6 +23,24 @@ class TestOfflineCli(unittest.TestCase):
     self.assertEqual(rc, 0)
     self.assertEqual(__import__("json").loads(output), state)
 
+  def test_tss3_ffd_catalog_and_search_are_first_class(self):
+    import json
+
+    rc, output = run_cli(["search", "Arbitration result Lateral ID", "--limit", "10"])
+    self.assertEqual(rc, 0, output)
+    self.assertIn("ffd-signal", output)
+    self.assertIn("0x5285", output)
+
+    rc, output = run_cli(["ffd", "data", "LTA Control Request Pinion Angle", "--json"])
+    self.assertEqual(rc, 0, output)
+    signals = json.loads(output)["signals"]
+    self.assertTrue(any(row["data_id"] == 0x5631 for row in signals))
+
+    rc, output = run_cli(["frc", "ffd", "robs", "Hands Free", "--json"])
+    self.assertEqual(rc, 0, output)
+    robs = json.loads(output)["robs"]
+    self.assertTrue(any(row["rob"] == 0x2845 for row in robs))
+
   def test_search_and_ecu_first_browsing(self):
     rc, output = run_cli(["search", "LTA", "--limit", "20"])
     self.assertEqual(rc, 0, output)
@@ -181,6 +199,62 @@ class TestLiveCli(unittest.TestCase):
   def mode04_panda():
     return support.FakePanda(recv_batches=[[(addr, b"\x01\x44\x00\x00\x00\x00\x00\x00", 0) for addr in support.LEGISLATED_RESPONDERS]])
 
+  def test_operation_ffd_live_commands_use_exact_read_only_ab_family(self):
+    import json
+
+    scripted = support.ScriptedUds()
+    scripted.did[0x7A1] = {0xF181: support.EXPECTED_EPS_F181}
+    panda = support.FakePanda()
+
+    with self.patch_live(panda, scripted), mock.patch(
+        "tools.toyota_diag.transport.raw_isotp", return_value=bytes.fromhex("eb1128182845")) as raw:
+      rc, output = run_cli(["ffd", "operation", "list", "--json"])
+    self.assertEqual(rc, 0, output)
+    self.assertEqual([row["behavior"] for row in json.loads(output)["behaviors"]], [0x2818, 0x2845])
+    raw.assert_called_once_with(mock.ANY, bytes.fromhex("ab11"))
+
+    scripted.calls.clear()
+    with self.patch_live(panda, scripted), mock.patch(
+        "tools.toyota_diag.transport.raw_isotp", return_value=bytes.fromhex("eb12281801000101")) as raw:
+      rc, output = run_cli(["ffd", "operation", "records", "2818", "--json"])
+    self.assertEqual(rc, 0, output)
+    self.assertEqual(json.loads(output)["records"], [0x0100, 0x0101])
+    raw.assert_called_once_with(mock.ANY, bytes.fromhex("ab122818"))
+
+    scripted.calls.clear()
+    response = bytes.fromhex("eb13281801000156310500ffc76400")
+    with self.patch_live(panda, scripted), mock.patch(
+        "tools.toyota_diag.transport.raw_isotp", return_value=response) as raw:
+      rc, output = run_cli(["frc", "ffd", "operation", "read", "2818", "0100", "--query", "pinion", "--json"])
+    self.assertEqual(rc, 0, output)
+    document = json.loads(output)
+    self.assertEqual(document["blocks"][0]["data_id"], 0x5631)
+    pinion = next(signal for signal in document["blocks"][0]["signals"] if "Pinion" in signal["name"])
+    self.assertEqual(pinion["formatted"], "-0.057")
+    raw.assert_called_once_with(mock.ANY, bytes.fromhex("ab1328180100"))
+
+  def test_image_ffd_live_list_uses_validated_level49_unlock(self):
+    import json
+
+    scripted = support.ScriptedUds()
+    scripted.did[0x7A1] = {0xF181: support.EXPECTED_EPS_F181}
+    panda = support.FakePanda()
+    seed = bytes.fromhex("690f82163710")
+    responses = [bytes.fromhex("6703") + seed, bytes.fromhex("6704"), bytes.fromhex("eb3128222821")]
+    with self.patch_live(panda, scripted), mock.patch(
+        "tools.toyota_diag.transport.raw_isotp", side_effect=responses) as raw:
+      rc, output = run_cli(["ffd", "image", "list", "--json"])
+    self.assertEqual(rc, 0, output)
+    document = json.loads(output)
+    self.assertEqual(document["robs"], [0x2822, 0x2821])
+    self.assertEqual(document["security"]["key_hex"], "e1ff8791db01")
+    self.assertEqual([call.args[1].hex() for call in raw.call_args_list], [
+      "2703", "2704e1ff8791db01", "ab31",
+    ])
+    self.assertEqual([call[1:] for call in scripted.calls], [
+      ("read_did", 0xF181), ("session", 3), ("session", 1),
+    ])
+
   def test_can_sniff_is_receive_only_and_filters_bus_and_address(self):
     import json
     panda = support.FakePanda(recv_batches=[[
@@ -284,6 +358,24 @@ class TestLiveCli(unittest.TestCase):
       rc, output = run_cli(["monitor", "engine", "0x0000", "--interval", "0", "--count", "1", "--jsonl"])
     self.assertEqual(rc, 0, output)
     self.assertEqual(scripted.calls, [(0x700, "read_did", 0x0000)])
+
+  def test_observe_tss3_longitudinal_reads_frc_and_brake_in_one_sample(self):
+    import json
+
+    scripted = support.ScriptedUds()
+    scripted.did[0x792] = {did: bytes(8) for did in range(0x1B03, 0x1B08)}
+    scripted.did[0x7B0] = {did: bytes(8) for did in range(0x10A1, 0x10A5)}
+    panda = support.FakePanda()
+    with self.patch_live(panda, scripted):
+      rc, output = run_cli(["observe", "tss3-longitudinal", "--interval", "0", "--count", "1", "--jsonl"])
+    self.assertEqual(rc, 0, output)
+    document = json.loads(output)
+    self.assertEqual(len(document["values"]), 9)
+    self.assertEqual({row["ecu"]["key"] for row in document["values"]}, {"frc", "brake"})
+    self.assertEqual(
+      [(row["ecu"]["key"], row["did"]) for row in document["values"]],
+      [("frc", did) for did in range(0x1B03, 0x1B08)] + [("brake", did) for did in range(0x10A1, 0x10A5)],
+    )
 
   def test_active_test_dry_run_and_runtime_blocks_do_not_connect(self):
     with mock.patch("tools.toyota_diag.transport.connect", side_effect=AssertionError("must not connect")):

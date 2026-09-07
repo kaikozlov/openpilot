@@ -1,6 +1,6 @@
 # Toyota diagnostics CLI
 
-`tools/toyota` is the single Comma-side entry point for Toyota diagnostics recovered from Techstream/GTS+. The bundled `camry-2026-f33` registry is a generated, derived artifact: it contains ECU names/addresses, GTS DID/DTC catalogs, static Active-Test plans, the exact F33 identity guard, and the live-validated DTC-clear route. It does **not** contain Toyota DLL/DDB binaries.
+`tools/toyota` is the single Comma-side entry point for Toyota diagnostics recovered from Techstream/GTS+. The bundled `camry-2026-f33` registry is a generated, derived artifact: it contains ECU names/addresses, GTS DID/DTC catalogs, static Active-Test plans, the exact F33 identity guard, and the live-validated DTC-clear route. The CLI also bundles clean generated metadata for the current GTS+ TSS3 Operation/Image FFD protocols and PCS Data Viewer recorder schema. It does **not** contain Toyota DLL/DDB/EXE binaries.
 
 Offline discovery works without Panda access. The CLI is ECU-first now, so you can browse by Toyota names instead of memorizing DIDs or command families:
 
@@ -11,6 +11,8 @@ Offline discovery works without Panda access. The CLI is ECU-first now, so you c
 ./tools/toyota frc                         # shorthand for `ecu frc`
 ./tools/toyota ecu frc data "LTA Control"
 ./tools/toyota frc data "LTA Control"      # shorthand keeps ECU context
+./tools/toyota frc monitor "LTA Control"      # live ECU-first shorthand
+./tools/toyota frc read 0x1601                 # shorthand for `did read frc ...`
 ./tools/toyota ecu frc dtcs U0131
 ./tools/toyota ecu frc active-tests
 ./tools/toyota ecu frc plugins
@@ -22,9 +24,12 @@ Offline discovery works without Panda access. The CLI is ECU-first now, so you c
 ./tools/toyota did decode eps 0x1037 0001
 ./tools/toyota active-test plan frc 0xA429
 ./tools/toyota active-test plan frc 0xA429 --json
+./tools/toyota search "Arbitration result Lateral ID"
+./tools/toyota ffd data "pinion angle"
+./tools/toyota ffd robs "Hands Free"
 ```
 
-`search` spans ECU/category names, Data List signals, DTCs, Active Tests, v4 function/plugin bindings, and recovered generic utility-family metadata. `ecu ... functions` shows the recovered type-26/27 function/detail hierarchy even where Toyota's function names remain unrecovered; `ecu ... plugins` shows the role → DLL binding and only labels semantic kinds recovered for the exact plugin identity. Offline catalog browsing (`ecu list/info/functions/plugins/data/dtcs/active-tests`, `did list`, and `dtc catalog/decode`) accepts `--json`, matching the machine-readable live/planning surfaces without importing Panda. ECU lookup errors include close-match suggestions. The original verb-first `ecu info`, `did list`, `dtc catalog`, etc. remain supported.
+`search` spans ECU/category names, Data List signals, DTCs, Active Tests, v4 function/plugin bindings, recovered generic utility-family metadata, and the separate PCS Data Viewer TSS3 Operation-FFD signal/trigger namespace. This matters because recorder-only Toyota names such as `Arbitration result_lateral ID` (`0x5285`) and `Arbitration result Pinion angle` (`0x57DE`) do not exist in the ordinary P5 Data Monitor DDB. `ecu ... functions` shows the recovered type-26/27 function/detail hierarchy even where Toyota's function names remain unrecovered; `ecu ... plugins` shows the role → DLL binding and only labels semantic kinds recovered for the exact plugin identity. Offline catalog browsing (`ecu list/info/functions/plugins/data/dtcs/active-tests`, `did list`, and `dtc catalog/decode`) accepts `--json`, matching the machine-readable live/planning surfaces without importing Panda. ECU lookup errors include close-match suggestions. The original verb-first `ecu info`, `did list`, `dtc catalog`, etc. remain supported.
 
 Live commands have two transport modes. If `pandad` is stopped, the CLI takes direct Panda ownership using the exact live-validated Camry ELM327 setup. If `pandad` is already running, the CLI reuses openpilot's `can`/`sendcan` ISO-TP path **only** when the one live Panda is already in ELM327 safety param 1 with `controlsAllowed=false` on the profile's validated bus-0 topology. It never changes a running Panda's safety mode; if openpilot has already transitioned to Toyota/onroad safety, the command fails closed and tells you to stop manager for direct access. `./tools/toyota transport status` checks this gate without transmitting anything.
 
@@ -39,6 +44,8 @@ Live commands have two transport modes. If `pandad` is stopped, the CLI takes di
 ./tools/toyota monitor frc LTA --changed
 ./tools/toyota monitor frc 0x1601 0x1914 --jsonl > frc-monitor.jsonl
 ./tools/toyota monitor frc 0x1601 0x1914 --csv > frc-monitor.csv
+./tools/toyota observe tss3-longitudinal --changed
+./tools/toyota observe frc:0x1601 brake:0x10A1 --jsonl > joined-monitor.jsonl
 ./tools/toyota scan
 ./tools/toyota scan --json > car-snapshot.json
 ./tools/toyota vehicle detect
@@ -52,7 +59,38 @@ master `0x763` that are not asserted as installed vehicle-profile ECUs. Mutation
 unregistered address remains forbidden even with `--force`; add a registry identity
 guard before any write/session/routine use.
 
-`monitor` is the human-facing Data List view: broad signal-name terms expand to matching DIDs, signals sharing a DID are coalesced, interactive terminals redraw a compact value table, and `--changed` suppresses unchanged rows. Under registry v4 it also uses the recovered current-P5 `DiagnosticSession` lifecycle for wire-proven categories: inspect/poll F186, D1 `10 01` → D2 `10 03` when needed, periodic `22 F1 86` session polling, and deterministic D1 cleanup. Categories outside the registry's `wire_proven_categories` stay on the conservative default-session read path rather than inheriting an unproven lifecycle. `--jsonl` emits one structured sample group per line and `--csv` emits one row per decoded signal sample. `scan` produces a read-only vehicle inventory with responding ECUs, F181/F18C/0105 identity reads where supported, DTC status, active-fault summaries, transport state, and profile identity.
+## TSS3 Operation/Image FFD
+
+Current GTS+ exposes two proprietary recorder surfaces on `FRC_P5 = Front Recognition Camera 2`. Both are now first-class, read-only CLI surfaces rather than opaque plugin rows. The exact F33 vehicle was used to validate both protocols.
+
+Operation FFD is the highest-value control/arbitration recorder. `AB11` enumerates behavior/RoB codes, `AB12 <behavior_be16>` enumerates stored record IDs, and `AB13 <behavior_be16> <record_be16>` returns the recorder blocks. The CLI decodes those blocks with the recovered PCS Data Viewer schema (`physical = raw * Lsb + Offset`, including signed fixed-point and IEEE float fields):
+
+```bash
+./tools/toyota ffd operation list
+./tools/toyota ffd operation records 2818
+./tools/toyota ffd operation read 2818 0100
+./tools/toyota ffd operation read 2818 0100 --query pinion
+./tools/toyota frc ffd operation read 2818 0100 --query LTA --json
+```
+
+Recorder IDs are hexadecimal by Toyota convention even when they contain only decimal digits, so `2818`, `0100`, and `0201` are interpreted as hex without requiring `0x`. Global `search`, `ffd data`, and `ffd robs` are offline and do not touch Panda. Useful recovered steering joins include generic TSS request `0x5282`, LDA `0x5531`, LTA `0x5631`, arbitration-result lateral ID `0x5285`, arbitration-result pinion angle `0x57DE`, EPS pinion state `0x560D`, and active-steering state `0x5265`.
+
+Image FFD uses the live-validated current P5 path: extended diagnostic session, SecurityAccess `27 03/04` with the recovered six-byte level-49 algorithm, then `AB31` RoB enumeration and `AB33 <rob_be16> <frame_be32>` split-record fetches. The host key algorithm is release-local and contains no vehicle/package secret; the CLI still applies the exact vehicle identity guard and restores default session on exit.
+
+```bash
+./tools/toyota ffd image info
+./tools/toyota ffd image list
+./tools/toyota ffd image read 2822 0201
+./tools/toyota ffd image read 2822 0201 --json
+```
+
+For the exact Camry live witness, frame `0201` is split 1 / data set 1 / trigger 1. `image read` deliberately exposes the EB33 block inventory and split `0x6002..0x6017` payloads; it does not silently synthesize/decrypt/write a JPEG. PCS Data Viewer semantics for split reassembly and the `0x2081 != 01` byte transform remain preserved in the bundled metadata for a future explicit export command.
+
+`monitor` is the human-facing Data List view: broad signal-name terms expand to matching DIDs, signals sharing a DID are coalesced, interactive terminals redraw a compact value table, and `--changed` suppresses unchanged rows. Under registry v4 it also uses the recovered current-P5 `DiagnosticSession` lifecycle for wire-proven categories: inspect/poll F186, D1 `10 01` → D2 `10 03` when needed, periodic `22 F1 86` session polling, and deterministic D1 cleanup. Categories outside the registry's `wire_proven_categories` stay on the conservative default-session read path rather than inheriting an unproven lifecycle. `--jsonl` emits one structured sample group per line and `--csv` emits one row per decoded signal sample.
+
+`observe` extends the same read-only monitor machinery across multiple ECUs. Each argument is `ECU:DID_OR_TERM`; the renderer adds an ECU column only when needed and `--changed` keys state by ECU+DID+signal so identically named signals cannot collide. The built-in `tss3-longitudinal` preset captures the current recovered request/source-sink join in one sample group: FRC `0x1B03..0x1B07` plus Brake `0x10A1..0x10A4`. Those Brake values are the Toyota-named upper/lower request acceleration and request IDs "from Toyota Safety Sense"; the FRC values are the corresponding request-side ISA upper-limit state. This preset is an observation convenience, not an assertion that either ECU owns final arbitration or the protected wire publisher.
+
+`scan` produces a read-only vehicle inventory with responding ECUs, F181/F18C/0105 identity reads where supported, DTC status, active-fault summaries, transport state, and profile identity.
 
 The exact Camry maintenance clear is now:
 

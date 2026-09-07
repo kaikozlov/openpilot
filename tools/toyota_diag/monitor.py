@@ -19,7 +19,7 @@ def _cell(value: Any) -> str:
 
 
 def _row_key(row: dict[str, Any]) -> tuple[Any, ...]:
-  return row.get("did"), row.get("signal")
+  return row.get("ecu"), row.get("did"), row.get("signal")
 
 
 def _row_state(row: dict[str, Any]) -> tuple[Any, ...]:
@@ -38,12 +38,20 @@ def render_table(ecu_name: str, sample: int, elapsed: float, values: list[dict[s
     lines.append("  (no changes)")
     return "\n".join(lines), state
   signal_width = max(18, min(46, max(len(str(row.get("signal") or "")) for row in rows)))
-  lines.append(f"{'DID':<8} {'Signal':<{signal_width}} {'Value':<22} Unit")
-  lines.append(f"{'-' * 6:<8} {'-' * min(signal_width, 24):<{signal_width}} {'-' * 18:<22} {'-' * 8}")
+  ecus = {str(row.get("ecu") or "") for row in rows}
+  multi_ecu = len(ecus) > 1
+  if multi_ecu:
+    ecu_width = max(5, min(16, max(len(ecu) for ecu in ecus)))
+    lines.append(f"{'ECU':<{ecu_width}} {'DID':<8} {'Signal':<{signal_width}} {'Value':<22} Unit")
+    lines.append(f"{'-' * min(ecu_width, 12):<{ecu_width}} {'-' * 6:<8} {'-' * min(signal_width, 24):<{signal_width}} {'-' * 18:<22} {'-' * 8}")
+  else:
+    lines.append(f"{'DID':<8} {'Signal':<{signal_width}} {'Value':<22} Unit")
+    lines.append(f"{'-' * 6:<8} {'-' * min(signal_width, 24):<{signal_width}} {'-' * 18:<22} {'-' * 8}")
   for row in rows:
     did = f"0x{int(row['did']):04X}" if row.get("did") is not None else "-"
     value = f"ERR: {row['error']}" if row.get("error") else _cell(row.get("value"))
-    lines.append(f"{did:<8} {str(row.get('signal') or ''):<{signal_width}} {value:<22} {_cell(row.get('unit'))}")
+    prefix = f"{str(row.get('ecu') or ''):<{ecu_width}} " if multi_ecu else ""
+    lines.append(f"{prefix}{did:<8} {str(row.get('signal') or ''):<{signal_width}} {value:<22} {_cell(row.get('unit'))}")
   return "\n".join(lines), state
 
 
