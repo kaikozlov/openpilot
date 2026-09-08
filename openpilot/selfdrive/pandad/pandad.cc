@@ -45,9 +45,8 @@ Panda *connect(std::string serial) {
   }
   //panda->enable_deepsleep();
 
-  // Keep auto format selection for legacy <=8-byte CAN FD senders until all
-  // sendcan producers express FDF explicitly. pandad now preserves RX FDF in
-  // cereal, and unambiguous >8-byte TX frames carry FDF explicitly.
+  // Preserve upstream auto-format compatibility during fingerprinting and for
+  // platforms whose short CAN-FD senders do not yet express FDF explicitly.
   for (int i = 0; i < PANDA_CAN_CNT; i++) {
     panda->set_can_fd_auto(i, true);
   }

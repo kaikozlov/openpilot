@@ -65,6 +65,16 @@ void PandaSafety::setSafetyMode(const std::string &params_string) {
   uint16_t safety_param = safety_configs[0].getSafetyParam();
 
   LOGW("setting safety model: %d, param: %d, alternative experience: %d", (int)safety_model, safety_param, alternative_experience);
+
+  // The exact 2026 Camry TSS3 network is genuinely mixed Classical/CAN-FD on
+  // the split buses. Route 00000045--805b7ca6ab proves that bus-global auto
+  // promotion changes the native Classical 0x412/0x101 replacements to FD.
+  // Keep upstream auto behavior everywhere else; only the two Camry control
+  // buses use the explicit per-frame FDF now carried by CanData.
+  const bool camry_tss3 = std::string(car_params.getCarFingerprint().cStr()) == "TOYOTA_CAMRY_TSS3";
+  panda_->set_can_fd_auto(0, !camry_tss3);
+  panda_->set_can_fd_auto(2, !camry_tss3);
+
   panda_->set_alternative_experience(alternative_experience);
   panda_->set_safety_model(safety_model, safety_param);
 }
