@@ -1046,7 +1046,7 @@ def dashboard_payload() -> dict:
       "B6 application admission",
       "Native longitudinal / radar",
       "EPS fault classification",
-      "0x08A / stock-authority attribution",
+      "0x08A / Brake-EBU handoff",
       "Vehicle calibration",
       "Volatile signer research",
     )

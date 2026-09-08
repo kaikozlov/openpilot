@@ -325,7 +325,7 @@ function renderEvidence(dashboard) {
   const exactF33 = dashboard.target?.kind === "camry_f33";
   if (exactF33) {
     els.evidenceCardTitle.textContent = "F33 lateral evidence";
-    els.evidenceCardSubtitle.textContent = "The secured request and F33 stock actuation path are separate; the authority selector is still open.";
+    els.evidenceCardSubtitle.textContent = "Exact F33 firmware identifies B6 as its sole external target-bearing steering ingress; the upstream delivery path is still open.";
     els.evidenceSummary.replaceChildren(
       evidenceBlock({
         name: "Upstream 0x08A request",
@@ -334,10 +334,10 @@ function renderEvidence(dashboard) {
         detail: "Bus-4 0x08A carries Target Lateral ID, target angle at a numerically matching F33 B6 scale, a modulo-64 sequence, and a trailer strongly matching Toyota ordinary-P5 SecOC. Exact F33 neither accepts 0x08A as normal ingress nor generated-COM-transmits it.",
       }),
       evidenceBlock({
-        name: "F33 stock-LTA authority",
-        statusLabel: "Open",
+        name: "F33 EPS-side command",
+        statusLabel: "Firmware identified",
         tone: "amber",
-        detail: "Factory LTA steers with zero B6 through an exact B6-independent internal assist path. The external/local state selecting or modulating that path remains unresolved; 0x08A producer/SecOC ownership is tracked separately. Steering output stays noOutput/zero CAN.",
+        detail: "CanIf descriptor 39, the B6 unpacker, target-bank selector, cooperative controller, and D0218 command join identify protected 0x0B6 as the only external target-bearing EPS ingress. Native B6 remains absent at the Panda tap, so the Brake/EBU handoff requires an EPS-facing capture. Steering output stays unsupported pending application admission and causal response.",
       }),
     );
     return;

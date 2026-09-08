@@ -15,9 +15,13 @@ ephemeral-bridge arming, and no `ALLOW_DEBUG` development mode. It sends deliber
 zero-MAC28 `0x0B6` on Panda bus 0, for which the maintainer EPS's persistent exact-F33
 Gate-2 patch (CodeFlash compare neutralization with deterministic CRC repair) is an
 installed development precondition — not proof of receiver/application admission (see
-receiver acceptance below). CORR-135/VAR-087 remain the stock-architecture boundary: factory LTA/LCA steers
-with zero B6 through an exact F33 B6-independent internal assist path, so `0x08A`
-producer/SecOC ownership must not be conflated with a presumed `0x08A -> B6` transform. No stock-lateral frame block is justified by the exact-F33 patched-verifier surface; request-plane
+receiver acceptance below). A later exact-CodeFlash re-evaluation supersedes the
+CORR-135/VAR-087 interpretation of the B6-inactive assist branch: that branch can produce
+ordinary EPS assist, but no non-B6 external lateral target reaches it. Protected `0x0B6` is
+the exact F33's only recovered external target-bearing steering ingress. This identifies the
+EPS-side stock command interface; it does not by itself identify the upstream `0x08A -> 0x0B6`
+transport or explain why retained Panda captures contain no native B6. No stock-lateral frame
+block is justified by the exact-F33 patched-verifier surface; request-plane
 `0x08A` therefore remains observational rather than an authority veto. System-generated stock
 ACC cancel is recovered independently: the fork clones the live checksum-valid `0x101` Brake Module
 shape onto bus 2 with only `BRAKE_PRESSED` asserted, matching two retained cancel transitions whose
@@ -31,7 +35,10 @@ moves the steering/chassis family onto the current **CAN0/CAN2 relay pair**: Pan
 the established development B6 TX path, Panda bus 2 is its byte-identical relay mirror, and
 Panda bus 1 is the native camera/radar plane. Toyota/GTS+ logical Bus 4 contains Brake
 Booster, Skid Control, EPS, SAS, and Airbag behind Central Gateway. These are distinct naming
-layers; no missing frame may be used to invent a private EPS stub or second EPS CAN interface.
+layers. The same topology record places EPS at junction label `EBU`, while Brake Booster and
+Skid Control use ordinary Global CAN Junction Connector labels. That supports an EBU-mediated
+EPS branch as the leading explanation for missing native B6 at the Panda tap, but the GTS table
+does not prove filtering, physical connector pins, or a second EPS CAN controller.
 
 | ECU | request -> response | exact identity |
 |---|---|---|
@@ -124,7 +131,101 @@ cd /data/openpilot
 
 A partial pass can be resumed by supplying both `--resume-dump` and `--resume-coverage`.
 
-## Target-native B6 / SecOC steering receiver
+## Exact-firmware identification of the EPS-side steering command
+
+The conclusion in this section is tied to the normalized lower-1-MiB CodeFlash image with
+SHA-256 `42dce8efc42f6ae31718e7713fa2d26bb9191b4a82439778aee4d7afded9b0e7`.
+Addresses are CodeFlash virtual addresses or absolute LocalRAM addresses from that image.
+The canonical decompiler corpus is
+`ghidra_rh850_analysis/data/generated/camry-8965F3307000/decompilations.jsonl` at analysis
+commit `b531ec901c08930f52569d908f838e4f495ba8e8`.
+
+### CAN acceptance boundary
+
+The exact application configures one CanIf controller (`CodeFlash[0x21970] = 0x01`). The
+normal Rx and Tx interrupt wrappers at `0x83F30` and `0x8583E` both select controller/channel
+1; their exact 14-byte bodies are `800721000132bfffbcff40063f00`.
+Controller-1 normal acceptance rules 0..42 occupy `0x230B8..0x23367` and match the 43 normal
+CanIf Rx descriptors at `0x21FE8..0x2213F` one-for-one. Neither `0x081` nor `0x08A`
+appears in that complete normal receive denominator.
+
+Rule 39 and descriptor 39 identify protected CAN-FD `0x0B6`:
+
+| object | exact firmware location | exact bytes / decoded value |
+|---|---:|---|
+| RSCFD acceptance rule 39 | `0x23328` | `b6000000000030000200000000000000` |
+| CanIf Rx descriptor 39 | `0x22120` | `b600004020000000` = ID `0x400000B6`, length 32 |
+| PduR route 44 | `0x22820` | `060000002000000c`, length 32 |
+| route-44 guard pointer | `0x21E08` | little-endian `0x0007D72C` |
+
+The five normal generated-COM Tx descriptors beginning at `0x21F58` are `0x030`, `0x351`,
+`0x394`, `0x4A3`, and `0x4C8`; neither request-plane ID is an EPS generated-COM transmit
+object either. Thus the exact EPS neither normally receives nor generates `0x081`/`0x08A`.
+
+### B6 fields and command dataflow
+
+Generated-COM unpacker `0x4BD46..0x4BECB` decodes PDU44. Its calls to extractor `0x7D12A`
+pin the command fields without relying on a DBC name:
+
+| wire field | unpacked scalar | staged scalar | application snapshot | firmware consumer |
+|---|---:|---:|---:|---|
+| `B3[5:0]` | `FEBE80BC` | `FEBEF130` | `FEBEADB0` | `0xCEFFC` target-lateral bank selector |
+| `B4:B5` signed BE16 | `FEBE80B8` | `FEBEF1FA` | `FEBEAE90` | `0xCBB66`, `0xCCF0E`, `0xCEE7C` target processing |
+| `B7[5:0]` | `FEBE80C3` | `FEBEF137` | `FEBEADBC` | `0xCEC8A` modulo-64 sequence delta |
+
+`0x58074..0x58801` performs generated-COM staging and `0xBCD62..0xBD81D` snapshots the
+staged values for the cooperative controller. In `0xCEFFC..0xCF049`, healthy
+`FEBEADB0 == 0x0B` selects cooperative bank 2 by writing `FEBECB00 = 2`.
+`0xCBB66`, `0xCCF0E`, `0xCCFB2`, and `0xCD128` condition and rate-limit the signed target.
+The supervised result reaches `0xCF2B2..0xCF33B`, which computes and slew/magnitude-limits
+the cooperative contribution in `FEBECB38`.
+
+The actuator join is explicit. `0xD0218..0xD0283` reads `FEBECB38`, combines it with the
+ordinary EPS terms, and writes `FEBECC48`. The remaining recovered physical command funnel is:
+
+```text
+0xD0218  FEBECB38 -> FEBECC48             ordinary command sum
+0xD0284  FEBECC48 -> FEBECC4C             scale and clamp
+0xD02DA  FEBECC4C -> FEBECC4E             filter/slew
+0xD0382  FEBECC4E -> FEBECC60             saturation
+0xD039E  FEBECC60/local damping -> FEBECC50 command composition
+0xD042C  FEBECC50 -> FEBECC62/66          output scale and actuator gate
+0xD047C  FEBECC66 -> FEBECC64             post-gate override
+0xD0AAE -> 0xBF33E -> 0x35C4C -> 0x387BA motor-current path
+```
+
+The decisive instruction-level reference is `0xD0250`, the read of `FEBECB38` inside
+`0xD0218`; `0xD027E` stores the resulting sum to `FEBECC48`. Function `0xCF2B2` has the
+only runtime non-initialization write to `FEBECB38` and derives it from the supervised
+cooperative output/gain state.
+
+### Correction to the former B6-independent stock-LTA interpretation
+
+The B6-inactive `0xD0218` branch reaches the shared actuator funnel, but reachability is not
+evidence of a second lane-target ingress. The exhaustive 43-descriptor scalar-copy and
+command-cone census finds that the only generated-COM values supplying lateral mode and target
+magnitude to `FEBECC50/FEBECC62` are B6 signal 261 (`FEBEADB0`) and signal 262
+(`FEBEAE90`). The other accepted messages contribute speed, validity, status, feedback,
+plausibility, or gates; none supplies a second steering target. The remaining `0xD0218`
+terms are internally generated EPS assist, return, damping, and limiting terms.
+
+Accordingly, the strongest firmware-grounded statement is: **at the exact-F33 EPS software
+boundary, protected CAN-FD `0x0B6` is the stock-capable steering command interface and is the
+only recovered external target-bearing ingress.** Retained absence of B6 at the Panda tap
+does not turn the ordinary assist branch into a stock lane command. It instead leaves the
+physical producer/delivery path unresolved. Exact firmware attributes B6 communication loss
+to DTC record `0xC12987`: event record `0x2C3A0` (`4200520000010000`) and DTC record
+`0x2C818` (`8729c10001000000`). The GTS+ join names it `U012987 Lost Communication with
+Brake System Control Module / Missing Message`, making the brake domain the positively
+identified immediate source domain.
+
+This does not prove a direct `0x08A -> 0x0B6` transform. The current network model is
+`FRC request (0x08A) -> arbitration/reference (0x081) -> unresolved Brake/EBU handoff ->
+EPS 0x0B6`. Only the final EPS-side `0x0B6` interface is firmware-proved. A synchronized tap
+on the EPS-facing side of EBU, or matched Brake/EBU producer firmware, is required to close
+the unresolved handoff and recover the complete native application template.
+
+## Target-native B6 / SecOC receiver contract
 
 The exact F33 Rx descriptor table contains all 40 Corolla-H application descriptors plus
 only `0x116`, `0x0D8`, and `0x1DA`. Its three protected receive profiles are exactly
@@ -347,7 +448,14 @@ correlation shifts forward toward future measured angle. Two caveats: B21/B26 up
 bits are zero in every retained frame while the GTS+ diagnostic field is 8-bit, so 6-bit
 field boundaries are encoding assumptions; and every retained frame is on the Bus-4
 Brake/EPS capture (Panda bus 0 / relay mirror bus 2, zero on bus 1), so the producer is
-unknown and the frame must not be labeled a Bus-1 camera message. Exact F33 does not accept `0x08A` as normal ingress and does not list it among its five generated-COM Tx IDs. Its recovered protected `0x0B6` interface is a **separate external cooperative-control ingress**, not a required stock-LTA next hop. Exact F33's B6-inactive `D0218 -> CC48 -> CC60 -> CC50 -> CC62/CC66 -> CC64` path reaches physical steering, so the 73.303384 s of machine-identified factory LTA/LCA with zero B6 is architecturally consistent.
+unknown and the frame must not be labeled a Bus-1 camera message. Exact F33 does not accept
+`0x08A` as normal ingress and does not list it among its five generated-COM Tx IDs. Its
+recovered protected `0x0B6` interface is the only external target-bearing ingress. The
+B6-inactive `D0218 -> CC48 -> CC60 -> CC50 -> CC62/CC66 -> CC64` path proves that ordinary
+EPS assist can reach the actuator with B6 absent; it does not supply a second external lane
+target and therefore does not explain the identified factory-LTA intervals. The absence of
+native B6 in those Panda captures is now treated as a capture-topology/authority witness that
+requires an EPS-facing measurement, rather than evidence for a B6-independent stock command.
 
 The `0x08A` trailer is also structurally bounded as Toyota ordinary-P5 SecOC: B28 candidate
 reset-low2 agrees with preceding authenticated `0x00F` at the reported drive rates, B26/FV4
@@ -409,7 +517,7 @@ requires them. Stock ACC cancel is already implemented and Panda-constrained thr
 Production output remains unauthorized. Separately close:
 
 1. the actual private/public FRC request transport and synchronized `5282/5285/57DE/5265`
-   request/winner/grant state;
+   request/winner/grant state, including the unresolved Brake/EBU handoff into EPS-side B6;
 2. exact `0x08A` physical publisher, protected key owner/profile, and source arbitration—now
    bounded to an always-on chassis service, but not uniquely Brake-family versus Gateway;
 3. B6 application admission and causal motor/steering response, plus live `0x351/0x394/0x4A3`

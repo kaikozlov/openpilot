@@ -91,9 +91,14 @@ The exact Camry implementation is now an ordinary openpilot platform — the int
 Exact firmware closes the **external B6 receiver** command envelope: Target Lateral ID 11
 selects LTA/LCA mode2; signed B4:B5 target angle uses `1024/17870 deg/count`; absolute
 envelope is ±1745 raw; delta is 78 raw per effective modulo-64 gap with cap 8; foreground
-is 5 ms and the seven-tick receive deadline is nominally 35 ms. Retained factory LTA/LCA
-has zero B6 and exact F33 has a B6-independent stock assist path, so the B6 sender is a
-separate external actuation interface—not a reconstruction of stock LTA.
+is 5 ms and the seven-tick receive deadline is nominally 35 ms. Exact CanIf descriptor 39
+at `0x22120`, controller-1 rule 39 at `0x23328`, unpacker `0x4BD46`, bank selector
+`0xCEFFC`, cooperative output `0xCF2B2`, and command-sum function `0xD0218` establish B6
+as the only recovered external target-bearing EPS ingress. The B6-inactive command branch
+contains ordinary EPS assist terms but no second external lane target. Retained factory-LTA
+captures with zero B6 therefore leave an unsampled Brake/EBU-to-EPS delivery path or the
+capture's authority classification unresolved; they do not establish a B6-independent stock
+steering command.
 
 The practical next evidence gate is **stationary/bench-safe B6 application admission**, not
 another road drive and not another custom arming ladder. The retained routes already prove

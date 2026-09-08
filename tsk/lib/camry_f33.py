@@ -159,10 +159,17 @@ CAMRY_F33_LATERAL_REQUEST = {
   ),
   "eps_ingress": False,
   "eps_generated_com_transmit": False,
-  "stock_lta_requires_b6": False,
+  "eps_side_stock_command": {
+    "address": 0x0B6,
+    "confidence": "strong exact-firmware inference",
+    "basis": (
+      "only recovered external target-bearing EPS ingress: CanIf descriptor39 0x22120, "
+      + "rule39 0x23328, unpacker 0x4BD46, bank selector 0xCEFFC, command join 0xD0218"
+    ),
+  },
   "boundary": (
-    "0x08A ownership/security and exact-F33 stock-LTA authority selection are separate "
-    + "questions; no 0x08A-to-B6 transform is established or required"
+    "0x08A ownership/security and the Brake/EBU handoff into EPS-side 0x0B6 remain separate "
+    + "questions; no exact 0x08A-to-B6 transform is established"
   ),
 }
 
@@ -353,7 +360,7 @@ CAMRY_F33_REMAINING_RESEARCH_BOUNDARIES = (
   "B6 application admission and causal steering response remain unproven despite valid Panda transmission and the installed persistent Gate-2 patch",
   "native openpilot longitudinal actuation, automatic resume, and radar tracks are not implemented; stock-ACC cancel is already recovered through 0x101",
   "openpilot temporary/permanent EPS-fault classification is not recovered; selected 0x030 and richer 0x351/0x394 status remain policy-neutral",
-  "0x08A producer/private-middle stock-authority attribution remains architecture research and is not a request-plane engage veto",
+  "0x08A/0x081 producer and Brake/EBU handoff into firmware-identified EPS-side 0x0B6 remain architecture research and are not request-plane engage vetoes",
   "Camry-specific vehicle dynamics/actuator calibration remains inherited where no target measurement exists",
   "RAM-only/reset-to-stock signer research remains separate from the current zero-MAC28 sender and does not substitute for proving B6 admission",
 )
