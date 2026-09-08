@@ -409,6 +409,7 @@ struct CanData {
   address @0 :UInt32;
   dat     @2 :Data;
   src     @3 :UInt8;
+  fd      @4 :Bool;
 
   deprecated :group {
     busTime @1 :UInt16;

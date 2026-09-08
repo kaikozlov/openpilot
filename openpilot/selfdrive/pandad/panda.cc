@@ -186,6 +186,9 @@ void Panda::pack_can_buffer(const capnp::List<cereal::CanData>::Reader &can_data
     header.extended = (cmsg.getAddress() >= 0x800) ? 1 : 0;
     header.data_len_code = data_len_code;
     header.bus = bus;
+    // Payloads longer than 8 bytes are unambiguously CAN FD. Preserve an
+    // explicit caller-provided FDF for short CAN FD frames too.
+    header.fd = cmsg.getFd() || can_data.size() > 8;
     header.checksum = 0;
 
     memcpy(&send_buf[pos], (uint8_t *)&header, sizeof(can_header));
@@ -262,6 +265,7 @@ bool Panda::unpack_can_buffer(uint8_t *data, uint32_t &size, std::vector<can_fra
     can_frame &canData = out_vec.emplace_back();
     canData.address = header.addr;
     canData.src = header.bus;
+    canData.fd = header.fd;
     if (header.rejected) {
       canData.src += CAN_REJECTED_BUS_OFFSET;
     }

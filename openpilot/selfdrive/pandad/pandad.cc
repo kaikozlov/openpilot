@@ -45,6 +45,9 @@ Panda *connect(std::string serial) {
   }
   //panda->enable_deepsleep();
 
+  // Keep auto format selection for legacy <=8-byte CAN FD senders until all
+  // sendcan producers express FDF explicitly. pandad now preserves RX FDF in
+  // cereal, and unambiguous >8-byte TX frames carry FDF explicitly.
   for (int i = 0; i < PANDA_CAN_CNT; i++) {
     panda->set_can_fd_auto(i, true);
   }
@@ -100,6 +103,7 @@ void can_recv(Panda *panda, PubMaster *pm) {
       canData[i].setAddress(raw_can_data[i].address);
       canData[i].setDat(kj::arrayPtr((uint8_t*)raw_can_data[i].dat.data(), raw_can_data[i].dat.size()));
       canData[i].setSrc(raw_can_data[i].src);
+      canData[i].setFd(raw_can_data[i].fd);
     }
     pm->send("can", msg);
   }

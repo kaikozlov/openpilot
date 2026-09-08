@@ -11,6 +11,7 @@ struct PandaTest : public Panda {
   void test_chunked_can_recv();
 
   std::map<int, std::string> test_data;
+  std::map<int, bool> test_fd;
   int can_list_size = 0;
   int total_pakets_size = 0;
   MessageBuilder msg;
@@ -37,6 +38,10 @@ PandaTest::PandaTest(int can_list_size_, cereal::PandaState::PandaType hw_type_)
     can.setAddress(i);
     can.setSrc(i % 3);
     can.setDat(kj::ArrayPtr((uint8_t *)dat.data(), dat.size()));
+    // Exercise both explicit short CAN FD frames and the unambiguous >8-byte
+    // inference used by the normal three-tuple CAN API.
+    test_fd[i] = (i % 5 == 0) || (dat.size() > 8);
+    can.setFd(i % 5 == 0);
     total_pakets_size += sizeof(can_header) + dat.size();
   }
 
@@ -58,6 +63,7 @@ void PandaTest::test_can_send() {
     pckt_len = sizeof(can_header) + data_len;
 
     CHECK(header.addr == cnt);
+    CHECK(header.fd == test_fd.at(cnt));
     CHECK(test_data.find(data_len) != test_data.end());
     const std::string &dat = test_data[data_len];
     CHECK(memcmp(dat.data(), &unpacked_data[pos + sizeof(can_header)], dat.size()) == 0);
@@ -89,6 +95,7 @@ void PandaTest::test_can_recv(uint32_t rx_chunk_size) {
   CHECK(frames.size() == can_list_size);
   for (int i = 0; i < frames.size(); ++i) {
     CHECK(frames[i].address == i);
+    CHECK(frames[i].fd == test_fd.at(i));
     CHECK(test_data.find(frames[i].dat.size()) != test_data.end());
     const std::string &dat = test_data[frames[i].dat.size()];
     CHECK(memcmp(dat.data(), frames[i].dat.data(), dat.size()) == 0);
