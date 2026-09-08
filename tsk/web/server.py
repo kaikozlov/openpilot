@@ -1023,7 +1023,7 @@ def dashboard_payload() -> dict:
       "title": "Establish B6 application admission",
       "description": (
         "The exact-F33 software sender and Panda safety path are implemented, but retained stationary probes "
-        + "and road routes do not prove that zero-MAC28 B6 reaches the application command state or causes steering. "
+        + "and road routes do not prove that the current wrong-key dummy-CMAC B6 reaches the application command state or causes steering. "
         + "Stock-ACC cancel is already recovered through 0x101; the next evidence gate is receiver/application admission."
       ),
       "href": "",
@@ -1046,7 +1046,7 @@ def dashboard_payload() -> dict:
       "B6 application admission",
       "Native longitudinal / radar",
       "EPS fault classification",
-      "0x08A / Brake-EBU handoff",
+      "0x08A/reference vs B6 provenance",
       "Vehicle calibration",
       "Volatile signer research",
     )

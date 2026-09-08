@@ -337,7 +337,7 @@ function renderEvidence(dashboard) {
         name: "F33 EPS-side command",
         statusLabel: "Firmware identified",
         tone: "amber",
-        detail: "CanIf descriptor 39, the B6 unpacker, target-bank selector, cooperative controller, and D0218 command join identify protected 0x0B6 as the only external target-bearing EPS ingress. Native B6 remains absent at the Panda tap, so the Brake/EBU handoff requires an EPS-facing capture. Steering output stays unsupported pending application admission and causal response.",
+        detail: "CanIf descriptor 39, the B6 unpacker, target-bank selector, cooperative controller, and D0218 command join identify protected 0x0B6 as the only recovered external target-bearing EPS ingress. Native B6 remains absent at the already-reached Bus-4 tap; factory request/grant provenance and B6 physical producer/delivery therefore remain separate open questions. Steering output stays unsupported pending application admission and causal response.",
       }),
     );
     return;

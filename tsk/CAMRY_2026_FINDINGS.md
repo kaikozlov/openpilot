@@ -11,16 +11,20 @@ is not yet a supported steering port and does not authorize upstream inclusion o
 to an unpatched/other F33. The port follows
 the ordinary Toyota/openpilot shape on `TOYOTA_CAMRY_TSS3`:
 ordinary CarParams, CarController, and Panda safety — no private parameters, no
-ephemeral-bridge arming, and no `ALLOW_DEBUG` development mode. It sends deliberately
-zero-MAC28 `0x0B6` on Panda bus 0, for which the maintainer EPS's persistent exact-F33
-Gate-2 patch (CodeFlash compare neutralization with deterministic CRC repair) is an
-installed development precondition — not proof of receiver/application admission (see
-receiver acceptance below). A later exact-CodeFlash re-evaluation supersedes the
+ephemeral-bridge arming, and no `ALLOW_DEBUG` development mode. Current opendbc
+`f207c273` sends `0x0B6` on Panda bus 0 with the normal Toyota FV4+MAC28 SecOC envelope
+using a fixed all-zero **dummy AES-128 key**. The real slot-4 key remains unknown; cumulative
+stage 5 makes this wrong-key CMAC acceptance-equivalent to the historical all-zero MAC28
+marker, so the dummy tag is wire-grammar hygiene rather than an admission fix. The maintainer
+EPS's persistent exact-F33 Gate-2 patch (CodeFlash compare neutralization with deterministic
+CRC repair) is an installed development precondition — not proof of receiver/application
+admission (see receiver acceptance below). A later exact-CodeFlash re-evaluation supersedes the
 CORR-135/VAR-087 interpretation of the B6-inactive assist branch: that branch can produce
 ordinary EPS assist, but no non-B6 external lateral target reaches it. Protected `0x0B6` is
 the exact F33's only recovered external target-bearing steering ingress. This identifies the
-EPS-side stock command interface; it does not by itself identify the upstream `0x08A -> 0x0B6`
-transport or explain why retained Panda captures contain no native B6. No stock-lateral frame
+F33 software-side external target interface; it does **not** prove that factory steering uses
+B6, identify an upstream `0x08A -> 0x0B6` transform, or explain why retained Panda captures
+contain no unmatched native B6. No stock-lateral frame
 block is justified by the exact-F33 patched-verifier surface; request-plane
 `0x08A` therefore remains observational rather than an authority veto. System-generated stock
 ACC cancel is recovered independently: the fork clones the live checksum-valid `0x101` Brake Module
@@ -36,9 +40,11 @@ the established development B6 TX path, Panda bus 2 is its byte-identical relay 
 Panda bus 1 is the native camera/radar plane. Toyota/GTS+ logical Bus 4 contains Brake
 Booster, Skid Control, EPS, SAS, and Airbag behind Central Gateway. These are distinct naming
 layers. The same topology record places EPS at junction label `EBU`, while Brake Booster and
-Skid Control use ordinary Global CAN Junction Connector labels. That supports an EBU-mediated
-EPS branch as the leading explanation for missing native B6 at the Panda tap, but the GTS table
-does not prove filtering, physical connector pins, or a second EPS CAN controller.
+Skid Control use ordinary Global CAN Junction Connector labels. `EBU` is a topology/junction
+label, not evidence for a second EPS application bus: current GTS+ topology, the exact F33's
+single application CAN controller, EPS UDS, and the relay-correct repin already join the
+`CAN0/CAN2` pair to Toyota Bus 4's Brake/EPS segment (analysis VAR-066/CORR-139). Missing
+native B6 therefore does **not** by itself justify an EBU-private branch or a repin change.
 
 | ECU | request -> response | exact identity |
 |---|---|---|
@@ -210,20 +216,24 @@ plausibility, or gates; none supplies a second steering target. The remaining `0
 terms are internally generated EPS assist, return, damping, and limiting terms.
 
 Accordingly, the strongest firmware-grounded statement is: **at the exact-F33 EPS software
-boundary, protected CAN-FD `0x0B6` is the stock-capable steering command interface and is the
-only recovered external target-bearing ingress.** Retained absence of B6 at the Panda tap
-does not turn the ordinary assist branch into a stock lane command. It instead leaves the
-physical producer/delivery path unresolved. Exact firmware attributes B6 communication loss
+boundary, protected CAN-FD `0x0B6` is the only recovered external target-bearing steering
+ingress.** This proves what an admitted B6 can command; it does not prove that factory LTA/LCA
+uses B6. Retained absence of unmatched native B6 at the already-reached Bus-4 tap does not
+turn the ordinary assist branch into a stock lane command and does not prove a hidden EPS bus.
+The factory request/grant path and B6 physical producer/delivery remain separate unresolved
+questions. Exact firmware attributes B6 communication loss
 to DTC record `0xC12987`: event record `0x2C3A0` (`4200520000010000`) and DTC record
 `0x2C818` (`8729c10001000000`). The GTS+ join names it `U012987 Lost Communication with
 Brake System Control Module / Missing Message`, making the brake domain the positively
 identified immediate source domain.
 
-This does not prove a direct `0x08A -> 0x0B6` transform. The current network model is
-`FRC request (0x08A) -> arbitration/reference (0x081) -> unresolved Brake/EBU handoff ->
-EPS 0x0B6`. Only the final EPS-side `0x0B6` interface is firmware-proved. A synchronized tap
-on the EPS-facing side of EBU, or matched Brake/EBU producer firmware, is required to close
-the unresolved handoff and recover the complete native application template.
+This does not prove a direct `0x08A -> 0x0B6` transform. The current evidence keeps two
+planes distinct: `0x08A -> 0x081` is the observed Toyota request/reference path, while B6 is
+the exact F33 external cooperative-control ingress whose missing-message DTC identifies the
+Brake System Control Module source domain. No exact edge joining those planes has been
+recovered. The next B6 experiment is therefore the already-defined stationary internal
+queue/route44/generated-COM/application capture; matched Brake/producer firmware or a newly
+justified physical tap can address native producer provenance separately.
 
 ## Target-native B6 / SecOC receiver contract
 
@@ -338,7 +348,7 @@ For **receiver acceptance** the historical option list was: (1) the persistent e
 Gate-2 CodeFlash compare/check disable with deterministic CRC repair, or (2) a reset-to-stock
 RAM bridge. Option 1 is installed on the maintainer EPS (cumulative stage 5,
 persistence-verified). That patch neutralizes the Gate-2 compare **verdict path**; it does
-**not** establish that the ordinary port's zero-MAC28 B6 frames are accepted: the
+**not** establish that the ordinary port's wrong-key dummy-CMAC B6 frames are accepted: the
 2026-09-04 highway corpus (analysis-repo VAR-124/125/126) shows 751,664 wire-exact B6
 frames with no measurable wheel response, the wheel tracking the stock `0x08A`/`0x081`
 request when the requests diverge, Panda-level transport exonerated, and no observable
@@ -377,7 +387,7 @@ with no private arming parameters:
   `0x08A B10` for internal set speed, and `0x251 B2` for the cluster-domain set speed;
   ignition-off/reset semantics of B1[4] remain unjoined. `steeringPressed` uses the same-car-validated
   physical-torque sign and a 0.6 N.m openpilot policy threshold;
-- CarController sends one zero-MAC28 `0x0B6`/DLC32 frame per scheduled control frame on
+- CarController sends one normal-envelope, wrong-key dummy-CMAC `0x0B6`/DLC32 frame per scheduled control frame on
   Panda bus 0 with live `0x00F` TRIP/RESET freshness, ID11 while `latActive`, ID0 with
   zeroed companions on release, and a standard angle-rate-limited target;
 - CarController also owns the camera-side `0x412` replacement surface and the recovered stock-ACC
@@ -453,9 +463,11 @@ unknown and the frame must not be labeled a Bus-1 camera message. Exact F33 does
 recovered protected `0x0B6` interface is the only external target-bearing ingress. The
 B6-inactive `D0218 -> CC48 -> CC60 -> CC50 -> CC62/CC66 -> CC64` path proves that ordinary
 EPS assist can reach the actuator with B6 absent; it does not supply a second external lane
-target and therefore does not explain the identified factory-LTA intervals. The absence of
-native B6 in those Panda captures is now treated as a capture-topology/authority witness that
-requires an EPS-facing measurement, rather than evidence for a B6-independent stock command.
+target and therefore does not explain the retained request/reference-state intervals. Those
+captures do not contain Toyota's explicit winner/grant recorder state, and their zero unmatched
+native-B6 observation does not reopen a hidden EBU-private EPS branch. B6 application admission
+should be localized with the stationary internal queue/route44/generated-COM capture; native
+factory authority/provenance remains a separate request/winner/grant and producer question.
 
 The `0x08A` trailer is also structurally bounded as Toyota ordinary-P5 SecOC: B28 candidate
 reset-low2 agrees with preceding authenticated `0x00F` at the reported drive rates, B26/FV4

@@ -159,9 +159,9 @@ CAMRY_F33_LATERAL_REQUEST = {
   ),
   "eps_ingress": False,
   "eps_generated_com_transmit": False,
-  "eps_side_stock_command": {
+  "eps_external_target_ingress": {
     "address": 0x0B6,
-    "confidence": "strong exact-firmware inference",
+    "confidence": "verified exact-firmware external-ingress closure",
     "basis": (
       "only recovered external target-bearing EPS ingress: CanIf descriptor39 0x22120, "
       + "rule39 0x23328, unpacker 0x4BD46, bank selector 0xCEFFC, command join 0xD0218"
@@ -273,7 +273,7 @@ CAMRY_F33_CHECKPOINT = {
   ),
   "output": "exact-F33-normal-port-sender",
   "output_detail": (
-    "Ordinary CarParams/CarController/Panda safety on TOYOTA_CAMRY_TSS3 can transmit zero-MAC28 B6. "
+    "Ordinary CarParams/CarController/Panda safety on TOYOTA_CAMRY_TSS3 transmits normal-envelope B6 using a fixed all-zero dummy AES-128 key. "
     + "The persistent exact-F33 Gate-2 patch is installed and CRC-valid, but retained stationary probes "
     + "and road drives do not prove that the application admits those frames or that B6 causes wheel response."
   ),
@@ -292,7 +292,7 @@ CAMRY_F33_LATERAL_PORT = {
     + "SecOC-key availability state"
   ),
   "sender": (
-    "one zero-MAC28 0x0B6/DLC32 frame per scheduled 50-Hz steering update on Panda bus 0; live "
+    "one normal-envelope, wrong-key dummy-CMAC 0x0B6/DLC32 frame per scheduled 50-Hz steering update on Panda bus 0; live "
     + "SECOC_SYNCHRONIZATION (0x00F) TRIP/RESET freshness; ID11 while active, ID0 on release; "
     + "standard angle-rate-limited target angle"
   ),
@@ -303,7 +303,7 @@ CAMRY_F33_LATERAL_PORT = {
     + "and uses steer_angle_cmd_checks at +/-1745 raw with standard rate limits"
   ),
   "receiver_acceptance": (
-    "the persistent exact-F33 Gate-2 patch is installed and CRC-valid, but zero-MAC28 B6 application "
+    "the persistent exact-F33 Gate-2 patch is installed and CRC-valid, but wrong-key dummy-CMAC B6 application "
     + "admission remains unproven: retained stationary probes and long road routes show transmission "
     + "without a causal B6 steering response; the protected key remains unrecovered"
   ),
@@ -360,9 +360,9 @@ CAMRY_F33_REMAINING_RESEARCH_BOUNDARIES = (
   "B6 application admission and causal steering response remain unproven despite valid Panda transmission and the installed persistent Gate-2 patch",
   "native openpilot longitudinal actuation, automatic resume, and radar tracks are not implemented; stock-ACC cancel is already recovered through 0x101",
   "openpilot temporary/permanent EPS-fault classification is not recovered; selected 0x030 and richer 0x351/0x394 status remain policy-neutral",
-  "0x08A/0x081 producer and Brake/EBU handoff into firmware-identified EPS-side 0x0B6 remain architecture research and are not request-plane engage vetoes",
+  "0x08A/0x081 request/reference provenance and B6 physical producer/delivery remain separate architecture research questions and are not request-plane engage vetoes",
   "Camry-specific vehicle dynamics/actuator calibration remains inherited where no target measurement exists",
-  "RAM-only/reset-to-stock signer research remains separate from the current zero-MAC28 sender and does not substitute for proving B6 admission",
+  "RAM-only/reset-to-stock signer research remains separate from the current wrong-key dummy-CMAC sender and does not substitute for proving B6 admission",
 )
 
 def public_camry_f33_status() -> dict:
