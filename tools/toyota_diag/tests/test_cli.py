@@ -4,7 +4,7 @@ from contextlib import ExitStack, redirect_stdout
 from io import StringIO
 from unittest import mock
 
-from tools.toyota_diag import active_test, cli, registry, resolver
+from tools.toyota_diag import active_test, cli, dtc, registry, resolver
 from tools.toyota_diag.tests import support
 
 
@@ -589,6 +589,26 @@ class TestLiveCli(unittest.TestCase):
     self.assertEqual(rc, 0, output)
     self.assertNotIn((0x7A1, "read_did", 0xF181), scripted.calls)
     self.assertIn("PASS: all responding ECUs are clear", output)
+
+
+  def test_dtc_clear_uses_slow_clear_timing_for_physical_clear(self):
+    # ClearDiagnosticInformation writes ECU NVM; the clear phase must wait longer than
+    # the read-optimized default or slow body ECUs answer into the next ECU's window
+    scripted = self.scripted_clear()
+    panda = self.mode04_panda()
+    stack = ExitStack()
+    stack.enter_context(mock.patch("tools.toyota_diag.transport.connect", return_value=panda))
+    factory = stack.enter_context(
+      mock.patch("tools.toyota_diag.transport.uds_client_factory", return_value=scripted.factory))
+    stack.enter_context(mock.patch("tools.toyota_diag.transport.raw_isotp", return_value=b"\x62\xF1\x81"))
+    stack.enter_context(mock.patch("time.sleep", return_value=None))
+    with stack:
+      rc, output = run_cli(["dtc", "clear"])
+    self.assertEqual(rc, 0, output)
+    profile = registry.load_registry(registry.LEGACY_CAMRY_REGISTRY)
+    slow = registry.CommTimeouts(uds_timeout=dtc.CLEAR_UDS_TIMEOUT, response_pending_timeout=profile.uds_response_pending_timeout)
+    self.assertGreater(slow.uds_timeout, registry.DEFAULT_UDS_TIMEOUT)
+    self.assertEqual(factory.call_args_list, [mock.call(panda, mock.ANY), mock.call(panda, mock.ANY, slow)])
 
   def test_raw_read_only_accepts_unregistered_numeric_address(self):
     scripted = support.ScriptedUds()

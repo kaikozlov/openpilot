@@ -24,6 +24,11 @@ from tools.toyota_diag.registry import EcuSpec, decode_status_bits
 
 FUNCTIONAL_OBD_REQUEST_ADDR = 0x7DF
 
+# ClearDiagnosticInformation writes ECU NVM; body ECUs (TPM, main body, A/C) can take
+# well over the read-optimized default UDS timeout to send the positive response, and
+# the late response otherwise lands in the next ECU's window on the shared 0x750 bus.
+CLEAR_UDS_TIMEOUT = 2.0
+
 
 def parse_dtc_response(data: bytes) -> list[tuple[str, int]]:
   if not data:

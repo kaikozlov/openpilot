@@ -968,7 +968,10 @@ def cmd_dtc_clear(args, profile: Profile) -> int:
   responders, faults = dtc.scan(client_factory, scan_set, profile.fault_status_mask)
   print(f"responding ECUs: {len(responders)}; fault-status records: {len(faults)}")
 
-  dtc.clear_physical_uds(client_factory, {target: (target.name if isinstance(target, registry.EcuSpec) else str(target)) for target in responders})
+  clear_factory = transport.uds_client_factory(
+    panda, profile, registry.CommTimeouts(uds_timeout=dtc.CLEAR_UDS_TIMEOUT, response_pending_timeout=profile.uds_response_pending_timeout)
+  )
+  dtc.clear_physical_uds(clear_factory, {target: (target.name if isinstance(target, registry.EcuSpec) else str(target)) for target in responders})
   positives = dtc.functional_obd_mode04(panda, profile.legislated_responders, profile.bus)
   if positives != set(profile.legislated_responders):
     print("warning: not all live-validated legislated responders acknowledged Mode 04")
