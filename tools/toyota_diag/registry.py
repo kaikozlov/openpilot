@@ -275,7 +275,11 @@ class Profile:
         needle = text.casefold()
         matches = [ecu for ecu in self.ecus if needle in {ecu.key.casefold(), ecu.name.casefold()}]
         if not matches:
-          matches = [ecu for ecu in self.ecus if ecu.category_id is not None and needle == self.category(ecu)["category"]["name"].casefold()]
+          matches = []
+          for ecu in self.ecus:
+            category = self.category(ecu)
+            if category is not None and needle == category["category"]["name"].casefold():
+              matches.append(ecu)
     if len(matches) == 1:
       return matches[0]
     if not matches:

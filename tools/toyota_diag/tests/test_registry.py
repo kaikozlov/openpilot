@@ -142,6 +142,11 @@ class TestUniversalToyotaDatabase(unittest.TestCase):
     self.assertEqual(profile.lookup_ecu("Combination Meter").endpoint, (0x7C0, None))
     self.assertEqual(profile.resolve_did("frc", "LTA Control Condition")[0], 0x1601)
 
+  def test_lookup_skips_routed_ecus_without_catalogs(self):
+    profile = self.database.profile("NA", 12862)
+    self.assertTrue(any(ecu.category_id is not None and profile.category(ecu) is None for ecu in profile.ecus))
+    self.assertEqual(profile.lookup_ecu("frc").key, "frc")
+
 
   def test_support_modes_follow_toyota_family_local_dispatch(self):
     profile = self.database.profile("NA", 12704)
