@@ -65,6 +65,15 @@ void PandaSafety::setSafetyMode(const std::string &params_string) {
   uint16_t safety_param = safety_configs[0].getSafetyParam();
 
   LOGW("setting safety model: %d, param: %d, alternative experience: %d", (int)safety_model, safety_param, alternative_experience);
+
+  // On the stock Toyota-B harness, exact-F33 EPS/Brake Bus 4 is the unsplit
+  // Panda bus 1. The EPS-resident signer sideband is Classical CAN, so do not
+  // promote it from sticky bus-wide FD state learned from native traffic.
+  constexpr uint16_t TOYOTA_PARAM_F33 = 16U << 8;
+  const bool toyota_f33 = (safety_model == cereal::CarParams::SafetyModel::TOYOTA) &&
+                          ((safety_param & TOYOTA_PARAM_F33) != 0U);
+  panda_->set_can_fd_auto(1, !toyota_f33);
+
   panda_->set_alternative_experience(alternative_experience);
   panda_->set_safety_model(safety_model, safety_param);
 }
