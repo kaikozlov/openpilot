@@ -3,7 +3,7 @@ from opendbc.car.structs import car
 from opendbc.car import DT_CTRL, structs
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.interfaces import MAX_CTRL_SPEED
-from opendbc.car.toyota.values import ToyotaFlags
+from opendbc.car.toyota.values import CAR as TOYOTA_CAR, ToyotaFlags
 
 from openpilot.selfdrive.selfdrived.events import Events
 
@@ -125,7 +125,10 @@ class CarEvents:
       events.add(EventName.stockLkas)
     if CS.vEgo > MAX_CTRL_SPEED:
       events.add(EventName.speedTooHigh)
-    if CS.cruiseState.nonAdaptive:
+    # Temporary TSS3 Camry bring-up exception: lateral control remains available
+    # while Toyota is in conventional-cruise mode, so don't block engagement on
+    # the generic adaptive-cruise requirement. Keep CarState.nonAdaptive truthful.
+    if CS.cruiseState.nonAdaptive and self.CP.carFingerprint != TOYOTA_CAR.TOYOTA_CAMRY_TSS3:
       events.add(EventName.wrongCruiseMode)
     if CS.brakeHoldActive and self.CP.openpilotLongitudinalControl:
       events.add(EventName.brakeHold)
