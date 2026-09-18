@@ -54,7 +54,7 @@ def batch(*frames: tuple[int, bytes, int]):
 
 def cs():
   from opendbc.car import structs
-  return SimpleNamespace(standstill=True, gearShifter=structs.CarState.GearShifter.park)
+  return SimpleNamespace(canValid=True, standstill=True, gearShifter=structs.CarState.GearShifter.park)
 
 
 class Collector:
@@ -208,3 +208,15 @@ def test_signed_enable_is_exact_car_non_release_and_sets_both_safety_flags():
   release_cp = SimpleNamespace(carFingerprint=CAR.TOYOTA_CAMRY_TSS3, passive=False, safetyConfigs=[release_safety])
   assert not enable_signed_in_car_params(release_cp, requested=True, is_release=True)
   assert release_safety.safetyParam == 0
+
+def test_signed_invalid_carstate_never_qualifies():
+  collector = Collector()
+  worker = ToyotaTss3SignedId0Proxy(collector, start_thread=False)
+  state = cs()
+  state.canValid = False
+  worker.update(batch((SECOC_SYNC_ADDR, sync_frame(), 2)), state)
+  for i in range(10):
+    worker.update(batch((NATIVE_08A_ADDR, native_frame(i, i + 1), 2)), state)
+  assert not worker.active
+  assert not worker.qualified
+  assert not worker.recovery_active

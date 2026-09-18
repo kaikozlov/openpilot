@@ -259,7 +259,7 @@ class ToyotaTss3SignedId0Proxy:
 
   @staticmethod
   def _stationary_park(CS: structs.CarState) -> bool:
-    return bool(CS.standstill and CS.gearShifter == GearShifter.park)
+    return bool(CS.canValid and CS.standstill and CS.gearShifter == GearShifter.park)
 
   def _clear_signed_state_locked(self) -> None:
     self.state_generation += 1
