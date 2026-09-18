@@ -21,6 +21,7 @@ from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.car.toyota_tss3_08a import ToyotaTss3Id0Proxy, enable_in_car_params
+from openpilot.selfdrive.car.toyota_tss3_08a_signed import ToyotaTss3SignedId0Proxy, enable_signed_in_car_params
 
 REPLAY = "REPLAY" in os.environ
 
@@ -120,9 +121,13 @@ class Car:
       self.CP.safetyConfigs = [safety_config]
 
     self.tss3_08a_proxy = None
-    tss3_08a_requested = self.params.get_bool("ToyotaTss308aId0")
-    if enable_in_car_params(self.CP, requested=tss3_08a_requested, is_release=is_release):
-      cloudlog.warning("enabling development-only exact-F33 ID0 0x08A proxy")
+    tss3_08a_signed_requested = self.params.get_bool("ToyotaTss308aSignedId0")
+    tss3_08a_transparent_requested = self.params.get_bool("ToyotaTss308aId0")
+    if enable_signed_in_car_params(self.CP, requested=tss3_08a_signed_requested, is_release=is_release):
+      cloudlog.warning("enabling development-only exact-F33 signed ID0 0x08A proxy")
+      self.tss3_08a_proxy = ToyotaTss3SignedId0Proxy(self._send_can)
+    elif enable_in_car_params(self.CP, requested=tss3_08a_transparent_requested, is_release=is_release):
+      cloudlog.warning("enabling development-only exact-F33 transparent ID0 0x08A proxy")
       self.tss3_08a_proxy = ToyotaTss3Id0Proxy(self._send_can)
 
     if self.CP.secOcRequired:
