@@ -20,8 +20,7 @@ from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
-from openpilot.selfdrive.car.toyota_tss3_08a import ToyotaTss3Id0Proxy, enable_in_car_params
-from openpilot.selfdrive.car.toyota_tss3_08a_signed import ToyotaTss3SignedId0Proxy, enable_signed_in_car_params
+from openpilot.selfdrive.car.toyota_tss3_08a_signed import ToyotaTss3RequestProxy, request_plane_enabled
 
 REPLAY = "REPLAY" in os.environ
 
@@ -42,10 +41,6 @@ def obd_callback(params: Params) -> ObdCallback:
   return set_obd_multiplexing
 
 
-def refresh_can_parsers(CI: CarInterfaceBase, CP: structs.CarParams) -> None:
-  """Rebuild only CarState/CAN parsers after a development topology flag changes."""
-  CI.CS = CI.CarState(CP)
-  CI.can_parsers = CI.CS.get_can_parsers(CP)
 
 
 def can_comm_callbacks(logcan: messaging.SubSocket, sendcan: messaging.PubSocket) -> tuple[CanRecvCallable, CanSendCallable]:
@@ -127,24 +122,9 @@ class Car:
       self.CP.safetyConfigs = [safety_config]
 
     self.tss3_08a_proxy = None
-    tss3_08a_signed_requested = self.params.get_bool("ToyotaTss308aSignedId0")
-    tss3_08a_transparent_requested = self.params.get_bool("ToyotaTss308aId0")
-    tss3_08a_host_enabled = False
-    if enable_signed_in_car_params(self.CP, requested=tss3_08a_signed_requested, is_release=is_release):
-      cloudlog.warning("enabling development-only exact-F33 signed ID0 0x08A proxy")
-      tss3_08a_host_enabled = True
-      self.tss3_08a_proxy = ToyotaTss3SignedId0Proxy(self._send_can)
-    elif enable_in_car_params(self.CP, requested=tss3_08a_transparent_requested, is_release=is_release):
-      cloudlog.warning("enabling development-only exact-F33 transparent ID0 0x08A proxy")
-      tss3_08a_host_enabled = True
-      self.tss3_08a_proxy = ToyotaTss3Id0Proxy(self._send_can)
-
-    if tss3_08a_host_enabled:
-      # get_car() constructs the interfaces before card applies development-only
-      # safety flags. Rebuild CarState/CANParser and RadarInterface now so exact
-      # F33 follows the physical split: state bus0, FRC source bus2, radar bus1.
-      refresh_can_parsers(self.CI, self.CP)
-      self.RI = interfaces[self.CI.CP.carFingerprint].RadarInterface(self.CP)
+    if request_plane_enabled(self.CP):
+      cloudlog.warning("enabling exact-F33 authenticated 0x08A request proxy")
+      self.tss3_08a_proxy = ToyotaTss3RequestProxy(self._send_can)
 
     if self.CP.secOcRequired:
       # Copy user key if available
@@ -270,6 +250,12 @@ class Car:
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
+      if self.tss3_08a_proxy is not None and hasattr(self.tss3_08a_proxy, "set_control"):
+        # The request-plane proxy consumes the same rate-limited steering target
+        # CarController reports to the rest of openpilot. Incoming 0x08A cadence
+        # drives actual request transmission; this only updates the desired ID11
+        # pinion angle and normal controlsd-owned latActive state.
+        self.tss3_08a_proxy.set_control(CC.latActive, self.last_actuators_output.steeringAngleDeg)
       self._send_can(can_sends, valid=CS.canValid)
 
       self.CC_prev = CC

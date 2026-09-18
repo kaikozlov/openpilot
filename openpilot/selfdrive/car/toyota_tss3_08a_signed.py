@@ -1,13 +1,15 @@
-"""Development-only exact-F33 signed ID0 0x08A replacement.
+"""Exact-F33 authenticated 0x08A request-plane replacement.
 
-This is phase 1 after the transparent exact-frame proxy. It remains Park/stationary
-and Target Lateral ID 0 only. The FRC stays alive upstream as the authoritative
-application/freshness-phase oracle; Panda blocks its 0x08A only after a future
-signed replacement is ready.
+The FRC remains the source of truth for the complete TSS3 request envelope. Once
+freshness is qualified and Panda has atomically handed 0x08A forwarding to the
+host, every native frame is preserved byte-for-byte except for the LTA/LCA
+(ID11) lateral pinion-angle field while openpilot lateral control is active.
+Non-ID11 requests and inactive ID11 requests are exact transparent clones.
 
-The host never learns the TSK key. It asks the already-qualified EPS RAM resident
-to run ICU-S command 5 / selector 4 over the ordinary P5 domain and receives only
-CMAC[0:4] on 0x7A9.
+The host never learns the TSK key. It asks the EPS RAM resident to run ICU-S
+command 5 / selector 4 over the ordinary 0x008A SecOC domain and receives only
+CMAC[0:4]. Each modified frame is signed for the exact native generation that
+was observed; the host does not predict future 0x08A application contents.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from typing import Literal
 
 from opendbc.car import structs
 from opendbc.car.can_definitions import CanData
+from opendbc.car.toyota.tss3 import target_angle_deg_to_raw
 from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
 from openpilot.selfdrive.car.toyota_tss3_08a import (
   ADMIN_ADDR,
@@ -48,20 +51,21 @@ ORACLE_PERIOD_S = 0.025
 ORACLE_TIMEOUT_S = 0.12
 ORACLE_MAX_INFLIGHT = 4
 ORACLE_FAILURE_COOLDOWN_S = 2.0
-SIGNED_LOOKAHEAD = 2
 MAX_NATIVE_HISTORY = 256
 MAX_NATIVE_GAP = 8
 
-GearShifter = structs.CarState.GearShifter
+TSS3_LTA_LCA_ID = 11
+LATERAL_ANGLE_OFFSET = 18
+LATERAL_ANGLE_SIZE = 2
+
 JobKind = Literal["recover", "verify", "sign"]
 
 
-def enable_signed_in_car_params(CP: structs.CarParams, *, requested: bool, is_release: bool) -> bool:
-  enabled = requested and not is_release and CP.carFingerprint == CAR.TOYOTA_CAMRY_TSS3 and not CP.passive
-  if enabled:
-    CP.safetyConfigs[0].safetyParam |= (ToyotaSafetyFlags.TSS3_08A_HOST.value |
-                                        ToyotaSafetyFlags.TSS3_08A_SIGNED.value)
-  return enabled
+def request_plane_enabled(CP: structs.CarParams) -> bool:
+  """Return whether CarParams selected the relay-correct F33 request plane."""
+  return (CP.carFingerprint == CAR.TOYOTA_CAMRY_TSS3 and not CP.passive and bool(CP.safetyConfigs) and
+          bool(CP.safetyConfigs[0].safetyParam & ToyotaSafetyFlags.TSS3_08A_HOST.value) and
+          bool(CP.safetyConfigs[0].safetyParam & ToyotaSafetyFlags.TSS3_08A_SIGNED.value))
 
 
 def shift_reset_epoch(trip_counter: int, reset_counter: int, delta: int) -> tuple[int, int]:
@@ -135,6 +139,19 @@ def build_signed_frame(application: bytes, reset_counter: int, message_counter: 
   return application + trailer
 
 
+def build_id11_application(native_application: bytes, target_angle_raw: int) -> bytes:
+  """Change only the ID11 pinion-angle request inside a native 0x08A application."""
+  if len(native_application) != 28:
+    raise ValueError("native 0x08A application must be 28 bytes")
+  if (native_application[21] & 0x3F) != TSS3_LTA_LCA_ID:
+    raise ValueError("selective lateral substitution requires native ID11")
+  if not -(1 << 15) <= target_angle_raw < (1 << 15):
+    raise ValueError("target angle must fit signed16")
+  application = bytearray(native_application)
+  application[LATERAL_ANGLE_OFFSET:LATERAL_ANGLE_OFFSET + LATERAL_ANGLE_SIZE] = target_angle_raw.to_bytes(2, "big", signed=True)
+  return bytes(application)
+
+
 @dataclass(frozen=True)
 class NativeEvent:
   index: int
@@ -145,6 +162,10 @@ class NativeEvent:
   reset_counter: int
   message_low2: int
   mac28_hex: str
+
+  @property
+  def target_id(self) -> int:
+    return self.application[21] & 0x3F
 
 
 class NativeFreshnessTracker:
@@ -188,18 +209,18 @@ class OracleJob:
   trip_counter: int | None = None
   reset_counter: int | None = None
   message_counter: int | None = None
-  b26: int | None = None
   sent_at: float | None = None
 
-  @property
-  def target_key(self) -> tuple[int, int, int, int] | None:
-    if None in (self.trip_counter, self.reset_counter, self.message_counter, self.b26):
-      return None
-    return (int(self.trip_counter), int(self.reset_counter), int(self.message_counter), int(self.b26))
+
+@dataclass
+class PendingOutput:
+  native_frame: bytes
+  ready_frame: bytes | None
+  modified: bool
 
 
-class ToyotaTss3SignedId0Proxy:
-  """Stationary ID0 signer with two-generation lookahead and fail-open ownership."""
+class ToyotaTss3RequestProxy:
+  """Source-ordered exact-F33 0x08A proxy with selective ID11 angle substitution."""
 
   def __init__(self, send_can: SendCan, *, start_thread: bool = True,
                monotonic=time.monotonic, sleep=time.sleep):
@@ -211,7 +232,10 @@ class ToyotaTss3SignedId0Proxy:
     self._stop = False
     self._thread: threading.Thread | None = None
 
-    self.stationary_park = False
+    self.can_valid = False
+    self.control_lat_active = False
+    self.control_target_angle_raw = 0
+
     self.sync_trip: int | None = None
     self.sync_reset: int | None = None
     self.native_index = 0
@@ -232,17 +256,20 @@ class ToyotaTss3SignedId0Proxy:
     self.next_oracle_seq = 1
     self.next_oracle_send_at = 0.0
     self.oracle_failures = 0
-    self.pending_targets: set[tuple[int, int, int, int]] = set()
-    self.signed_cache: dict[tuple[int, int, int, int], bytes] = {}
 
     self.active = False
     self.arm_pending = False
     self.arm_admin_data: bytes | None = None
     self.arm_accepted = False
+    self.arm_clone_index: int | None = None
+    self.arm_clone_frame: bytes | None = None
+
+    self.pending_outputs: dict[int, PendingOutput] = {}
+    self.next_output_index: int | None = None
 
     self.arm_count = 0
-    self.signed_tx_count = 0
-    self.transparent_fallback_count = 0
+    self.modified_tx_count = 0
+    self.transparent_tx_count = 0
     self.release_count = 0
     self.oracle_response_count = 0
     self.oracle_timeout_count = 0
@@ -253,22 +280,47 @@ class ToyotaTss3SignedId0Proxy:
       self._thread = threading.Thread(target=self._oracle_sender_loop, name="tss3_08a_oracle", daemon=True)
       self._thread.start()
 
-  @staticmethod
-  def _stationary_park(CS: structs.CarState) -> bool:
-    return bool(CS.canValid and CS.standstill and CS.gearShifter == GearShifter.park)
+  def set_control(self, lat_active: bool, target_angle_deg: float) -> None:
+    with self._cv:
+      self.control_lat_active = bool(lat_active)
+      self.control_target_angle_raw = target_angle_deg_to_raw(float(target_angle_deg))
 
-  def _clear_signed_state_locked(self) -> None:
+  def _clear_oracle_state_locked(self) -> None:
     self.state_generation += 1
     self.jobs.clear()
-    self.pending_targets.clear()
-    self.signed_cache.clear()
     self.qualified = False
     self.recovery_active = False
     self.recovery_sample_index = None
     self.recovery_remaining = 0
     self._cv.notify_all()
 
-  def _release_locked(self, *, send_admin: bool = True) -> None:
+  def _flush_outputs_locked(self) -> None:
+    if self.next_output_index is None:
+      return
+    out: list[CanData] = []
+    while True:
+      slot = self.pending_outputs.get(self.next_output_index)
+      if slot is None or slot.ready_frame is None:
+        break
+      out.append(CanData(NATIVE_08A_ADDR, slot.ready_frame, DOWNSTREAM_BUS))
+      if slot.modified:
+        self.modified_tx_count += 1
+      else:
+        self.transparent_tx_count += 1
+      del self.pending_outputs[self.next_output_index]
+      self.next_output_index += 1
+    if out:
+      self._send_can(out)
+
+  def _restore_pending_native_locked(self) -> None:
+    for slot in self.pending_outputs.values():
+      slot.ready_frame = slot.native_frame
+      slot.modified = False
+    self._flush_outputs_locked()
+
+  def _release_locked(self, *, restore_pending: bool = True, send_admin: bool = True) -> None:
+    if restore_pending and self.active:
+      self._restore_pending_native_locked()
     if send_admin and (self.active or self.arm_pending):
       self._send_can([make_admin(False)])
       self.release_count += 1
@@ -276,10 +328,14 @@ class ToyotaTss3SignedId0Proxy:
     self.arm_pending = False
     self.arm_admin_data = None
     self.arm_accepted = False
+    self.arm_clone_index = None
+    self.arm_clone_frame = None
+    self.pending_outputs.clear()
+    self.next_output_index = None
 
   def _fail_open_locked(self) -> None:
     self._release_locked()
-    self._clear_signed_state_locked()
+    self._clear_oracle_state_locked()
     self.tracker = NativeFreshnessTracker()
     self.stable_native_frames = 0
     self.last_native_b26 = None
@@ -294,7 +350,7 @@ class ToyotaTss3SignedId0Proxy:
   def _start_recovery_locked(self, event: NativeEvent) -> None:
     if self._monotonic() < self.cooldown_until or self.recovery_active:
       return
-    self._clear_signed_state_locked()
+    self._clear_oracle_state_locked()
     self.recovery_active = True
     self.recovery_sample_index = event.index
     self.recovery_remaining = 64
@@ -327,10 +383,8 @@ class ToyotaTss3SignedId0Proxy:
       if not valid:
         return False
     self.tracker = tracker
-    self.state_generation += 1  # cancel remaining recovery candidates
+    self.state_generation += 1
     self.jobs.clear()
-    self.pending_targets.clear()
-    self.signed_cache.clear()
     self.recovery_active = False
     self.recovery_sample_index = None
     self.recovery_remaining = 0
@@ -350,33 +404,8 @@ class ToyotaTss3SignedId0Proxy:
       candidate_message=message_counter,
     ), front=True)
 
-  def _schedule_future_sign_locked(self, event: NativeEvent, message_counter: int) -> None:
-    target_message = message_counter + SIGNED_LOOKAHEAD
-    if target_message > 0xFF:
-      return
-    target_b26 = (event.b26 + SIGNED_LOOKAHEAD) & 0x3F
-    target_key = (event.trip_counter, event.reset_counter, target_message, target_b26)
-    if target_key in self.pending_targets or target_key in self.signed_cache:
-      return
-    application = bytearray(event.application)
-    application[26] = (application[26] & 0xC0) | target_b26
-    app = bytes(application)
-    self.pending_targets.add(target_key)
-    self._queue_job_locked(OracleJob(
-      kind="sign",
-      generation=self.state_generation,
-      domain=build_secoc_domain(app, event.trip_counter, event.reset_counter, target_message),
-      application=app,
-      trip_counter=event.trip_counter,
-      reset_counter=event.reset_counter,
-      message_counter=target_message,
-      b26=target_b26,
-    ))
-
-  def _maybe_arm_locked(self, event: NativeEvent, message_counter: int) -> None:
-    if self.active or self.arm_pending or not self.qualified or self.stable_native_frames < STABLE_NATIVE_FRAMES:
-      return
-    if not self.signed_cache:
+  def _maybe_arm_locked(self) -> None:
+    if self.active or self.arm_pending or not self.qualified or not self.can_valid:
       return
     admin = make_admin(True)
     self._send_can([admin])
@@ -386,8 +415,6 @@ class ToyotaTss3SignedId0Proxy:
 
   def _make_native_event_locked(self, frame: bytes) -> NativeEvent | None:
     if len(frame) != 32 or self.sync_trip is None or self.sync_reset is None:
-      return None
-    if (frame[21] & 0x3F) != 0:
       return None
     fv4 = frame[28] >> 4
     epoch = resolve_epoch(self.sync_trip, self.sync_reset, fv4 & 0x3)
@@ -413,9 +440,37 @@ class ToyotaTss3SignedId0Proxy:
       return
     self.sync_trip, self.sync_reset = trip, reset
 
+  def _queue_active_output_locked(self, event: NativeEvent, message_counter: int) -> None:
+    if self.next_output_index is None:
+      self.next_output_index = event.index
+
+    native = event.frame
+    if not self.control_lat_active or event.target_id != TSS3_LTA_LCA_ID:
+      self.pending_outputs[event.index] = PendingOutput(native, native, False)
+      self._flush_outputs_locked()
+      return
+
+    application = build_id11_application(event.application, self.control_target_angle_raw)
+    if application == event.application:
+      self.pending_outputs[event.index] = PendingOutput(native, native, False)
+      self._flush_outputs_locked()
+      return
+
+    self.pending_outputs[event.index] = PendingOutput(native, None, True)
+    self._queue_job_locked(OracleJob(
+      kind="sign",
+      generation=self.state_generation,
+      domain=build_secoc_domain(application, event.trip_counter, event.reset_counter, message_counter),
+      native_index=event.index,
+      application=application,
+      trip_counter=event.trip_counter,
+      reset_counter=event.reset_counter,
+      message_counter=message_counter,
+    ))
+
   def _observe_native_locked(self, frame: bytes) -> None:
     event = self._make_native_event_locked(frame)
-    if event is None or not self.stationary_park:
+    if event is None or not self.can_valid:
       self._fail_open_locked()
       return
 
@@ -434,29 +489,20 @@ class ToyotaTss3SignedId0Proxy:
     valid, _ = self.tracker.update(event)
     if not valid or self.tracker.message_counter is None:
       self.tracker = NativeFreshnessTracker()
+      self._fail_open_locked()
       self._start_recovery_locked(event)
       return
 
     message_counter = self.tracker.message_counter
 
-    if self.arm_pending or self.active:
-      key = (event.trip_counter, event.reset_counter, message_counter, event.b26)
-      replacement = self.signed_cache.pop(key, None)
-      if replacement is not None:
-        self._send_can([CanData(NATIVE_08A_ADDR, replacement, DOWNSTREAM_BUS)])
-        if self.active:
-          self.signed_tx_count += 1
-      else:
-        # During handoff and any signing miss, offer the exact OEM frame. Safety
-        # drops it while stock owns the path and accepts it once ownership is
-        # active, preserving continuity without predicting the handoff B26.
-        self._send_can([CanData(NATIVE_08A_ADDR, event.frame, DOWNSTREAM_BUS)])
-        if self.active:
-          self.transparent_fallback_count += 1
+    if self.arm_pending:
+      self.arm_clone_index = event.index
+      self.arm_clone_frame = event.frame
+      self._send_can([CanData(NATIVE_08A_ADDR, event.frame, DOWNSTREAM_BUS)])
+    elif self.active:
+      self._queue_active_output_locked(event, message_counter)
 
-    if self.qualified:
-      self._schedule_future_sign_locked(event, message_counter)
-      self._maybe_arm_locked(event, message_counter)
+    self._maybe_arm_locked()
 
   def _observe_tx_echo_locked(self, address: int, data: bytes, src: int) -> None:
     if address == ADMIN_ADDR and self.arm_pending and data == self.arm_admin_data:
@@ -468,15 +514,20 @@ class ToyotaTss3SignedId0Proxy:
         self.arm_accepted = False
       return
 
-    if address == NATIVE_08A_ADDR:
-      if src == DOWNSTREAM_BUS + PANDA_RETURNED_OFFSET and self.arm_pending and self.arm_accepted:
-        self.active = True
-        self.arm_pending = False
-        self.arm_admin_data = None
-        self.arm_accepted = False
-        self.arm_count += 1
-      elif src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET and self.active:
-        self._fail_open_locked()
+    if address != NATIVE_08A_ADDR:
+      return
+
+    if src == DOWNSTREAM_BUS + PANDA_RETURNED_OFFSET and self.arm_pending and self.arm_accepted and data == self.arm_clone_frame:
+      self.active = True
+      self.arm_pending = False
+      self.arm_admin_data = None
+      self.arm_accepted = False
+      self.next_output_index = (self.arm_clone_index + 1) if self.arm_clone_index is not None else None
+      self.arm_clone_index = None
+      self.arm_clone_frame = None
+      self.arm_count += 1
+    elif src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET and self.active:
+      self._fail_open_locked()
 
   def _observe_oracle_response_locked(self, data: bytes) -> None:
     if len(data) != 8 or data[0] != 0x07 or data[1] != ORACLE_PRIVATE_SID:
@@ -486,7 +537,6 @@ class ToyotaTss3SignedId0Proxy:
     if job is None:
       return
     self.oracle_response_count += 1
-    self.oracle_failures = 0
     if job.generation != self.state_generation:
       return
     if status != 0:
@@ -495,6 +545,7 @@ class ToyotaTss3SignedId0Proxy:
 
     cmac4 = data[4:8]
     mac28 = mac28_hex_from_cmac4(cmac4)
+    self.oracle_failures = 0
     if job.kind == "recover":
       self.recovery_remaining -= 1
       if mac28 == job.expected_mac28 and job.native_index is not None and job.candidate_message is not None:
@@ -506,27 +557,26 @@ class ToyotaTss3SignedId0Proxy:
     elif job.kind == "verify":
       if mac28 == job.expected_mac28:
         self.qualified = True
-        if self.tracker.event is not None and self.tracker.message_counter is not None:
-          self._schedule_future_sign_locked(self.tracker.event, self.tracker.message_counter)
+        self._maybe_arm_locked()
       elif self.tracker.event is not None:
         latest = self.tracker.event
         self.tracker = NativeFreshnessTracker()
         self._start_recovery_locked(latest)
     elif job.kind == "sign":
-      key = job.target_key
-      if key is not None:
-        self.pending_targets.discard(key)
-        if job.application is not None and job.reset_counter is not None and job.message_counter is not None:
-          self.signed_cache[key] = build_signed_frame(
-            job.application, job.reset_counter, job.message_counter, cmac4,
-          )
-          if self.tracker.event is not None and self.tracker.message_counter is not None:
-            self._maybe_arm_locked(self.tracker.event, self.tracker.message_counter)
+      if None in (job.native_index, job.application, job.reset_counter, job.message_counter):
+        self._fail_open_locked()
+        return
+      slot = self.pending_outputs.get(int(job.native_index))
+      if slot is None:
+        return
+      slot.ready_frame = build_signed_frame(job.application, int(job.reset_counter), int(job.message_counter), cmac4)
+      self._flush_outputs_locked()
 
   def _job_failure_locked(self, job: OracleJob) -> None:
-    key = job.target_key
-    if key is not None:
-      self.pending_targets.discard(key)
+    if job.kind == "sign":
+      self.oracle_timeout_count += 1
+      self._fail_open_locked()
+      return
     if job.kind == "recover" and self.recovery_remaining > 0:
       self.recovery_remaining -= 1
     self.oracle_failures += 1
@@ -534,9 +584,7 @@ class ToyotaTss3SignedId0Proxy:
       self.oracle_timeout_count += self.oracle_failures
       self.oracle_failures = 0
       self.cooldown_until = self._monotonic() + ORACLE_FAILURE_COOLDOWN_S
-      self._release_locked()
-      self._clear_signed_state_locked()
-      self.tracker = NativeFreshnessTracker()
+      self._fail_open_locked()
 
   def _alloc_seq_locked(self) -> int:
     for _ in range(255):
@@ -582,12 +630,13 @@ class ToyotaTss3SignedId0Proxy:
       ff, cfs = build_oracle_transport(seq, job.domain)
       self._send_can([ff])
       self._sleep(ORACLE_PRE_CF_DELAY_S)
+      # Preserve the live-qualified transport shape: five CFs in one Panda batch.
       self._send_can(cfs)
 
   def update(self, can_list: list, CS: structs.CarState) -> None:
     with self._cv:
-      self.stationary_park = self._stationary_park(CS)
-      if not self.stationary_park and (self.active or self.arm_pending or self.qualified or self.recovery_active):
+      self.can_valid = bool(CS.canValid)
+      if not self.can_valid and (self.active or self.arm_pending or self.qualified or self.recovery_active):
         self._fail_open_locked()
 
       for _, packets in can_list:
@@ -611,3 +660,7 @@ class ToyotaTss3SignedId0Proxy:
       self._cv.notify_all()
     if self._thread is not None:
       self._thread.join(timeout=1.0)
+
+
+# Compatibility name for the development Param and older analysis imports.
+ToyotaTss3SignedId0Proxy = ToyotaTss3RequestProxy
