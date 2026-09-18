@@ -77,7 +77,7 @@ class ToyotaTss3Id0Proxy:
 
   @staticmethod
   def _stationary_park(CS: structs.CarState) -> bool:
-    return bool(CS.standstill and CS.gearShifter == GearShifter.park)
+    return bool(CS.canValid and CS.standstill and CS.gearShifter == GearShifter.park)
 
   def _release(self) -> None:
     if self.active:

@@ -49,7 +49,7 @@ def batch(*frames: tuple[int, bytes, int]):
 
 
 def car_state(*, standstill: bool = True, gear=GearShifter.park):
-  return SimpleNamespace(standstill=standstill, gearShifter=gear)
+  return SimpleNamespace(canValid=True, standstill=standstill, gearShifter=gear)
 
 
 class Collector:
@@ -134,6 +134,19 @@ def test_motion_releases_and_does_not_proxy():
   prime(proxy, collector)
   confirm_arm(proxy, collector)
   proxy.update(batch((NATIVE_08A_ADDR, native_08a(STABLE_NATIVE_FRAMES), 2)), car_state(standstill=False))
+  assert not proxy.active
+  assert proxy.proxy_count == 0
+  assert collector.flat[-1] == make_admin(False)
+
+
+def test_invalid_carstate_releases_and_does_not_proxy():
+  collector = Collector()
+  proxy = ToyotaTss3Id0Proxy(collector)
+  prime(proxy, collector)
+  confirm_arm(proxy, collector)
+  invalid = car_state()
+  invalid.canValid = False
+  proxy.update(batch((NATIVE_08A_ADDR, native_08a(STABLE_NATIVE_FRAMES), 2)), invalid)
   assert not proxy.active
   assert proxy.proxy_count == 0
   assert collector.flat[-1] == make_admin(False)
