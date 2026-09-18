@@ -108,9 +108,9 @@ def test_freshness_tracker_progression_and_epoch_seed():
   assert ok and not epoch_changed and tracker.message_counter == 9
   ok, epoch_changed = tracker.update(event(3, 13, 11))
   assert ok and not epoch_changed and tracker.message_counter == 11
-  # A newer reset epoch seeds the full message counter from transmitted low2.
-  ok, epoch_changed = tracker.update(event(4, 14, 2, reset=1110))
-  assert ok and epoch_changed and tracker.message_counter == 2
+  # RESET_CNT advancement is normal freshness progression; message8 continues.
+  ok, reset_changed = tracker.update(event(4, 14, 12, reset=1110))
+  assert ok and reset_changed and tracker.message_counter == 12
 
 
 def test_recovery_verify_lookahead_arm_and_signed_tx():

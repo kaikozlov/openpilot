@@ -61,11 +61,9 @@ class ToyotaTss3Id0Proxy:
     self.sync_valid = False
     self.trip_counter: int | None = None
     self.reset_counter: int | None = None
-    self.active_reset_counter: int | None = None
     self.last_b26: int | None = None
     self.stable_native_frames = 0
     self.arm_pending = False
-    self.arm_pending_reset: int | None = None
     self.arm_accepted = False
     self.arm_admin_data: bytes | None = None
     self.arm_count = 0
@@ -82,9 +80,7 @@ class ToyotaTss3Id0Proxy:
       self._send_can([make_admin(False)])
       self.release_count += 1
     self.active = False
-    self.active_reset_counter = None
     self.arm_pending = False
-    self.arm_pending_reset = None
     self.arm_accepted = False
     self.arm_admin_data = None
     self.stable_native_frames = 0
@@ -95,20 +91,10 @@ class ToyotaTss3Id0Proxy:
       trip, reset = decode_sync(data)
     except ValueError:
       return
-    changed = self.sync_valid and (trip != self.trip_counter or reset != self.reset_counter)
+    # RESET_CNT advances normally (~10 Hz). Ownership is continuous across
+    # these increments; exact source clones already carry the matching FV4/MAC.
     self.trip_counter, self.reset_counter = trip, reset
     self.sync_valid = True
-    if changed:
-      # Panda safety independently releases ownership on RESET_CNT change. Mirror
-      # that state locally; stock 0x08A forwarding resumes while we re-qualify.
-      self.active = False
-      self.active_reset_counter = None
-      self.arm_pending = False
-      self.arm_pending_reset = None
-      self.arm_accepted = False
-      self.arm_admin_data = None
-      self.stable_native_frames = 0
-      self.last_b26 = None
 
   def _observe_native(self, data: bytes, CS: structs.CarState) -> None:
     if len(data) != 32 or not self.sync_valid:
@@ -147,22 +133,15 @@ class ToyotaTss3Id0Proxy:
       admin = make_admin(True)
       self._send_can([admin])
       self.arm_pending = True
-      self.arm_pending_reset = self.reset_counter
       self.arm_accepted = False
       self.arm_admin_data = admin.dat
 
   def _observe_tx_echo(self, address: int, data: bytes, src: int) -> None:
     if address == ADMIN_ADDR and self.arm_pending and data == self.arm_admin_data:
       if src == ADMIN_BUS + PANDA_RETURNED_OFFSET:
-        if self.arm_pending_reset != self.reset_counter:
-          self._send_can([make_admin(False)])
-          self.release_count += 1
-          self._release()
-        else:
-          self.arm_accepted = True
+        self.arm_accepted = True
       elif src == ADMIN_BUS + PANDA_REJECTED_OFFSET:
         self.arm_pending = False
-        self.arm_pending_reset = None
         self.arm_accepted = False
         self.arm_admin_data = None
         self.stable_native_frames = 0
@@ -175,7 +154,6 @@ class ToyotaTss3Id0Proxy:
         # accepted our exact replacement. Ownership is now established.
         self.active = True
         self.arm_pending = False
-        self.arm_pending_reset = None
         self.arm_accepted = False
         self.arm_admin_data = None
         self.arm_count += 1

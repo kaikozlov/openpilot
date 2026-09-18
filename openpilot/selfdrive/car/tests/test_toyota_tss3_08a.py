@@ -175,16 +175,18 @@ def test_non_park_releases_and_does_not_proxy():
   assert collector.flat[-1] == make_admin(False)
 
 
-def test_reset_change_mirrors_safety_release_and_requalifies():
+def test_reset_change_keeps_transparent_ownership():
   collector = Collector()
   proxy = ToyotaTss3Id0Proxy(collector)
   prime(proxy, collector)
   confirm_arm(proxy, collector)
+  before = proxy.proxy_count
   proxy.update(batch((SECOC_SYNC_ADDR, sync_frame(0x12346), 0)), car_state())
-  assert not proxy.active
-  assert proxy.stable_native_frames == 0
-  assert proxy.last_b26 is None
-  # Safety independently releases ownership on the reset-counter change.
+  assert proxy.active
+  frame = native_08a(((proxy.last_b26 or 0) + 1) & 0x3F, reset=0x12346)
+  proxy.update(batch((NATIVE_08A_ADDR, frame, 2)), car_state())
+  assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, frame, DOWNSTREAM_BUS)
+  assert proxy.proxy_count == before + 1
 
 
 def test_pending_clone_is_offered_before_ownership_confirmation():

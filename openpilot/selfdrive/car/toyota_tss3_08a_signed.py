@@ -160,23 +160,20 @@ class NativeFreshnessTracker:
     return True
 
   def update(self, event: NativeEvent) -> tuple[bool, bool]:
-    """Return (valid, epoch_changed)."""
+    """Return (valid, reset_counter_changed)."""
     if self.event is None or self.message_counter is None:
       return False, False
     prev = self.event
-    epoch_changed = (event.trip_counter, event.reset_counter) != (prev.trip_counter, prev.reset_counter)
-    if epoch_changed:
-      message = event.message_low2
-    else:
-      delta = (event.b26 - prev.b26) & 0x3F
-      if not 1 <= delta <= MAX_NATIVE_GAP:
-        return False, False
-      message = self.message_counter + delta
-      if message > 0xFF or (message & 0x3) != event.message_low2:
-        return False, False
+    reset_changed = (event.trip_counter, event.reset_counter) != (prev.trip_counter, prev.reset_counter)
+    delta = (event.b26 - prev.b26) & 0x3F
+    if not 1 <= delta <= MAX_NATIVE_GAP:
+      return False, False
+    message = (self.message_counter + delta) & 0xFF
+    if (message & 0x3) != event.message_low2:
+      return False, False
     self.event = event
     self.message_counter = message
-    return True, epoch_changed
+    return True, reset_changed
 
 
 @dataclass
@@ -240,7 +237,6 @@ class ToyotaTss3SignedId0Proxy:
 
     self.active = False
     self.arm_pending = False
-    self.arm_pending_reset: int | None = None
     self.arm_admin_data: bytes | None = None
     self.arm_accepted = False
 
@@ -278,7 +274,6 @@ class ToyotaTss3SignedId0Proxy:
       self.release_count += 1
     self.active = False
     self.arm_pending = False
-    self.arm_pending_reset = None
     self.arm_admin_data = None
     self.arm_accepted = False
 
@@ -386,7 +381,6 @@ class ToyotaTss3SignedId0Proxy:
     admin = make_admin(True)
     self._send_can([admin])
     self.arm_pending = True
-    self.arm_pending_reset = event.reset_counter
     self.arm_admin_data = admin.dat
     self.arm_accepted = False
 
@@ -417,11 +411,7 @@ class ToyotaTss3SignedId0Proxy:
       trip, reset = decode_sync(data)
     except ValueError:
       return
-    changed = self.sync_trip is not None and (trip, reset) != (self.sync_trip, self.sync_reset)
     self.sync_trip, self.sync_reset = trip, reset
-    if changed and (self.active or self.arm_pending):
-      # Panda safety independently drops ownership on reset-counter changes.
-      self._release_locked(send_admin=False)
 
   def _observe_native_locked(self, frame: bytes) -> None:
     event = self._make_native_event_locked(frame)
@@ -441,19 +431,13 @@ class ToyotaTss3SignedId0Proxy:
         self._start_recovery_locked(event)
       return
 
-    prev_epoch = (self.tracker.event.trip_counter, self.tracker.event.reset_counter)
-    valid, epoch_changed = self.tracker.update(event)
+    valid, _ = self.tracker.update(event)
     if not valid or self.tracker.message_counter is None:
       self.tracker = NativeFreshnessTracker()
       self._start_recovery_locked(event)
       return
 
     message_counter = self.tracker.message_counter
-    if epoch_changed or (event.trip_counter, event.reset_counter) != prev_epoch:
-      self._release_locked(send_admin=False)
-      self._clear_signed_state_locked()
-      self._queue_verify_locked(event, message_counter)
-      return
 
     if self.arm_pending or self.active:
       key = (event.trip_counter, event.reset_counter, message_counter, event.b26)
@@ -477,16 +461,9 @@ class ToyotaTss3SignedId0Proxy:
   def _observe_tx_echo_locked(self, address: int, data: bytes, src: int) -> None:
     if address == ADMIN_ADDR and self.arm_pending and data == self.arm_admin_data:
       if src == ADMIN_BUS + PANDA_RETURNED_OFFSET:
-        tracker_reset = self.tracker.event.reset_counter if self.tracker.event is not None else None
-        if self.arm_pending_reset != tracker_reset:
-          self._send_can([make_admin(False)])
-          self.release_count += 1
-          self._release_locked(send_admin=False)
-        else:
-          self.arm_accepted = True
+        self.arm_accepted = True
       elif src == ADMIN_BUS + PANDA_REJECTED_OFFSET:
         self.arm_pending = False
-        self.arm_pending_reset = None
         self.arm_admin_data = None
         self.arm_accepted = False
       return
@@ -495,7 +472,6 @@ class ToyotaTss3SignedId0Proxy:
       if src == DOWNSTREAM_BUS + PANDA_RETURNED_OFFSET and self.arm_pending and self.arm_accepted:
         self.active = True
         self.arm_pending = False
-        self.arm_pending_reset = None
         self.arm_admin_data = None
         self.arm_accepted = False
         self.arm_count += 1
