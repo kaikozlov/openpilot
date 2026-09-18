@@ -74,7 +74,12 @@ def shift_reset_epoch(trip_counter: int, reset_counter: int, delta: int) -> tupl
 
 
 def resolve_epoch(sync_trip: int, sync_reset: int, reset_low2: int) -> tuple[int, int] | None:
-  """Resolve the nearest ordinary-P5 reset epoch compatible with transmitted FV4."""
+  """Resolve native FV4 against nearby 0x00F state without assuming publication order.
+
+  0x00F and 0x08A are asynchronous. Around a normal reset transition either
+  carrier can be one publication ahead, so the native frame's reset-low2 is the
+  per-generation authority and 0x00F supplies only the nearby full-counter epoch.
+  """
   for delta in (0, -1, 1, -2, 2):
     trip, reset = shift_reset_epoch(sync_trip, sync_reset, delta)
     if (reset & 0x3) == reset_low2:

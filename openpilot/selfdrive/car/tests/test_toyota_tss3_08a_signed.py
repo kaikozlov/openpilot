@@ -187,6 +187,54 @@ def test_active_non_id11_and_inactive_id11_are_exact_clones():
   assert worker.transparent_tx_count == 2
 
 
+def test_sync_ahead_of_native_fv4_signs_the_native_epoch_without_releasing_ownership():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  seq = qualify(worker, collector)
+  state = cs()
+  worker.set_control(True, 1.0)
+  assert worker.active
+
+  old_reset = 1109
+  new_reset = old_reset + 1
+  # Reproduce the live race: 0x00F has already advanced, but the next native
+  # 0x08A still carries the prior reset-low2/FV4. resolve_epoch() must bind this
+  # generation to old_reset and keep ownership continuous.
+  worker.update(batch((SECOC_SYNC_ADDR, sync_frame(reset=new_reset), 0)), state)
+  old_epoch_source = native_frame(9, 10, reset=old_reset, target_id=11, angle_raw=100, semantic=0x59)
+  worker.update(batch((NATIVE_08A_ADDR, old_epoch_source, 2)), state)
+  assert worker.active
+  sign_old = worker.jobs.popleft()
+  assert sign_old.kind == "sign"
+  assert sign_old.reset_counter == old_reset
+  assert sign_old.message_counter == 10
+  assert sign_old.domain == build_secoc_domain(sign_old.application, 620, old_reset, 10)
+
+  cmac_old = bytes.fromhex("12345678")
+  put_inflight(worker, seq, sign_old)
+  worker.update(batch(response(seq, cmac_old)), state)
+  sent_old = collector.batches[-1][0].dat
+  assert sent_old[28] >> 4 == old_epoch_source[28] >> 4
+  assert worker.active
+  seq += 1
+
+  # The following native generation moves onto the new reset epoch normally;
+  # no ownership release/recovery is needed at the transition.
+  new_epoch_source = native_frame(10, 11, reset=new_reset, target_id=11, angle_raw=100, semantic=0x5A)
+  worker.update(batch((NATIVE_08A_ADDR, new_epoch_source, 2)), state)
+  assert worker.active
+  sign_new = worker.jobs.popleft()
+  assert sign_new.kind == "sign"
+  assert sign_new.reset_counter == new_reset
+  assert sign_new.message_counter == 11
+  cmac_new = bytes.fromhex("23456789")
+  put_inflight(worker, seq, sign_new)
+  worker.update(batch(response(seq, cmac_new)), state)
+  sent_new = collector.batches[-1][0].dat
+  assert sent_new[28] >> 4 == new_epoch_source[28] >> 4
+  assert worker.active
+
+
 def test_active_id11_signs_exact_native_generation_and_preserves_every_other_field():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)

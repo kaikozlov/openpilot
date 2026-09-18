@@ -186,6 +186,32 @@ def test_reset_change_keeps_transparent_ownership():
   assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, frame, DOWNSTREAM_BUS)
   assert proxy.proxy_count == before + 1
 
+def test_sync_can_advance_before_native_fv4_without_releasing_transparent_ownership():
+  collector = Collector()
+  proxy = ToyotaTss3Id0Proxy(collector)
+  old_reset = 0x12345
+  new_reset = old_reset + 1
+  prime(proxy, collector, reset=old_reset)
+  confirm_arm(proxy, collector)
+  before = proxy.proxy_count
+
+  # Live reset-boundary ordering: 0x00F publishes N+1 before the next native
+  # 0x08A has stopped carrying N's FV4/reset-low2. An exact native clone must
+  # remain authoritative for that generation; latest 0x00F must not veto it.
+  proxy.update(batch((SECOC_SYNC_ADDR, sync_frame(new_reset), 0)), car_state())
+  assert proxy.active
+  old_epoch_frame = native_08a(((proxy.last_b26 or 0) + 1) & 0x3F, reset=old_reset)
+  proxy.update(batch((NATIVE_08A_ADDR, old_epoch_frame, 2)), car_state())
+  assert proxy.active
+  assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, old_epoch_frame, DOWNSTREAM_BUS)
+  assert proxy.proxy_count == before + 1
+
+  new_epoch_frame = native_08a(((proxy.last_b26 or 0) + 1) & 0x3F, reset=new_reset)
+  proxy.update(batch((NATIVE_08A_ADDR, new_epoch_frame, 2)), car_state())
+  assert proxy.active
+  assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, new_epoch_frame, DOWNSTREAM_BUS)
+  assert proxy.proxy_count == before + 2
+
 
 def test_pending_clone_is_offered_before_ownership_confirmation():
   collector = Collector()
@@ -218,16 +244,17 @@ def test_rejected_proxy_echo_releases():
   assert collector.flat[-1] == make_admin(False)
 
 
-def test_bad_reset_low2_never_arms():
+def test_native_reset_low2_does_not_have_to_equal_latest_sync_to_arm():
   collector = Collector()
   proxy = ToyotaTss3Id0Proxy(collector)
   cs = car_state()
-  reset = 0x12345
-  proxy.update(batch((SECOC_SYNC_ADDR, sync_frame(reset), 0)), cs)
-  for b26 in range(STABLE_NATIVE_FRAMES + 2):
-    proxy.update(batch((NATIVE_08A_ADDR, native_08a(b26, reset=reset + 1), 2)), cs)
-  assert not proxy.active
-  assert proxy.arm_count == 0
+  sync_reset = 0x12346
+  native_reset = sync_reset - 1
+  proxy.update(batch((SECOC_SYNC_ADDR, sync_frame(sync_reset), 0)), cs)
+  for b26 in range(STABLE_NATIVE_FRAMES):
+    proxy.update(batch((NATIVE_08A_ADDR, native_08a(b26, reset=native_reset), 2)), cs)
+  assert proxy.arm_pending
+  assert collector.flat[-1] == make_admin(True)
 
 
 def test_enable_is_exact_car_development_only():

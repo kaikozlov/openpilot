@@ -103,7 +103,10 @@ class ToyotaTss3Id0Proxy:
 
     target_id = data[21] & 0x3F
     b26 = data[26] & 0x3F
-    if target_id != 0 or self.reset_counter is None:
+    # The exact native frame is authoritative at reset boundaries. 0x00F is
+    # required only to establish that freshness sync is present; its latest
+    # reset-low2 must never veto an older-but-legitimate native 0x08A FV4.
+    if target_id != 0:
       self._release()
       return
 
