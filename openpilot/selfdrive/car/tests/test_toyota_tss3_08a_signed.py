@@ -4,6 +4,7 @@ from opendbc.car.can_definitions import CanData
 from openpilot.selfdrive.car.toyota_tss3_08a import ADMIN_ADDR, ADMIN_BUS, NATIVE_08A_ADDR, SECOC_SYNC_ADDR
 from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
 from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
+  ORACLE_BUS,
   ORACLE_RESPONSE_ADDR,
   NativeEvent,
   NativeFreshnessTracker,
@@ -73,7 +74,7 @@ class Collector:
 
 
 def response(seq: int, cmac4: bytes, status: int = 0) -> tuple[int, bytes, int]:
-  return ORACLE_RESPONSE_ADDR, bytes((0x07, 0xC9, seq, status)) + cmac4, 1
+  return ORACLE_RESPONSE_ADDR, bytes((0x07, 0xC9, seq, status)) + cmac4, ORACLE_BUS
 
 
 def put_inflight(worker: ToyotaTss3RequestProxy, seq: int, job):
@@ -125,7 +126,7 @@ def test_known_live_domain_and_trailer_geometry():
 
 def test_known_live_oracle_transport_geometry():
   ff, cfs = build_oracle_transport(1, KNOWN_DOMAIN)
-  assert ff == CanData(0x7A1, bytes.fromhex("1028c9c901008a00"), 1)
+  assert ff == CanData(0x7A1, bytes.fromhex("1028c9c901008a00"), ORACLE_BUS)
   assert [m.dat.hex() for m in cfs] == [
     "2100000080000012",
     "22ffae00ffae7fff",
