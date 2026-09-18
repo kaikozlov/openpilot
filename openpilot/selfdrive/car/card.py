@@ -20,6 +20,7 @@ from opendbc.car.car_helpers import get_car, interfaces
 from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
+from openpilot.selfdrive.car.toyota_tss3_08a import ToyotaTss3Id0Proxy, enable_in_car_params
 
 REPLAY = "REPLAY" in os.environ
 
@@ -67,6 +68,7 @@ class Car:
     self.can_sock = messaging.sub_sock('can', timeout=20)
     self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'])
     self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'radarTracks'])
+    self.sendcan_lock = threading.Lock()
 
     self.can_rcv_cum_timeout_counter = 0
 
@@ -117,6 +119,12 @@ class Car:
       safety_config.safetyModel = structs.CarParams.SafetyModel.noOutput
       self.CP.safetyConfigs = [safety_config]
 
+    self.tss3_08a_proxy = None
+    tss3_08a_requested = self.params.get_bool("ToyotaTss308aId0")
+    if enable_in_car_params(self.CP, requested=tss3_08a_requested, is_release=is_release):
+      cloudlog.warning("enabling development-only exact-F33 ID0 0x08A proxy")
+      self.tss3_08a_proxy = ToyotaTss3Id0Proxy(self._send_can)
+
     if self.CP.secOcRequired:
       # Copy user key if available
       try:
@@ -157,6 +165,10 @@ class Car:
     # card is driven by can recv, expected at 100Hz
     self.rk = Ratekeeper(100, print_delay_threshold=None)
 
+  def _send_can(self, msgs: list[CanData], *, valid: bool = True) -> None:
+    with self.sendcan_lock:
+      self.pm.send('sendcan', can_list_to_can_capnp(msgs, msgtype='sendcan', valid=valid))
+
   def state_update(self) -> tuple[car.CarState, structs.RadarDataT | None]:
     """carState update loop, driven by can"""
 
@@ -165,6 +177,8 @@ class Car:
 
     # Update carState from CAN
     CS = self.CI.update(can_list)
+    if self.tss3_08a_proxy is not None:
+      self.tss3_08a_proxy.update(can_list, CS)
 
     # Update radar tracks from CAN
     RD: structs.RadarDataT | None = self.RI.update(can_list)
@@ -235,7 +249,7 @@ class Car:
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
-      self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
+      self._send_can(can_sends, valid=CS.canValid)
 
       self.CC_prev = CC
 
@@ -267,6 +281,8 @@ class Car:
         self.step()
         self.rk.monitor_time()
     finally:
+      if self.tss3_08a_proxy is not None:
+        self.tss3_08a_proxy.shutdown()
       e.set()
       t.join()
 
