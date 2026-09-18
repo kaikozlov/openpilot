@@ -69,7 +69,7 @@ def prime(proxy: ToyotaTss3Id0Proxy, collector: Collector, *, reset: int = 0x123
   proxy.update(batch((SECOC_SYNC_ADDR, sync_frame(reset), 2)), cs)
   for b26 in range(STABLE_NATIVE_FRAMES):
     proxy.update(batch((NATIVE_08A_ADDR, native_08a(b26, reset=reset), 2)), cs)
-  assert collector.flat[-1] == make_admin(True, STABLE_NATIVE_FRAMES & 0x3F)
+  assert collector.flat[-1] == make_admin(True)
   assert proxy.arm_pending
   assert not proxy.active
 
@@ -78,8 +78,15 @@ def confirm_arm(proxy: ToyotaTss3Id0Proxy, collector: Collector):
   admin = collector.flat[-1]
   assert admin.address == ADMIN_ADDR
   proxy.update(batch((admin.address, admin.dat, admin.src + 0x80)), car_state())
-  assert proxy.active
-  assert not proxy.arm_pending
+  assert proxy.arm_pending and proxy.arm_accepted and not proxy.active
+
+  first_owned_b26 = ((proxy.last_b26 or 0) + 1) & 0x3F
+  frame = native_08a(first_owned_b26, reset=proxy.reset_counter)
+  proxy.update(batch((NATIVE_08A_ADDR, frame, 2)), car_state())
+  assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, frame, DOWNSTREAM_BUS)
+  proxy.update(batch((NATIVE_08A_ADDR, frame, DOWNSTREAM_BUS + 0x80)), car_state())
+  assert proxy.active and not proxy.arm_pending
+  return first_owned_b26
 
 
 def test_sync_decoder():
@@ -87,7 +94,7 @@ def test_sync_decoder():
 
 
 def test_admin_wire_shape():
-  assert make_admin(True, 0x23) == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80123000000"), ADMIN_BUS)
+  assert make_admin(True) == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80100000000"), ADMIN_BUS)
   assert make_admin(False) == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)
 
 
@@ -101,8 +108,7 @@ def test_transparent_id0_handoff_and_proxy():
   proxy.update(batch((NATIVE_08A_ADDR, expected, 2)), car_state())
   assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, expected, DOWNSTREAM_BUS)
   assert collector.flat[-1].dat == expected
-  assert proxy.proxy_count == 1
-  assert proxy.next_b26 == STABLE_NATIVE_FRAMES + 1
+  assert proxy.proxy_count == 2
 
 
 def test_non_id0_releases_without_proxying():
@@ -122,9 +128,11 @@ def test_generation_gap_releases_without_proxying():
   proxy = ToyotaTss3Id0Proxy(collector)
   prime(proxy, collector)
   confirm_arm(proxy, collector)
-  proxy.update(batch((NATIVE_08A_ADDR, native_08a(STABLE_NATIVE_FRAMES + 1), 2)), car_state())
+  frame = native_08a(((proxy.last_b26 or 0) + 2) & 0x3F)
+  proxy.update(batch((NATIVE_08A_ADDR, frame, 2)), car_state())
+  assert proxy.active
+  proxy.update(batch((NATIVE_08A_ADDR, frame, DOWNSTREAM_BUS + 0xC0)), car_state())
   assert not proxy.active
-  assert proxy.proxy_count == 0
   assert collector.flat[-1] == make_admin(False)
 
 
@@ -133,9 +141,10 @@ def test_motion_releases_and_does_not_proxy():
   proxy = ToyotaTss3Id0Proxy(collector)
   prime(proxy, collector)
   confirm_arm(proxy, collector)
-  proxy.update(batch((NATIVE_08A_ADDR, native_08a(STABLE_NATIVE_FRAMES), 2)), car_state(standstill=False))
+  before = proxy.proxy_count
+  proxy.update(batch((NATIVE_08A_ADDR, native_08a((proxy.last_b26 or 0) + 1), 2)), car_state(standstill=False))
   assert not proxy.active
-  assert proxy.proxy_count == 0
+  assert proxy.proxy_count == before
   assert collector.flat[-1] == make_admin(False)
 
 
@@ -144,11 +153,12 @@ def test_invalid_carstate_releases_and_does_not_proxy():
   proxy = ToyotaTss3Id0Proxy(collector)
   prime(proxy, collector)
   confirm_arm(proxy, collector)
+  before = proxy.proxy_count
   invalid = car_state()
   invalid.canValid = False
-  proxy.update(batch((NATIVE_08A_ADDR, native_08a(STABLE_NATIVE_FRAMES), 2)), invalid)
+  proxy.update(batch((NATIVE_08A_ADDR, native_08a((proxy.last_b26 or 0) + 1), 2)), invalid)
   assert not proxy.active
-  assert proxy.proxy_count == 0
+  assert proxy.proxy_count == before
   assert collector.flat[-1] == make_admin(False)
 
 
@@ -157,10 +167,11 @@ def test_non_park_releases_and_does_not_proxy():
   proxy = ToyotaTss3Id0Proxy(collector)
   prime(proxy, collector)
   confirm_arm(proxy, collector)
-  proxy.update(batch((NATIVE_08A_ADDR, native_08a(STABLE_NATIVE_FRAMES), 2)),
+  before = proxy.proxy_count
+  proxy.update(batch((NATIVE_08A_ADDR, native_08a((proxy.last_b26 or 0) + 1), 2)),
                car_state(gear=GearShifter.drive))
   assert not proxy.active
-  assert proxy.proxy_count == 0
+  assert proxy.proxy_count == before
   assert collector.flat[-1] == make_admin(False)
 
 
@@ -173,21 +184,23 @@ def test_reset_change_mirrors_safety_release_and_requalifies():
   assert not proxy.active
   assert proxy.stable_native_frames == 0
   assert proxy.last_b26 is None
-  # Safety releases directly from its 0x00F RX hook, so host does not need a redundant admin release.
-  assert collector.flat[-1] == make_admin(True, STABLE_NATIVE_FRAMES & 0x3F)
+  # Safety independently releases ownership on the reset-counter change.
 
 
-def test_arm_confirmation_after_target_is_fail_open():
+def test_pending_clone_is_offered_before_ownership_confirmation():
   collector = Collector()
   proxy = ToyotaTss3Id0Proxy(collector)
   prime(proxy, collector)
   admin = collector.flat[-1]
-  # The target source generation arrives while arm confirmation is pending.
-  proxy.update(batch((NATIVE_08A_ADDR, native_08a(STABLE_NATIVE_FRAMES), 2)), car_state())
   proxy.update(batch((admin.address, admin.dat, admin.src + 0x80)), car_state())
-  assert not proxy.active
-  assert not proxy.arm_pending
-  assert collector.flat[-1] == make_admin(False)
+  assert proxy.arm_accepted and not proxy.active
+  b26 = ((proxy.last_b26 or 0) + 1) & 0x3F
+  frame = native_08a(b26, reset=proxy.reset_counter)
+  proxy.update(batch((NATIVE_08A_ADDR, frame, 2)), car_state())
+  assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, frame, DOWNSTREAM_BUS)
+  # A pre-ownership rejection is harmless; stock forwarding remains authoritative.
+  proxy.update(batch((NATIVE_08A_ADDR, frame, DOWNSTREAM_BUS + 0xC0)), car_state())
+  assert proxy.arm_pending and not proxy.active
 
 
 def test_rejected_proxy_echo_releases():
@@ -195,9 +208,10 @@ def test_rejected_proxy_echo_releases():
   proxy = ToyotaTss3Id0Proxy(collector)
   prime(proxy, collector)
   confirm_arm(proxy, collector)
-  frame = native_08a(STABLE_NATIVE_FRAMES)
+  frame = native_08a(((proxy.last_b26 or 0) + 1) & 0x3F)
+  before = proxy.proxy_count
   proxy.update(batch((NATIVE_08A_ADDR, frame, 2)), car_state())
-  assert proxy.active and proxy.proxy_count == 1
+  assert proxy.active and proxy.proxy_count == before + 1
   proxy.update(batch((NATIVE_08A_ADDR, frame, DOWNSTREAM_BUS + 0xC0)), car_state())
   assert not proxy.active
   assert proxy.rejected_proxy_count == 1

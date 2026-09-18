@@ -153,19 +153,25 @@ def test_recovery_verify_lookahead_arm_and_signed_tx():
   worker.update(batch(response(5, future_cmac)), state)
   assert (620, 1109, 10, 9) in worker.signed_cache
 
-  # Native b26 8/msg9 advances the tracker. The cached b26 9/msg10 frame is now
-  # exactly next, so host sends the arm admin and waits for Panda TX confirmation.
-  worker.update(batch((NATIVE_08A_ADDR, native_frame(8, 9, semantic=0x58), 2)), state)
-  admin = collector.flat[-1]
-  assert admin.address == ADMIN_ADDR and admin.src == ADMIN_BUS
-  assert admin.dat == bytes.fromhex("07c9a80109000000")
+  # Once a future signed frame exists, host sends a target-free arm request.
+  # Panda chooses the actual handoff generation from its current native state.
+  admin = next(msg for msg in collector.flat if msg.address == ADMIN_ADDR)
+  assert admin.src == ADMIN_BUS
+  assert admin.dat == bytes.fromhex("07c9a80100000000")
   assert worker.arm_pending and not worker.active
   worker.update(batch((ADMIN_ADDR, admin.dat, ADMIN_BUS + 0x80)), state)
+  assert worker.arm_pending and worker.arm_accepted and not worker.active
+
+  # If ownership starts on b26 8/msg9, there is no synthetic cache entry yet;
+  # offer the exact OEM frame, then mark ownership only after its returned TX echo.
+  first_owned = native_frame(8, 9, semantic=0x58)
+  worker.update(batch((NATIVE_08A_ADDR, first_owned, 2)), state)
+  assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, first_owned, 0)
+  worker.update(batch((NATIVE_08A_ADDR, first_owned, 0x80)), state)
   assert worker.active
 
-  # When native b26 9/msg10 arrives, Panda has already suppressed it. The host
-  # publishes the pre-signed frame immediately; its application comes from b26 7
-  # (two generations old) with only B26 advanced to 9.
+  # Native b26 9/msg10 then uses the pre-signed lookahead frame. Its application
+  # comes from b26 7 (two generations old) with only B26 advanced to 9.
   worker.update(batch((NATIVE_08A_ADDR, native_frame(9, 10, semantic=0x59), 2)), state)
   sent = collector.flat[-1]
   assert sent.address == NATIVE_08A_ADDR and sent.src == 0
@@ -175,7 +181,7 @@ def test_recovery_verify_lookahead_arm_and_signed_tx():
   assert worker.signed_tx_count == 1
 
 
-def test_cache_miss_falls_back_exact_once_and_releases():
+def test_cache_miss_falls_back_exact_and_keeps_ownership():
   collector = Collector()
   worker = ToyotaTss3SignedId0Proxy(collector, start_thread=False)
   state = cs()
@@ -191,11 +197,11 @@ def test_cache_miss_falls_back_exact_once_and_releases():
 
   next_frame = native_frame(21, 9, semantic=0x61)
   worker.update(batch((NATIVE_08A_ADDR, next_frame, 2)), state)
-  # First send is exact OEM fallback; second is explicit release admin.
-  assert collector.batches[-2] == [CanData(NATIVE_08A_ADDR, next_frame, 0)]
-  assert collector.batches[-1] == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), 1)]
+  # Missing synthetic content is not a handoff failure: while ownership is
+  # active, preserve continuity with the exact OEM frame and keep signing ahead.
+  assert collector.batches[-1] == [CanData(NATIVE_08A_ADDR, next_frame, 0)]
   assert worker.transparent_fallback_count == 1
-  assert not worker.active and not worker.qualified
+  assert worker.active and worker.qualified
 
 def test_signed_enable_is_exact_car_non_release_and_sets_both_safety_flags():
   safety = SimpleNamespace(safetyParam=0)
