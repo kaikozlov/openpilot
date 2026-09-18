@@ -140,10 +140,11 @@ class Car:
       self.tss3_08a_proxy = ToyotaTss3Id0Proxy(self._send_can)
 
     if tss3_08a_host_enabled:
-      # get_car() constructs the interface before card applies development-only
-      # safety flags. Rebuild only CarState/CANParser now so exact F33 follows
-      # the relay-correct downstream bus0 after the physical CAN0/CAN1 repin.
+      # get_car() constructs the interfaces before card applies development-only
+      # safety flags. Rebuild CarState/CANParser and RadarInterface now so exact
+      # F33 follows the physical split: state bus0, FRC source bus2, radar bus1.
       refresh_can_parsers(self.CI, self.CP)
+      self.RI = interfaces[self.CI.CP.carFingerprint].RadarInterface(self.CP)
 
     if self.CP.secOcRequired:
       # Copy user key if available
