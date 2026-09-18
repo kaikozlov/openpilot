@@ -42,6 +42,12 @@ def obd_callback(params: Params) -> ObdCallback:
   return set_obd_multiplexing
 
 
+def refresh_can_parsers(CI: CarInterfaceBase, CP: structs.CarParams) -> None:
+  """Rebuild only CarState/CAN parsers after a development topology flag changes."""
+  CI.CS = CI.CarState(CP)
+  CI.can_parsers = CI.CS.get_can_parsers(CP)
+
+
 def can_comm_callbacks(logcan: messaging.SubSocket, sendcan: messaging.PubSocket) -> tuple[CanRecvCallable, CanSendCallable]:
   def can_recv(wait_for_one: bool = False) -> list[list[CanData]]:
     """
@@ -123,12 +129,21 @@ class Car:
     self.tss3_08a_proxy = None
     tss3_08a_signed_requested = self.params.get_bool("ToyotaTss308aSignedId0")
     tss3_08a_transparent_requested = self.params.get_bool("ToyotaTss308aId0")
+    tss3_08a_host_enabled = False
     if enable_signed_in_car_params(self.CP, requested=tss3_08a_signed_requested, is_release=is_release):
       cloudlog.warning("enabling development-only exact-F33 signed ID0 0x08A proxy")
+      tss3_08a_host_enabled = True
       self.tss3_08a_proxy = ToyotaTss3SignedId0Proxy(self._send_can)
     elif enable_in_car_params(self.CP, requested=tss3_08a_transparent_requested, is_release=is_release):
       cloudlog.warning("enabling development-only exact-F33 transparent ID0 0x08A proxy")
+      tss3_08a_host_enabled = True
       self.tss3_08a_proxy = ToyotaTss3Id0Proxy(self._send_can)
+
+    if tss3_08a_host_enabled:
+      # get_car() constructs the interface before card applies development-only
+      # safety flags. Rebuild only CarState/CANParser now so exact F33 follows
+      # the relay-correct downstream bus0 after the physical CAN0/CAN1 repin.
+      refresh_can_parsers(self.CI, self.CP)
 
     if self.CP.secOcRequired:
       # Copy user key if available
