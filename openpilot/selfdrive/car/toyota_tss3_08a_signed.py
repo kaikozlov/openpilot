@@ -239,10 +239,9 @@ class ToyotaTss3SignedId0Proxy:
 
     self.active = False
     self.arm_pending = False
-    self.arm_pending_b26: int | None = None
     self.arm_pending_reset: int | None = None
     self.arm_admin_data: bytes | None = None
-    self.arm_missed_target = False
+    self.arm_accepted = False
 
     self.arm_count = 0
     self.signed_tx_count = 0
@@ -278,10 +277,9 @@ class ToyotaTss3SignedId0Proxy:
       self.release_count += 1
     self.active = False
     self.arm_pending = False
-    self.arm_pending_b26 = None
     self.arm_pending_reset = None
     self.arm_admin_data = None
-    self.arm_missed_target = False
+    self.arm_accepted = False
 
   def _fail_open_locked(self) -> None:
     self._release_locked()
@@ -382,20 +380,14 @@ class ToyotaTss3SignedId0Proxy:
   def _maybe_arm_locked(self, event: NativeEvent, message_counter: int) -> None:
     if self.active or self.arm_pending or not self.qualified or self.stable_native_frames < STABLE_NATIVE_FRAMES:
       return
-    next_message = message_counter + 1
-    if next_message > 0xFF:
+    if not self.signed_cache:
       return
-    next_b26 = (event.b26 + 1) & 0x3F
-    next_key = (event.trip_counter, event.reset_counter, next_message, next_b26)
-    if next_key not in self.signed_cache:
-      return
-    admin = make_admin(True, next_b26)
+    admin = make_admin(True)
     self._send_can([admin])
     self.arm_pending = True
-    self.arm_pending_b26 = next_b26
     self.arm_pending_reset = event.reset_counter
     self.arm_admin_data = admin.dat
-    self.arm_missed_target = False
+    self.arm_accepted = False
 
   def _make_native_event_locked(self, frame: bytes) -> NativeEvent | None:
     if len(frame) != 32 or self.sync_trip is None or self.sync_reset is None:
@@ -443,9 +435,6 @@ class ToyotaTss3SignedId0Proxy:
     self.last_native_b26 = event.b26
     self.history.append(event)
 
-    if self.arm_pending and self.arm_pending_b26 == event.b26:
-      self.arm_missed_target = True
-
     if self.tracker.event is None or self.tracker.message_counter is None:
       if self.stable_native_frames >= STABLE_NATIVE_FRAMES:
         self._start_recovery_locked(event)
@@ -465,21 +454,20 @@ class ToyotaTss3SignedId0Proxy:
       self._queue_verify_locked(event, message_counter)
       return
 
-    if self.active:
+    if self.arm_pending or self.active:
       key = (event.trip_counter, event.reset_counter, message_counter, event.b26)
       replacement = self.signed_cache.pop(key, None)
       if replacement is not None:
         self._send_can([CanData(NATIVE_08A_ADDR, replacement, DOWNSTREAM_BUS)])
-        self.signed_tx_count += 1
+        if self.active:
+          self.signed_tx_count += 1
       else:
-        # Preserve continuity if the lookahead queue misses a deadline. The
-        # exact blocked OEM frame is still fresh/authenticated and safety-bounded.
+        # During handoff and any signing miss, offer the exact OEM frame. Safety
+        # drops it while stock owns the path and accepts it once ownership is
+        # active, preserving continuity without predicting the handoff B26.
         self._send_can([CanData(NATIVE_08A_ADDR, event.frame, DOWNSTREAM_BUS)])
-        self.transparent_fallback_count += 1
-        self._release_locked()
-        self._clear_signed_state_locked()
-        self._queue_verify_locked(event, message_counter)
-        return
+        if self.active:
+          self.transparent_fallback_count += 1
 
     if self.qualified:
       self._schedule_future_sign_locked(event, message_counter)
@@ -489,26 +477,29 @@ class ToyotaTss3SignedId0Proxy:
     if address == ADMIN_ADDR and self.arm_pending and data == self.arm_admin_data:
       if src == ADMIN_BUS + PANDA_RETURNED_OFFSET:
         tracker_reset = self.tracker.event.reset_counter if self.tracker.event is not None else None
-        if self.arm_missed_target or self.arm_pending_reset != tracker_reset:
+        if self.arm_pending_reset != tracker_reset:
           self._send_can([make_admin(False)])
           self.release_count += 1
-          self.active = False
+          self._release_locked(send_admin=False)
         else:
-          self.active = True
-          self.arm_count += 1
-        self.arm_pending = False
-        self.arm_pending_b26 = None
-        self.arm_pending_reset = None
-        self.arm_admin_data = None
-        self.arm_missed_target = False
+          self.arm_accepted = True
       elif src == ADMIN_BUS + PANDA_REJECTED_OFFSET:
         self.arm_pending = False
-        self.arm_pending_b26 = None
         self.arm_pending_reset = None
         self.arm_admin_data = None
-        self.arm_missed_target = False
-    elif address == NATIVE_08A_ADDR and src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET:
-      self._fail_open_locked()
+        self.arm_accepted = False
+      return
+
+    if address == NATIVE_08A_ADDR:
+      if src == DOWNSTREAM_BUS + PANDA_RETURNED_OFFSET and self.arm_pending and self.arm_accepted:
+        self.active = True
+        self.arm_pending = False
+        self.arm_pending_reset = None
+        self.arm_admin_data = None
+        self.arm_accepted = False
+        self.arm_count += 1
+      elif src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET and self.active:
+        self._fail_open_locked()
 
   def _observe_oracle_response_locked(self, data: bytes) -> None:
     if len(data) != 8 or data[0] != 0x07 or data[1] != ORACLE_PRIVATE_SID:

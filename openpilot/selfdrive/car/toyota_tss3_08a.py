@@ -37,12 +37,11 @@ def decode_sync(data: bytes) -> tuple[int, int]:
   return trip, reset
 
 
-def make_admin(arm: bool, next_b26: int = 0) -> CanData:
-  if not 0 <= next_b26 <= 0x3F:
-    raise ValueError("B26 generation must be 0..63")
+def make_admin(arm: bool) -> CanData:
   action = 1 if arm else 0
-  b26 = next_b26 if arm else 0
-  return CanData(ADMIN_ADDR, bytes((7, 0xC9, 0xA8, action, b26, 0, 0, 0)), ADMIN_BUS)
+  # Panda chooses the handoff generation atomically from its own current native
+  # B26 state. The host never predicts or encodes a target generation.
+  return CanData(ADMIN_ADDR, bytes((7, 0xC9, 0xA8, action, 0, 0, 0, 0)), ADMIN_BUS)
 
 
 def enable_in_car_params(CP: structs.CarParams, *, requested: bool, is_release: bool) -> bool:
@@ -63,12 +62,10 @@ class ToyotaTss3Id0Proxy:
     self.reset_counter: int | None = None
     self.active_reset_counter: int | None = None
     self.last_b26: int | None = None
-    self.next_b26: int | None = None
     self.stable_native_frames = 0
     self.arm_pending = False
-    self.arm_pending_b26: int | None = None
     self.arm_pending_reset: int | None = None
-    self.arm_missed_target = False
+    self.arm_accepted = False
     self.arm_admin_data: bytes | None = None
     self.arm_count = 0
     self.proxy_count = 0
@@ -85,11 +82,9 @@ class ToyotaTss3Id0Proxy:
       self.release_count += 1
     self.active = False
     self.active_reset_counter = None
-    self.next_b26 = None
     self.arm_pending = False
-    self.arm_pending_b26 = None
     self.arm_pending_reset = None
-    self.arm_missed_target = False
+    self.arm_accepted = False
     self.arm_admin_data = None
     self.stable_native_frames = 0
     self.last_b26 = None
@@ -107,11 +102,9 @@ class ToyotaTss3Id0Proxy:
       # that state locally; stock 0x08A forwarding resumes while we re-qualify.
       self.active = False
       self.active_reset_counter = None
-      self.next_b26 = None
       self.arm_pending = False
-      self.arm_pending_b26 = None
       self.arm_pending_reset = None
-      self.arm_missed_target = False
+      self.arm_accepted = False
       self.arm_admin_data = None
       self.stable_native_frames = 0
       self.last_b26 = None
@@ -133,22 +126,14 @@ class ToyotaTss3Id0Proxy:
       self._release()
       return
 
-    if self.arm_pending and self.arm_pending_b26 == b26:
-      # If the target generation reaches the host before Panda confirms the arm
-      # TX, we cannot know whether that source frame was forwarded or blocked.
-      # Mark this handoff unusable and fail back to stock on confirmation.
-      self.arm_missed_target = True
-
-    if self.active:
-      if self.active_reset_counter != self.reset_counter or self.next_b26 is None or b26 != self.next_b26:
-        self._release()
-        return
-      # This is the exact fresh frame Panda just suppressed upstream. Do not
-      # alter any application/freshness/MAC bit in phase 0.
+    if self.arm_pending or self.active:
+      # Offer an exact clone for every source frame during handoff and ownership.
+      # Safety rejects these while stock forwarding still owns the path, then
+      # accepts the first clone after its atomic arm takes effect.
       self._send_can([CanData(NATIVE_08A_ADDR, data, DOWNSTREAM_BUS)])
-      self.proxy_count += 1
+      if self.active:
+        self.proxy_count += 1
       self.last_b26 = b26
-      self.next_b26 = (b26 + 1) & 0x3F
       return
 
     if self.last_b26 is not None and b26 == ((self.last_b26 + 1) & 0x3F):
@@ -157,48 +142,46 @@ class ToyotaTss3Id0Proxy:
       self.stable_native_frames = 1
     self.last_b26 = b26
 
-    if self.stable_native_frames >= STABLE_NATIVE_FRAMES and not self.arm_pending:
-      next_b26 = (b26 + 1) & 0x3F
-      admin = make_admin(True, next_b26)
+    if self.stable_native_frames >= STABLE_NATIVE_FRAMES:
+      admin = make_admin(True)
       self._send_can([admin])
       self.arm_pending = True
-      self.arm_pending_b26 = next_b26
       self.arm_pending_reset = self.reset_counter
-      self.arm_missed_target = False
+      self.arm_accepted = False
       self.arm_admin_data = admin.dat
 
   def _observe_tx_echo(self, address: int, data: bytes, src: int) -> None:
     if address == ADMIN_ADDR and self.arm_pending and data == self.arm_admin_data:
       if src == ADMIN_BUS + PANDA_RETURNED_OFFSET:
-        if self.arm_missed_target or self.arm_pending_reset != self.reset_counter:
-          # Safety may already be active; explicitly release it rather than
-          # starting from a generation whose forwarding disposition is unknown.
+        if self.arm_pending_reset != self.reset_counter:
           self._send_can([make_admin(False)])
           self.release_count += 1
-          self.active = False
-          self.stable_native_frames = 0
-          self.last_b26 = None
+          self._release()
         else:
-          self.active = True
-          self.active_reset_counter = self.arm_pending_reset
-          self.next_b26 = self.arm_pending_b26
-          self.arm_count += 1
-        self.arm_pending = False
-        self.arm_pending_b26 = None
-        self.arm_pending_reset = None
-        self.arm_missed_target = False
-        self.arm_admin_data = None
+          self.arm_accepted = True
       elif src == ADMIN_BUS + PANDA_REJECTED_OFFSET:
         self.arm_pending = False
-        self.arm_pending_b26 = None
         self.arm_pending_reset = None
-        self.arm_missed_target = False
+        self.arm_accepted = False
         self.arm_admin_data = None
         self.stable_native_frames = 0
         self.last_b26 = None
-    elif address == NATIVE_08A_ADDR and src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET:
-      self.rejected_proxy_count += 1
-      self._release()
+      return
+
+    if address == NATIVE_08A_ADDR:
+      if src == DOWNSTREAM_BUS + PANDA_RETURNED_OFFSET and self.arm_pending and self.arm_accepted:
+        # This is the first proof that Panda both blocked stock forwarding and
+        # accepted our exact replacement. Ownership is now established.
+        self.active = True
+        self.arm_pending = False
+        self.arm_pending_reset = None
+        self.arm_accepted = False
+        self.arm_admin_data = None
+        self.arm_count += 1
+        self.proxy_count += 1
+      elif src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET and self.active:
+        self.rejected_proxy_count += 1
+        self._release()
 
   def update(self, can_list: list, CS: structs.CarState) -> None:
     """Consume the same decoded raw CAN batches passed to CarInterface.update."""
