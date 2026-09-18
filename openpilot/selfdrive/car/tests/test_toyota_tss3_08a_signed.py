@@ -7,11 +7,12 @@ from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
   ORACLE_RESPONSE_ADDR,
   NativeEvent,
   NativeFreshnessTracker,
-  ToyotaTss3SignedId0Proxy,
+  ToyotaTss3RequestProxy,
+  build_id11_application,
   build_oracle_transport,
   build_secoc_domain,
   build_signed_frame,
-  enable_signed_in_car_params,
+  request_plane_enabled,
   resolve_epoch,
 )
 
@@ -33,18 +34,21 @@ def sync_frame(trip: int = 620, reset: int = 1109) -> bytes:
 
 
 def native_frame(b26: int, message: int, *, trip: int = 620, reset: int = 1109,
-                 semantic: int = 0x40, mac28: str = KNOWN_MAC28) -> bytes:
+                 target_id: int = 0, angle_raw: int = 0, semantic: int = 0x40,
+                 mac28: str = KNOWN_MAC28) -> bytes:
   app = bytearray(KNOWN_APP)
-  app[21] = 0
+  app[18:20] = angle_raw.to_bytes(2, "big", signed=True)
+  app[21] = (app[21] & 0xC0) | (target_id & 0x3F)
   app[22] = semantic
-  app[26] = b26 & 0x3F
+  app[26] = (app[26] & 0xC0) | (b26 & 0x3F)
   fv4 = ((message & 0x3) << 2) | (reset & 0x3)
   trailer = bytes.fromhex(f"{fv4:x}{mac28}")
   return bytes(app) + trailer
 
 
-def event(index: int, b26: int, message: int, *, trip: int = 620, reset: int = 1109) -> NativeEvent:
-  frame = native_frame(b26, message, trip=trip, reset=reset)
+def event(index: int, b26: int, message: int, *, trip: int = 620, reset: int = 1109,
+          target_id: int = 0, angle_raw: int = 0) -> NativeEvent:
+  frame = native_frame(b26, message, trip=trip, reset=reset, target_id=target_id, angle_raw=angle_raw)
   return NativeEvent(index, frame, frame[:28], b26, trip, reset, message & 3, KNOWN_MAC28)
 
 
@@ -52,9 +56,8 @@ def batch(*frames: tuple[int, bytes, int]):
   return [(1_000_000_000, list(frames))]
 
 
-def cs():
-  from opendbc.car import structs
-  return SimpleNamespace(canValid=True, standstill=True, gearShifter=structs.CarState.GearShifter.park)
+def cs(*, valid: bool = True):
+  return SimpleNamespace(canValid=valid)
 
 
 class Collector:
@@ -73,8 +76,46 @@ def response(seq: int, cmac4: bytes, status: int = 0) -> tuple[int, bytes, int]:
   return ORACLE_RESPONSE_ADDR, bytes((0x07, 0xC9, seq, status)) + cmac4, 1
 
 
-def put_inflight(worker: ToyotaTss3SignedId0Proxy, seq: int, job):
+def put_inflight(worker: ToyotaTss3RequestProxy, seq: int, job):
   worker.inflight[seq] = job
+
+
+def qualify(worker: ToyotaTss3RequestProxy, collector: Collector, *, next_seq: int = 1) -> int:
+  state = cs()
+  worker.update(batch((SECOC_SYNC_ADDR, sync_frame(), 0)), state)
+  for i in range(8):
+    worker.update(batch((NATIVE_08A_ADDR, native_frame(i, i + 1, semantic=0x50 + i), 2)), state)
+  assert worker.recovery_active
+
+  # The eighth source frame has message8=8 / low2=0. Resolve the full counter
+  # through native MAC equality, then verify the reconstructed current event.
+  for expected_message in (0, 4, 8):
+    job = worker.jobs.popleft()
+    assert job.candidate_message == expected_message
+    put_inflight(worker, next_seq, job)
+    cmac = KNOWN_CMAC4 if expected_message == 8 else bytes.fromhex("aaaaaaaa")
+    worker.update(batch(response(next_seq, cmac)), state)
+    next_seq += 1
+
+  verify = worker.jobs.popleft()
+  assert verify.kind == "verify" and verify.candidate_message == 8
+  put_inflight(worker, next_seq, verify)
+  worker.update(batch(response(next_seq, KNOWN_CMAC4)), state)
+  next_seq += 1
+  assert worker.qualified and worker.arm_pending
+  admin = collector.flat[-1]
+  assert admin == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80100000000"), ADMIN_BUS)
+  worker.update(batch((ADMIN_ADDR, admin.dat, ADMIN_BUS + 0x80)), state)
+  assert worker.arm_accepted
+
+  # Handoff itself is an exact source clone. Panda's returned TX echo is the
+  # ownership acknowledgement; no future-generation prediction is involved.
+  handoff = native_frame(8, 9, semantic=0x58)
+  worker.update(batch((NATIVE_08A_ADDR, handoff, 2)), state)
+  assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, handoff, 0)
+  worker.update(batch((NATIVE_08A_ADDR, handoff, 0x80)), state)
+  assert worker.active and not worker.arm_pending
+  return next_seq
 
 
 def test_known_live_domain_and_trailer_geometry():
@@ -96,130 +137,165 @@ def test_known_live_oracle_transport_geometry():
 
 def test_resolve_epoch_nearest_low2():
   assert resolve_epoch(620, 1109, 1109 & 3) == (620, 1109)
-  assert resolve_epoch(620, 1109, (1108 & 3)) == (620, 1108)
-  assert resolve_epoch(620, 1109, (1110 & 3)) == (620, 1110)
+  assert resolve_epoch(620, 1109, 1108 & 3) == (620, 1108)
+  assert resolve_epoch(620, 1109, 1110 & 3) == (620, 1110)
 
 
-def test_freshness_tracker_progression_and_epoch_seed():
+def test_freshness_tracker_continues_across_reset_progression():
   tracker = NativeFreshnessTracker()
-  e0 = event(1, 10, 8)
-  assert tracker.seed(e0, 8)
-  ok, epoch_changed = tracker.update(event(2, 11, 9))
-  assert ok and not epoch_changed and tracker.message_counter == 9
-  ok, epoch_changed = tracker.update(event(3, 13, 11))
-  assert ok and not epoch_changed and tracker.message_counter == 11
-  # RESET_CNT advancement is normal freshness progression; message8 continues.
+  assert tracker.seed(event(1, 10, 8), 8)
+  ok, reset_changed = tracker.update(event(2, 11, 9))
+  assert ok and not reset_changed and tracker.message_counter == 9
+  ok, reset_changed = tracker.update(event(3, 13, 11))
+  assert ok and not reset_changed and tracker.message_counter == 11
   ok, reset_changed = tracker.update(event(4, 14, 12, reset=1110))
   assert ok and reset_changed and tracker.message_counter == 12
 
 
-def test_recovery_verify_lookahead_arm_and_signed_tx():
+def test_id11_builder_changes_only_pinion_angle():
+  native = native_frame(4, 5, target_id=11, angle_raw=123, semantic=0x77)[:28]
+  modified = build_id11_application(native, -456)
+  assert modified[18:20] == (-456).to_bytes(2, "big", signed=True)
+  assert modified[:18] == native[:18]
+  assert modified[20:] == native[20:]
+
+  non_id11 = native_frame(4, 5, target_id=18)[:28]
+  try:
+    build_id11_application(non_id11, 0)
+  except ValueError:
+    pass
+  else:
+    raise AssertionError("non-ID11 application unexpectedly accepted")
+
+
+def test_active_non_id11_and_inactive_id11_are_exact_clones():
   collector = Collector()
-  worker = ToyotaTss3SignedId0Proxy(collector, start_thread=False)
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  qualify(worker, collector)
   state = cs()
-  worker.update(batch((SECOC_SYNC_ADDR, sync_frame(), 0)), state)
 
-  # Eight consecutive ID0 native frames qualify source geometry. The eighth is
-  # message 8 / low2 0, so recovery candidates are 0,4,8,...
-  for i in range(8):
-    worker.update(batch((NATIVE_08A_ADDR, native_frame(i, i + 1, semantic=0x50 + i), 2)), state)
-  assert worker.recovery_active
-  assert len(worker.jobs) == 64
+  worker.set_control(True, 3.0)
+  id18 = native_frame(9, 10, target_id=18, angle_raw=200, semantic=0x59)
+  before = len(collector.batches)
+  worker.update(batch((NATIVE_08A_ADDR, id18, 2)), state)
+  assert collector.batches[before] == [CanData(NATIVE_08A_ADDR, id18, 0)]
 
-  # Candidate 0 -> miss, 4 -> miss, 8 -> exact native MAC match.
-  for seq, expected_message in enumerate((0, 4, 8), start=1):
-    job = worker.jobs.popleft()
-    assert job.candidate_message == expected_message
-    put_inflight(worker, seq, job)
-    cmac = KNOWN_CMAC4 if expected_message == 8 else bytes.fromhex("aaaaaaaa")
-    worker.update(batch(response(seq, cmac)), state)
-
-  assert worker.tracker.message_counter == 8
-  assert not worker.recovery_active
-  # Matching recovery cancels stale candidates and puts an exact current-frame
-  # verification at the front of the new generation.
-  verify = worker.jobs.popleft()
-  assert verify.kind == "verify" and verify.candidate_message == 8
-  put_inflight(worker, 4, verify)
-  worker.update(batch(response(4, KNOWN_CMAC4)), state)
-  assert worker.qualified
-
-  # Qualification schedules target n+2: from b26 7/msg8 -> b26 9/msg10.
-  sign = next(job for job in worker.jobs if job.kind == "sign")
-  assert sign.b26 == 9 and sign.message_counter == 10
-  worker.jobs.remove(sign)
-  put_inflight(worker, 5, sign)
-  future_cmac = bytes.fromhex("12345678")
-  worker.update(batch(response(5, future_cmac)), state)
-  assert (620, 1109, 10, 9) in worker.signed_cache
-
-  # Once a future signed frame exists, host sends a target-free arm request.
-  # Panda chooses the actual handoff generation from its current native state.
-  admin = next(msg for msg in collector.flat if msg.address == ADMIN_ADDR)
-  assert admin.src == ADMIN_BUS
-  assert admin.dat == bytes.fromhex("07c9a80100000000")
-  assert worker.arm_pending and not worker.active
-  worker.update(batch((ADMIN_ADDR, admin.dat, ADMIN_BUS + 0x80)), state)
-  assert worker.arm_pending and worker.arm_accepted and not worker.active
-
-  # If ownership starts on b26 8/msg9, there is no synthetic cache entry yet;
-  # offer the exact OEM frame, then mark ownership only after its returned TX echo.
-  first_owned = native_frame(8, 9, semantic=0x58)
-  worker.update(batch((NATIVE_08A_ADDR, first_owned, 2)), state)
-  assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, first_owned, 0)
-  worker.update(batch((NATIVE_08A_ADDR, first_owned, 0x80)), state)
-  assert worker.active
-
-  # Native b26 9/msg10 then uses the pre-signed lookahead frame. Its application
-  # comes from b26 7 (two generations old) with only B26 advanced to 9.
-  worker.update(batch((NATIVE_08A_ADDR, native_frame(9, 10, semantic=0x59), 2)), state)
-  sent = collector.flat[-1]
-  assert sent.address == NATIVE_08A_ADDR and sent.src == 0
-  expected_app = bytearray(native_frame(7, 8, semantic=0x57)[:28])
-  expected_app[26] = 9
-  assert sent.dat == build_signed_frame(bytes(expected_app), 1109, 10, future_cmac)
-  assert worker.signed_tx_count == 1
+  worker.set_control(False, -4.0)
+  id11 = native_frame(10, 11, target_id=11, angle_raw=300, semantic=0x5A)
+  worker.update(batch((NATIVE_08A_ADDR, id11, 2)), state)
+  assert collector.batches[-1] == [CanData(NATIVE_08A_ADDR, id11, 0)]
+  assert worker.transparent_tx_count == 2
 
 
-def test_cache_miss_falls_back_exact_and_keeps_ownership():
+def test_active_id11_signs_exact_native_generation_and_preserves_every_other_field():
   collector = Collector()
-  worker = ToyotaTss3SignedId0Proxy(collector, start_thread=False)
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  seq = qualify(worker, collector)
   state = cs()
-  worker.stationary_park = True
-  worker.sync_trip, worker.sync_reset = 620, 1109
-  current = event(1, 20, 8)
-  worker.history.append(current)
-  worker.tracker.seed(current, 8)
-  worker.qualified = True
-  worker.active = True
-  worker.last_native_b26 = 20
-  worker.stable_native_frames = 8
 
-  next_frame = native_frame(21, 9, semantic=0x61)
-  worker.update(batch((NATIVE_08A_ADDR, next_frame, 2)), state)
-  # Missing synthetic content is not a handoff failure: while ownership is
-  # active, preserve continuity with the exact OEM frame and keep signing ahead.
-  assert collector.batches[-1] == [CanData(NATIVE_08A_ADDR, next_frame, 0)]
-  assert worker.transparent_fallback_count == 1
-  assert worker.active and worker.qualified
+  worker.set_control(True, 1.0)
+  source = native_frame(9, 10, target_id=11, angle_raw=100, semantic=0x59)
+  before_batches = len(collector.batches)
+  worker.update(batch((NATIVE_08A_ADDR, source, 2)), state)
+  assert len(collector.batches) == before_batches  # waits for command5
 
-def test_signed_enable_is_exact_car_non_release_and_sets_both_safety_flags():
-  safety = SimpleNamespace(safetyParam=0)
-  cp = SimpleNamespace(carFingerprint=CAR.TOYOTA_CAMRY_TSS3, passive=False, safetyConfigs=[safety])
-  assert enable_signed_in_car_params(cp, requested=True, is_release=False)
-  assert safety.safetyParam & ToyotaSafetyFlags.TSS3_08A_HOST
-  assert safety.safetyParam & ToyotaSafetyFlags.TSS3_08A_SIGNED
+  sign = worker.jobs.popleft()
+  assert sign.kind == "sign" and sign.native_index == 10 and sign.message_counter == 10
+  expected_app = build_id11_application(source[:28], round(1.0 / (1024 / 17870)))
+  assert sign.application == expected_app
+  # Longitudinal request, ID11/gains and native B26 remain source-real.
+  assert sign.application[:18] == source[:18]
+  assert sign.application[20:] == source[20:28]
 
-  release_safety = SimpleNamespace(safetyParam=0)
-  release_cp = SimpleNamespace(carFingerprint=CAR.TOYOTA_CAMRY_TSS3, passive=False, safetyConfigs=[release_safety])
-  assert not enable_signed_in_car_params(release_cp, requested=True, is_release=True)
-  assert release_safety.safetyParam == 0
+  cmac = bytes.fromhex("12345678")
+  put_inflight(worker, seq, sign)
+  worker.update(batch(response(seq, cmac)), state)
+  sent = collector.batches[-1]
+  assert sent == [CanData(NATIVE_08A_ADDR, build_signed_frame(expected_app, 1109, 10, cmac), 0)]
+  assert worker.modified_tx_count == 1
 
-def test_signed_invalid_carstate_never_qualifies():
+
+def test_output_order_waits_for_earlier_signed_id11():
   collector = Collector()
-  worker = ToyotaTss3SignedId0Proxy(collector, start_thread=False)
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  seq = qualify(worker, collector)
   state = cs()
-  state.canValid = False
+
+  worker.set_control(True, 2.0)
+  first = native_frame(9, 10, target_id=11, angle_raw=100, semantic=0x59)
+  worker.update(batch((NATIVE_08A_ADDR, first, 2)), state)
+  sign = worker.jobs.popleft()
+
+  # A later non-ID11 request is ready immediately, but must not overtake the
+  # earlier native generation while its modified ID11 frame is being signed.
+  second = native_frame(10, 11, target_id=18, angle_raw=400, semantic=0x5A)
+  before = len(collector.batches)
+  worker.update(batch((NATIVE_08A_ADDR, second, 2)), state)
+  assert len(collector.batches) == before
+
+  put_inflight(worker, seq, sign)
+  cmac = bytes.fromhex("23456789")
+  worker.update(batch(response(seq, cmac)), state)
+  expected_first = build_signed_frame(sign.application, 1109, 10, cmac)
+  assert collector.batches[-1] == [CanData(NATIVE_08A_ADDR, expected_first, 0), CanData(NATIVE_08A_ADDR, second, 0)]
+
+
+def test_sign_failure_flushes_native_frames_then_releases_ownership():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  seq = qualify(worker, collector)
+  state = cs()
+
+  worker.set_control(True, 2.0)
+  first = native_frame(9, 10, target_id=11, angle_raw=100, semantic=0x59)
+  worker.update(batch((NATIVE_08A_ADDR, first, 2)), state)
+  sign = worker.jobs.popleft()
+  second = native_frame(10, 11, target_id=18, angle_raw=400, semantic=0x5A)
+  worker.update(batch((NATIVE_08A_ADDR, second, 2)), state)
+
+  put_inflight(worker, seq, sign)
+  worker.update(batch(response(seq, b"\x00\x00\x00\x00", status=1)), state)
+
+  # Fail-open preserves source order with untouched Toyota frames before
+  # releasing relay ownership back to normal forwarding.
+  assert collector.batches[-2] == [CanData(NATIVE_08A_ADDR, first, 0), CanData(NATIVE_08A_ADDR, second, 0)]
+  assert collector.batches[-1] == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)]
+  assert not worker.active and not worker.qualified
+
+
+def test_control_target_can_change_while_sign_job_keeps_native_generation_snapshot():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  qualify(worker, collector)
+  state = cs()
+
+  worker.set_control(True, 1.0)
+  source = native_frame(9, 10, target_id=11, angle_raw=100)
+  worker.update(batch((NATIVE_08A_ADDR, source, 2)), state)
+  sign = worker.jobs.popleft()
+  signed_angle = sign.application[18:20]
+  worker.set_control(True, 5.0)
+  assert sign.application[18:20] == signed_angle
+
+
+def test_request_plane_enable_follows_carparams_topology_flags():
+  enabled_safety = SimpleNamespace(safetyParam=(ToyotaSafetyFlags.TSS3_08A_HOST.value |
+                                                ToyotaSafetyFlags.TSS3_08A_SIGNED.value))
+  cp = SimpleNamespace(carFingerprint=CAR.TOYOTA_CAMRY_TSS3, passive=False, safetyConfigs=[enabled_safety])
+  assert request_plane_enabled(cp)
+
+  missing_signed = SimpleNamespace(safetyParam=ToyotaSafetyFlags.TSS3_08A_HOST.value)
+  cp_missing = SimpleNamespace(carFingerprint=CAR.TOYOTA_CAMRY_TSS3, passive=False, safetyConfigs=[missing_signed])
+  assert not request_plane_enabled(cp_missing)
+
+  passive = SimpleNamespace(carFingerprint=CAR.TOYOTA_CAMRY_TSS3, passive=True, safetyConfigs=[enabled_safety])
+  assert not request_plane_enabled(passive)
+
+
+def test_invalid_carstate_never_qualifies():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  state = cs(valid=False)
   worker.update(batch((SECOC_SYNC_ADDR, sync_frame(), 0)), state)
   for i in range(10):
     worker.update(batch((NATIVE_08A_ADDR, native_frame(i, i + 1), 2)), state)
