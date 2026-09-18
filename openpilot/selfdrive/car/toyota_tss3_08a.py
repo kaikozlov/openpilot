@@ -103,9 +103,7 @@ class ToyotaTss3Id0Proxy:
 
     target_id = data[21] & 0x3F
     b26 = data[26] & 0x3F
-    fv4 = data[28] >> 4
-    reset_low2 = fv4 & 0x3
-    if target_id != 0 or self.reset_counter is None or reset_low2 != (self.reset_counter & 0x3):
+    if target_id != 0 or self.reset_counter is None:
       self._release()
       return
 
