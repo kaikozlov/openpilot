@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 
-from opendbc.car import structs
+from opendbc.car import Bus, gen_empty_fingerprint, structs
 from opendbc.car.can_definitions import CanData
+from opendbc.car.toyota.interface import CarInterface
 from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
+from openpilot.selfdrive.car.card import refresh_can_parsers
 from openpilot.selfdrive.car.toyota_tss3_08a import (
   ADMIN_ADDR,
   ADMIN_BUS,
@@ -216,3 +218,11 @@ def test_enable_is_exact_car_development_only():
   cp3 = SimpleNamespace(carFingerprint=CAR.TOYOTA_COROLLA_TSS3, passive=False, safetyConfigs=[safety3])
   assert not enable_in_car_params(cp3, requested=True, is_release=False)
   assert safety3.safetyParam == 0
+
+def test_refresh_can_parsers_switches_exact_camry_to_relay_bus0():
+  cp = CarInterface.get_params(CAR.TOYOTA_CAMRY_TSS3, gen_empty_fingerprint(), [], True, False, False)
+  ci = CarInterface(cp)
+  assert ci.can_parsers[Bus.pt].bus == 1
+  cp.safetyConfigs[0].safetyParam |= ToyotaSafetyFlags.TSS3_08A_HOST.value
+  refresh_can_parsers(ci, cp)
+  assert ci.can_parsers[Bus.pt].bus == 0
