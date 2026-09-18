@@ -117,7 +117,7 @@ def test_recovery_verify_lookahead_arm_and_signed_tx():
   collector = Collector()
   worker = ToyotaTss3SignedId0Proxy(collector, start_thread=False)
   state = cs()
-  worker.update(batch((SECOC_SYNC_ADDR, sync_frame(), 2)), state)
+  worker.update(batch((SECOC_SYNC_ADDR, sync_frame(), 0)), state)
 
   # Eight consecutive ID0 native frames qualify source geometry. The eighth is
   # message 8 / low2 0, so recovery candidates are 0,4,8,...
@@ -220,7 +220,7 @@ def test_signed_invalid_carstate_never_qualifies():
   worker = ToyotaTss3SignedId0Proxy(collector, start_thread=False)
   state = cs()
   state.canValid = False
-  worker.update(batch((SECOC_SYNC_ADDR, sync_frame(), 2)), state)
+  worker.update(batch((SECOC_SYNC_ADDR, sync_frame(), 0)), state)
   for i in range(10):
     worker.update(batch((NATIVE_08A_ADDR, native_frame(i, i + 1), 2)), state)
   assert not worker.active

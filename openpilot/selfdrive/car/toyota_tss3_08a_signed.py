@@ -30,6 +30,7 @@ from openpilot.selfdrive.car.toyota_tss3_08a import (
   PANDA_RETURNED_OFFSET,
   SECOC_SYNC_ADDR,
   STABLE_NATIVE_FRAMES,
+  SYNC_BUS,
   UPSTREAM_BUS,
   SendCan,
   decode_sync,
@@ -619,7 +620,7 @@ class ToyotaTss3SignedId0Proxy:
           if src_i >= PANDA_RETURNED_OFFSET:
             self._observe_tx_echo_locked(address_i, data, src_i)
             continue
-          if src_i == UPSTREAM_BUS and address_i == SECOC_SYNC_ADDR:
+          if src_i == SYNC_BUS and address_i == SECOC_SYNC_ADDR:
             self._observe_sync_locked(data)
           elif src_i == UPSTREAM_BUS and address_i == NATIVE_08A_ADDR:
             self._observe_native_locked(data)

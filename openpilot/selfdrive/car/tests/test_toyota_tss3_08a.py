@@ -66,7 +66,7 @@ class Collector:
 
 def prime(proxy: ToyotaTss3Id0Proxy, collector: Collector, *, reset: int = 0x12345):
   cs = car_state()
-  proxy.update(batch((SECOC_SYNC_ADDR, sync_frame(reset), 2)), cs)
+  proxy.update(batch((SECOC_SYNC_ADDR, sync_frame(reset), 0)), cs)
   for b26 in range(STABLE_NATIVE_FRAMES):
     proxy.update(batch((NATIVE_08A_ADDR, native_08a(b26, reset=reset), 2)), cs)
   assert collector.flat[-1] == make_admin(True)
@@ -180,7 +180,7 @@ def test_reset_change_mirrors_safety_release_and_requalifies():
   proxy = ToyotaTss3Id0Proxy(collector)
   prime(proxy, collector)
   confirm_arm(proxy, collector)
-  proxy.update(batch((SECOC_SYNC_ADDR, sync_frame(0x12346), 2)), car_state())
+  proxy.update(batch((SECOC_SYNC_ADDR, sync_frame(0x12346), 0)), car_state())
   assert not proxy.active
   assert proxy.stable_native_frames == 0
   assert proxy.last_b26 is None
@@ -223,7 +223,7 @@ def test_bad_reset_low2_never_arms():
   proxy = ToyotaTss3Id0Proxy(collector)
   cs = car_state()
   reset = 0x12345
-  proxy.update(batch((SECOC_SYNC_ADDR, sync_frame(reset), 2)), cs)
+  proxy.update(batch((SECOC_SYNC_ADDR, sync_frame(reset), 0)), cs)
   for b26 in range(STABLE_NATIVE_FRAMES + 2):
     proxy.update(batch((NATIVE_08A_ADDR, native_08a(b26, reset=reset + 1), 2)), cs)
   assert not proxy.active

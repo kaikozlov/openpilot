@@ -19,6 +19,7 @@ NATIVE_08A_ADDR = 0x08A
 SECOC_SYNC_ADDR = 0x00F
 ADMIN_ADDR = 0x777
 UPSTREAM_BUS = 2
+SYNC_BUS = 0
 DOWNSTREAM_BUS = 0
 ADMIN_BUS = 1
 STABLE_NATIVE_FRAMES = 8
@@ -195,7 +196,7 @@ class ToyotaTss3Id0Proxy:
         if src_i >= PANDA_RETURNED_OFFSET:
           self._observe_tx_echo(address_i, data, src_i)
           continue
-        if src_i == UPSTREAM_BUS and address_i == SECOC_SYNC_ADDR:
+        if src_i == SYNC_BUS and address_i == SECOC_SYNC_ADDR:
           self._observe_sync(data)
         elif src_i == UPSTREAM_BUS and address_i == NATIVE_08A_ADDR:
           self._observe_native(data, CS)
