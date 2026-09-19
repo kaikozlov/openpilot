@@ -520,9 +520,13 @@ class ToyotaTss3RequestProxy:
 
     valid, _ = self.tracker.update(event)
     if not valid or self.tracker.message_counter is None:
+      # A recorder/comma scheduling gap can deliver several seconds of native
+      # 0x08A backlog before the matching 0x00F sync frames in the same batch.
+      # Do not recover from that first stale-epoch frame. Drop qualification and
+      # let the ordinary STABLE_NATIVE_FRAMES path restart recovery only after
+      # native cadence has become consecutive again; by then 0x00F has caught up.
       self.tracker = NativeFreshnessTracker()
       self._fail_open_locked()
-      self._start_recovery_locked(event)
       return
 
     message_counter = self.tracker.message_counter
