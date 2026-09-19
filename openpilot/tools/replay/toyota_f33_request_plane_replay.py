@@ -341,10 +341,8 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
 
   if args.drop_sign_response is not None:
     assert drop_exercised, f'did not reach sign generation {args.drop_sign_response}'
-    assert proxy.last_failure_reason == 'oracle_response_timeout', proxy.last_failure_reason
-  else:
-    assert proxy.last_failure_reason == '', proxy.last_failure_reason
-    assert stats['arm'] == stats['release'] == active_windows, (stats['arm'], stats['release'], active_windows)
+  assert proxy.last_failure_reason == '', proxy.last_failure_reason
+  assert stats['arm'] == stats['release'] == active_windows, (stats['arm'], stats['release'], active_windows)
   assert stats['arm'] > 0
   assert strict_host_id11 > 100
   assert native_leaked == 0

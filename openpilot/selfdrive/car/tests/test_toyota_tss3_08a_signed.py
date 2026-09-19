@@ -230,7 +230,7 @@ def test_sign_response_publishes_same_source_generation():
   assert (out.dat[28] >> 4) == (source[28] >> 4)
 
 
-def test_out_of_order_oracle_replies_do_not_reorder_08a_outputs():
+def test_later_oracle_reply_retries_missing_generation_without_releasing_or_reordering():
   worker, collector, clock = start_active_worker()
   worker.set_control(True, 1.0)
   for b26, msg in ((13, 3), (14, 4)):
@@ -241,27 +241,71 @@ def test_out_of_order_oracle_replies_do_not_reorder_08a_outputs():
       first = (seq, job)
     else:
       second = (seq, job)
+
+  releases_before = sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat)
   before = len(collector.batches)
+  clock.now = 0.030
   worker.update(batch(private_response(second[0], bytes.fromhex("12345678"))), cs())
   assert len(collector.batches) == before
-  worker.update(batch(private_response(first[0], bytes.fromhex("23456789"))), cs())
+  assert worker.active and first[0] not in worker.inflight
+  assert worker.jobs and worker.jobs[0].native_index == first[1].native_index
+  assert sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat) == releases_before
+
+  with worker._cv:
+    retry_seq, retry_job = worker._next_job_locked(clock.now)
+  assert retry_job.native_index == first[1].native_index and retry_job.attempts == 2
+  worker.update(batch(private_response(retry_seq, bytes.fromhex("23456789"))), cs())
+  assert worker.active
   assert len(collector.batches[-1]) == 2
   assert [m.dat[26] & 0x3F for m in collector.batches[-1]] == [13, 14]
+  assert sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat) == releases_before
 
 
-def test_response_timeout_allows_live_tail_then_releases_without_generation_fallback():
-  worker, _, clock = start_active_worker()
+def test_response_timeout_retries_same_generation_without_releasing():
+  worker, collector, clock = start_active_worker()
   worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110), 2)), cs())
   with worker._cv:
-    seq, _ = worker._next_job_locked(clock.now)
+    seq, job = worker._next_job_locked(clock.now)
     clock.now = 0.040
     worker._expire_locked(clock.now)
     assert worker.active and seq in worker.inflight
     clock.now = 0.051
     worker._expire_locked(clock.now)
+  assert worker.active and seq not in worker.inflight
+  assert worker.jobs and worker.jobs[0] is job
+  assert worker.last_failure_reason == ""
+  assert not any(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat)
+
+  with worker._cv:
+    retry_seq, retry_job = worker._next_job_locked(clock.now)
+  assert retry_job is job and retry_job.attempts == 2
+  clock.now = 0.065
+  worker.update(batch(private_response(retry_seq)), cs())
+  assert worker.active and not worker.authority_unavailable()
+  assert collector.batches[-1][0].address == NATIVE_08A_ADDR
+
+
+def test_oracle_only_releases_after_hard_deadline():
+  worker, _, clock = start_active_worker()
+  worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110), 2)), cs())
+  with worker._cv:
+    seq, _ = worker._next_job_locked(clock.now)
+    clock.now = 0.121
+    worker._expire_locked(clock.now)
   assert not worker.active
-  assert worker.last_failure_reason == "oracle_response_timeout"
+  assert worker.last_failure_reason == "oracle_dead"
   assert seq not in worker.inflight
+
+
+def test_oracle_error_status_retries_instead_of_releasing():
+  worker, _, clock = start_active_worker()
+  worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110), 2)), cs())
+  with worker._cv:
+    seq, job = worker._next_job_locked(clock.now)
+  clock.now = 0.010
+  worker.update(batch(private_response(seq, status=2)), cs())
+  assert worker.active and worker.last_failure_reason == ""
+  assert worker.jobs and worker.jobs[0] is job
 
 
 def test_brake_or_native_cruise_bits_are_not_proxy_permission_inputs():
