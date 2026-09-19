@@ -98,7 +98,7 @@ function launch {
   rm -f "$DIR/panda/board/obj/panda_h7/main.elf"
   rm -f "$DIR/panda/board/obj/panda_h7/main.bin"
   rm -f "$DIR/panda/board/obj/panda_h7.bin.signed"
-  ./build.py
+  SCONSFLAGS="--cache-disable ${SCONSFLAGS:-}" ./build.py
   ./manager.py
 
   # if broken, keep on screen error
