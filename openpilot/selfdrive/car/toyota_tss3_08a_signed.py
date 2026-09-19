@@ -126,7 +126,7 @@ def build_signed_frame(application: bytes, reset_counter: int, message_counter: 
 def build_id11_application(native_application: bytes, target_angle_raw: int) -> bytes:
   """Compatibility wrapper for lateral-only analysis and tests."""
   return build_request_application(native_application, lat_active=True, target_angle_raw=target_angle_raw,
-                                   long_active=False, accel=0.0)
+                                   long_control=False, accel=0.0)
 
 
 @dataclass(frozen=True)
@@ -222,6 +222,7 @@ class ToyotaTss3RequestProxy:
     self.can_valid = False
     self.control_lat_active = False
     self.control_target_angle_raw = 0
+    self.control_long_enabled = False
     self.control_long_active = False
     self.control_accel = 0.0
     self.sync_trip: int | None = None
@@ -253,16 +254,17 @@ class ToyotaTss3RequestProxy:
 
   @property
   def control_active(self) -> bool:
-    return self.control_lat_active or self.control_long_active
+    return self.control_lat_active or self.control_long_enabled
 
   def set_control(self, lat_active: bool, target_angle_deg: float,
-                  long_active: bool = False, accel: float = 0.0) -> None:
+                  long_enabled: bool = False, long_active: bool = False, accel: float = 0.0) -> None:
     with self._cv:
       was_active = self.control_active
       self.control_lat_active = bool(lat_active)
       self.control_target_angle_raw = target_angle_deg_to_raw(float(target_angle_deg))
-      self.control_long_active = bool(long_active)
-      self.control_accel = float(accel)
+      self.control_long_enabled = bool(long_enabled)
+      self.control_long_active = self.control_long_enabled and bool(long_active)
+      self.control_accel = float(accel) if self.control_long_active else 0.0
       if was_active and not self.control_active:
         self._release_control_locked()
       elif not was_active and self.control_active:
@@ -283,7 +285,7 @@ class ToyotaTss3RequestProxy:
 
   def longitudinal_authority_unavailable(self) -> bool:
     with self._cv:
-      return self.control_long_active and not self.active and not self.arm_pending
+      return self.control_long_enabled and not self.active and not self.arm_pending
 
   def _record_failure_locked(self, reason: str) -> None:
     self.last_failure_reason = reason
@@ -350,7 +352,7 @@ class ToyotaTss3RequestProxy:
       event.application,
       lat_active=self.control_lat_active,
       target_angle_raw=self.control_target_angle_raw,
-      long_active=self.control_long_active,
+      long_control=self.control_long_enabled,
       accel=self.control_accel,
     )
     if self.next_output_index is None:
@@ -389,7 +391,7 @@ class ToyotaTss3RequestProxy:
 
     self._maybe_arm_locked()
 
-  def _observe_tx_echo_locked(self, address: int, data: bytes, src: int) -> None:
+  def _observe_tx_echo_locked(self, address: int, data: bytes, src: int, gas_pressed: bool) -> None:
     if address == ADMIN_ADDR and self.arm_pending and data == make_admin(True).dat:
       if src == ADMIN_BUS + PANDA_REJECTED_OFFSET:
         self._authority_failure_locked("arm_admin_rejected")
@@ -405,7 +407,11 @@ class ToyotaTss3RequestProxy:
       self._authority_failure_locked("handoff_clone_rejected")
     elif src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET and self.active:
       cloudlog.event("toyota_f33_request_plane_tx_reject", native_index=self.native_index, error=True)
-      self._release_control_locked()
+      # Panda can observe gas before card publishes the following inactive
+      # command. It drops that already-queued active command while retaining
+      # request-plane ownership, like ordinary openpilot TX safety.
+      if not gas_pressed:
+        self._release_control_locked()
 
   def _flush_outputs_locked(self) -> None:
     if self.next_output_index is None:
@@ -519,6 +525,7 @@ class ToyotaTss3RequestProxy:
   def update(self, can_list: list, CS: structs.CarState) -> None:
     with self._cv:
       self.can_valid = bool(CS.canValid)
+      gas_pressed = bool(getattr(CS, "gasPressed", False))
       if not self.can_valid and (self.active or self.arm_pending):
         self._authority_failure_locked("can_invalid")
         self.tracker.reset()
@@ -526,7 +533,7 @@ class ToyotaTss3RequestProxy:
         for address, dat, src in packets:
           address_i, src_i, data = int(address), int(src), bytes(dat)
           if src_i >= PANDA_RETURNED_OFFSET:
-            self._observe_tx_echo_locked(address_i, data, src_i)
+            self._observe_tx_echo_locked(address_i, data, src_i, gas_pressed)
           elif src_i == SYNC_BUS and address_i == SECOC_SYNC_ADDR:
             self._observe_sync_locked(data)
           elif src_i == UPSTREAM_BUS and address_i == NATIVE_08A_ADDR:

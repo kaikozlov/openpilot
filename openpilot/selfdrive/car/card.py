@@ -260,8 +260,9 @@ class Car:
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
       if self.tss3_08a_proxy is not None:
         self.tss3_08a_proxy.set_control(CC.latActive, self.last_actuators_output.steeringAngleDeg,
-                                       self.CP.openpilotLongitudinalControl and CC.longActive,
-                                       self.last_actuators_output.accel)
+                                       long_enabled=self.CP.openpilotLongitudinalControl and CC.enabled,
+                                       long_active=self.CP.openpilotLongitudinalControl and CC.longActive,
+                                       accel=self.last_actuators_output.accel)
       self._send_can(can_sends, valid=CS.canValid)
 
       self.CC_prev = CC
