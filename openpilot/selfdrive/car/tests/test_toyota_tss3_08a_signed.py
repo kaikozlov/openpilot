@@ -243,6 +243,46 @@ def test_active_non_id11_and_inactive_id11_are_exact_clones():
   assert worker.transparent_tx_count == 1
 
 
+def test_large_native_gap_waits_for_sync_catchup_before_recovery():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  state = cs()
+
+  old_reset = 1109
+  new_reset = old_reset + 9
+  worker.sync_trip = 620
+  worker.sync_reset = old_reset
+  seeded = event(1, 26, 100, reset=old_reset)
+  assert worker.tracker.seed(seeded, 100)
+  worker.last_native_b26 = 26
+  worker.stable_native_frames = 100
+  worker.qualified = True
+
+  # Exact shape seen on-road: the first post-gap 0x08A arrives before the
+  # matching 0x00F catch-up. The 43-count B26 jump invalidates the tracker, but
+  # must not immediately start recovery from the stale sync epoch.
+  gap = native_frame(5, 143, reset=new_reset, semantic=0x61)
+  worker.update(batch((NATIVE_08A_ADDR, gap, 2)), state)
+  assert not worker.qualified
+  assert not worker.recovery_active
+  assert not worker.jobs
+
+  # One more native frame can precede the 0x00F update in the same backlog.
+  worker.update(batch((NATIVE_08A_ADDR, native_frame(6, 144, reset=new_reset, semantic=0x62), 2)), state)
+  assert not worker.recovery_active
+
+  # Once sync catches up, require ordinary consecutive native cadence before
+  # beginning recovery. No guessed forward epoch is needed.
+  worker.update(batch((SECOC_SYNC_ADDR, sync_frame(reset=new_reset), 0)), state)
+  for b26, message in zip(range(7, 14), range(145, 152), strict=True):
+    worker.update(batch((NATIVE_08A_ADDR, native_frame(b26, message, reset=new_reset, semantic=0x63), 2)), state)
+
+  assert worker.recovery_active
+  job = worker.jobs[0]
+  assert job.kind == "recover"
+  assert int.from_bytes(job.domain[32:36], "big") >> 12 == new_reset
+
+
 def test_sync_ahead_of_native_fv4_signs_the_native_epoch_without_releasing_ownership():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
