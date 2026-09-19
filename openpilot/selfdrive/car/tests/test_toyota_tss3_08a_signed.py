@@ -183,19 +183,19 @@ def test_proxy_seeds_passively_without_any_oracle_recovery_jobs():
   assert not any(m.address == 0x1FDC0002 for m in collector.flat)
 
 
-def test_handoff_is_one_exact_source_clone_and_pending_is_unavailable():
+def test_handoff_is_one_exact_source_clone_without_transient_unavailable_warning():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
   seed_at_next_epoch(worker)
   worker.set_control(True, 0.0)
-  assert worker.arm_pending and worker.authority_unavailable()
+  assert worker.arm_pending and not worker.authority_unavailable()
   first = native_frame(12, 2, reset=1110)
   worker.update(batch((NATIVE_08A_ADDR, first, 2)), cs())
   assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, first, DOWNSTREAM_BUS)
   # A second source before the clone echo aborts; no second Toyota clone is emitted.
   count = sum(m.address == NATIVE_08A_ADDR for m in collector.flat)
   worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110), 2)), cs())
-  assert not worker.active and not worker.arm_pending
+  assert not worker.active and not worker.arm_pending and worker.authority_unavailable()
   assert sum(m.address == NATIVE_08A_ADDR for m in collector.flat) == count
 
 

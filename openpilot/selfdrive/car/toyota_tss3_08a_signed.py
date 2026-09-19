@@ -276,7 +276,10 @@ class ToyotaTss3RequestProxy:
 
   def authority_unavailable(self) -> bool:
     with self._cv:
-      return self.control_lat_active and not self.active
+      # The one-generation atomic handoff is expected and should not surface as
+      # a steering-unavailable warning. A failed handoff clears arm_pending and
+      # is reported normally on the next state update.
+      return self.control_lat_active and not self.active and not self.arm_pending
 
   def _record_failure_locked(self, reason: str) -> None:
     self.last_failure_reason = reason
