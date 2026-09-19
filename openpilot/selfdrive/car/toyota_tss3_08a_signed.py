@@ -2,9 +2,10 @@
 
 The FRC remains the source of truth for the complete TSS3 request envelope. Once
 freshness is qualified and Panda has atomically handed 0x08A forwarding to the
-host, every native frame is preserved byte-for-byte except for the LTA/LCA
-(ID11) lateral pinion-angle field while openpilot lateral control is active.
-Non-ID11 requests and inactive ID11 requests are exact transparent clones.
+host, native ID11 keeps its source-real envelope with only the lateral pinion
+angle replaced. Native ID0 is promoted to Toyota's observed ID11 shape by also
+setting the request ID and B24 assist gain raw 100 (1.00). Other application IDs
+remain source-real.
 
 The host never learns the TSK key. It asks the EPS RAM resident to run ICU-S
 command 5 / selector 4 over the ordinary 0x008A SecOC domain and receives only
@@ -24,6 +25,7 @@ from opendbc.car import structs
 from opendbc.car.can_definitions import CanData
 from opendbc.car.toyota.tss3 import target_angle_deg_to_raw
 from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
+from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car.toyota_tss3_08a import (
   ADMIN_ADDR,
   ADMIN_BUS,
@@ -52,12 +54,14 @@ ORACLE_TIMEOUT_S = 0.12
 ORACLE_SIGN_TIMEOUT_S = 0.040
 ORACLE_MAX_INFLIGHT = 4
 ORACLE_FAILURE_COOLDOWN_S = 2.0
+AUTHORITY_FAILURE_ALERT_S = 1.0
 MAX_NATIVE_HISTORY = 256
 MAX_NATIVE_GAP = 8
 
 TSS3_IDLE_ID = 0
 TSS3_LTA_LCA_ID = 11
 TSS3_LATERAL_SOURCE_IDS = (TSS3_IDLE_ID, TSS3_LTA_LCA_ID)
+TSS3_LTA_ASSIST_GAIN_RAW = 100
 LATERAL_ANGLE_OFFSET = 18
 LATERAL_ANGLE_SIZE = 2
 
@@ -151,9 +155,10 @@ def build_id11_application(native_application: bytes, target_angle_raw: int) -> 
   """Build an ID11 lateral request from a native ID0/ID11 0x08A application.
 
   ID0 is Toyota's no-lateral-request state. While openpilot lateral control is
-  active, promote only that low-6-bit request identity to ID11 and replace the
-  two-byte pinion-angle request. Every other native application byte remains
-  source-real and the exact native generation is re-signed by the EPS oracle.
+  active, promote that request to Toyota's observed LTA/LCA shape: low-six-bit
+  request identity ID11, the two-byte pinion-angle request, and B24 assist gain
+  raw 100 (1.00). Native ID11 already carries the source-real assist gain and is
+  otherwise preserved. The exact native generation is re-signed by the EPS oracle.
   """
   if len(native_application) != 28:
     raise ValueError("native 0x08A application must be 28 bytes")
@@ -165,6 +170,8 @@ def build_id11_application(native_application: bytes, target_angle_raw: int) -> 
   application = bytearray(native_application)
   application[21] = (application[21] & 0xC0) | TSS3_LTA_LCA_ID
   application[LATERAL_ANGLE_OFFSET:LATERAL_ANGLE_OFFSET + LATERAL_ANGLE_SIZE] = target_angle_raw.to_bytes(2, "big", signed=True)
+  if native_id == TSS3_IDLE_ID:
+    application[24] = TSS3_LTA_ASSIST_GAIN_RAW
   return bytes(application)
 
 
@@ -311,6 +318,9 @@ class ToyotaTss3RequestProxy:
     self.oracle_timeout_count = 0
     self.recovery_count = 0
     self.verification_count = 0
+    self.authority_failure_count = 0
+    self.last_authority_failure_reason = ""
+    self.authority_failure_alert_until = 0.0
 
     if start_thread:
       self._thread = threading.Thread(target=self._oracle_sender_loop, name="tss3_08a_oracle", daemon=True)
@@ -332,6 +342,36 @@ class ToyotaTss3RequestProxy:
       elif not was_lat_active and self.control_lat_active:
         self._maybe_arm_locked()
 
+  def authority_failure_alert_active(self) -> bool:
+    with self._cv:
+      return self._monotonic() < self.authority_failure_alert_until
+
+  def _record_failure_locked(self, reason: str, *, full_recovery: bool) -> None:
+    self.authority_failure_count += 1
+    self.last_authority_failure_reason = reason
+    now = self._monotonic()
+    self.authority_failure_alert_until = max(self.authority_failure_alert_until, now + AUTHORITY_FAILURE_ALERT_S)
+    cloudlog.event(
+      "toyota_f33_request_plane_failure",
+      reason=reason,
+      count=self.authority_failure_count,
+      full_recovery=full_recovery,
+      active=self.active,
+      arm_pending=self.arm_pending,
+      qualified=self.qualified,
+      native_index=self.native_index,
+      pending_outputs=len(self.pending_outputs),
+      inflight=len(self.inflight),
+      error=True,
+    )
+
+  def _authority_failure_locked(self, reason: str) -> None:
+    # Panda/transport authority failure is not a SecOC freshness failure. Drop
+    # only the current authority interval and preserve the proven tracker and
+    # qualification so the next eligible native generation can re-arm.
+    self._record_failure_locked(reason, full_recovery=False)
+    self._release_control_locked(restore_pending=False)
+
   def _release_control_locked(self, *, restore_pending: bool = True) -> None:
     self._release_locked(restore_pending=restore_pending)
     # Sign work belongs to the authority interval that just ended. Preserve the
@@ -345,6 +385,7 @@ class ToyotaTss3RequestProxy:
   def _clear_oracle_state_locked(self) -> None:
     self.state_generation += 1
     self.jobs.clear()
+    self.inflight.clear()
     self.qualified = False
     self.recovery_active = False
     self.recovery_sample_index = None
@@ -398,7 +439,13 @@ class ToyotaTss3RequestProxy:
     self.pending_outputs.clear()
     self.next_output_index = None
 
-  def _fail_open_locked(self) -> None:
+  def _fail_open_locked(self, reason: str) -> None:
+    # Initial startup can see native 0x08A before the first usable 0x00F sync;
+    # that is not an authority failure and should not warn the driver. Once any
+    # freshness/authority state exists, a full reset is a real visible failure.
+    had_state = self.active or self.arm_pending or self.qualified or self.recovery_active or self.tracker.event is not None
+    if had_state:
+      self._record_failure_locked(reason, full_recovery=True)
     self._release_locked()
     self._clear_oracle_state_locked()
     self.tracker = NativeFreshnessTracker()
@@ -450,6 +497,7 @@ class ToyotaTss3RequestProxy:
     self.tracker = tracker
     self.state_generation += 1
     self.jobs.clear()
+    self.inflight.clear()
     self.recovery_active = False
     self.recovery_sample_index = None
     self.recovery_remaining = 0
@@ -537,7 +585,7 @@ class ToyotaTss3RequestProxy:
   def _observe_native_locked(self, frame: bytes) -> None:
     event = self._make_native_event_locked(frame)
     if event is None or not self.can_valid:
-      self._fail_open_locked()
+      self._fail_open_locked("native_event_invalid")
       return
 
     # Use the same source-real cruise latch that Panda uses for controls_allowed.
@@ -580,7 +628,7 @@ class ToyotaTss3RequestProxy:
       # let the ordinary STABLE_NATIVE_FRAMES path restart recovery only after
       # native cadence has become consecutive again; by then 0x00F has caught up.
       self.tracker = NativeFreshnessTracker()
-      self._fail_open_locked()
+      self._fail_open_locked("freshness_lost")
       return
 
     message_counter = self.tracker.message_counter
@@ -599,9 +647,7 @@ class ToyotaTss3RequestProxy:
       if src == ADMIN_BUS + PANDA_RETURNED_OFFSET:
         self.arm_accepted = True
       elif src == ADMIN_BUS + PANDA_REJECTED_OFFSET:
-        self.arm_pending = False
-        self.arm_admin_data = None
-        self.arm_accepted = False
+        self._authority_failure_locked("arm_admin_rejected")
       return
 
     if address != NATIVE_08A_ADDR:
@@ -616,8 +662,10 @@ class ToyotaTss3RequestProxy:
       self.arm_clone_index = None
       self.arm_clone_frame = None
       self.arm_count += 1
+    elif src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET and self.arm_pending and data == self.arm_clone_frame:
+      self._authority_failure_locked("handoff_clone_rejected")
     elif src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET and self.active:
-      self._fail_open_locked()
+      self._authority_failure_locked("host_08a_rejected")
 
   def _observe_oracle_response_locked(self, data: bytes) -> None:
     if len(data) != 8 or data[0] != 0x07 or data[1] != ORACLE_PRIVATE_SID:
@@ -654,7 +702,7 @@ class ToyotaTss3RequestProxy:
         self._start_recovery_locked(latest)
     elif job.kind == "sign":
       if None in (job.native_index, job.application, job.reset_counter, job.message_counter):
-        self._fail_open_locked()
+        self._authority_failure_locked("invalid_sign_job")
         return
       slot = self.pending_outputs.get(int(job.native_index))
       if slot is None:
@@ -665,7 +713,7 @@ class ToyotaTss3RequestProxy:
   def _job_failure_locked(self, job: OracleJob) -> None:
     if job.kind == "sign":
       self.oracle_timeout_count += 1
-      self._fail_open_locked()
+      self._authority_failure_locked("oracle_sign_failure")
       return
     if job.kind == "recover" and self.recovery_remaining > 0:
       self.recovery_remaining -= 1
@@ -674,7 +722,7 @@ class ToyotaTss3RequestProxy:
       self.oracle_timeout_count += self.oracle_failures
       self.oracle_failures = 0
       self.cooldown_until = self._monotonic() + ORACLE_FAILURE_COOLDOWN_S
-      self._fail_open_locked()
+      self._fail_open_locked("oracle_recovery_failure")
 
   def _alloc_seq_locked(self) -> int:
     for _ in range(255):
@@ -749,7 +797,7 @@ class ToyotaTss3RequestProxy:
       self.can_valid = bool(CS.canValid)
       self.brake_pressed = bool(getattr(CS, "brakePressed", False))
       if not self.can_valid and (self.active or self.arm_pending or self.qualified or self.recovery_active):
-        self._fail_open_locked()
+        self._fail_open_locked("can_invalid")
       elif self.brake_pressed and (self.active or self.arm_pending):
         # Panda's generic safety logic revokes controls_allowed immediately on
         # brake press, which can precede controlsd's latActive=False by a few ms.

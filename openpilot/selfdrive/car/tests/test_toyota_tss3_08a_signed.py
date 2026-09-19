@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from opendbc.car.can_definitions import CanData
-from openpilot.selfdrive.car.toyota_tss3_08a import ADMIN_ADDR, ADMIN_BUS, NATIVE_08A_ADDR, SECOC_SYNC_ADDR
+from openpilot.selfdrive.car.toyota_tss3_08a import ADMIN_ADDR, ADMIN_BUS, DOWNSTREAM_BUS, NATIVE_08A_ADDR, PANDA_REJECTED_OFFSET, SECOC_SYNC_ADDR
 from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
 from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
   ORACLE_BUS,
@@ -184,8 +184,9 @@ def test_id11_builder_preserves_native_envelope_and_promotes_id0():
   modified0 = build_id11_application(native0, 321)
   assert modified0[18:20] == (321).to_bytes(2, "big", signed=True)
   assert modified0[21] == ((native0[21] & 0xC0) | 11)
+  assert modified0[24] == 100
   for i in range(28):
-    if i not in (18, 19, 21):
+    if i not in (18, 19, 21, 24):
       assert modified0[i] == native0[i]
 
   id18 = native_frame(4, 5, target_id=18)[:28]
@@ -423,8 +424,9 @@ def test_active_id0_is_promoted_to_signed_id11_on_same_native_generation():
   expected_app = build_id11_application(source[:28], round(1.5 / (1024 / 17870)))
   assert sign.application == expected_app
   assert (sign.application[21] & 0x3F) == 11
+  assert sign.application[24] == 100
   for i in range(28):
-    if i not in (18, 19, 21):
+    if i not in (18, 19, 21, 24):
       assert sign.application[i] == source[i]
 
   cmac = bytes.fromhex("12345678")
@@ -515,20 +517,23 @@ def test_sign_timeout_retries_once_with_fresh_sequence_before_fail_open():
   assert worker.next_oracle_send_at == 1.041
   assert worker.oracle_timeout_count == 0
 
-  # A second lost response for the same source generation is a real failure and
-  # still releases ownership through the normal fail-open path.
+  # A second lost response drops only this authority interval. Freshness
+  # qualification remains valid so the next native generation can re-arm.
   worker.jobs.clear()
   job.sent_at = 2.0
   worker.inflight[11] = job
   with worker._cv:
     worker._expire_inflight_locked(2.041)
   assert not worker.active
-  assert not worker.qualified
+  assert worker.qualified
   assert worker.oracle_timeout_count == 1
+  assert worker.authority_failure_count == 1
+  assert worker.last_authority_failure_reason == "oracle_sign_failure"
+  assert worker.authority_failure_alert_active()
   assert collector.flat[-1] == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)
 
 
-def test_sign_failure_flushes_native_frames_then_releases_ownership():
+def test_sign_failure_releases_authority_but_preserves_qualification_and_rearms():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
   seq = qualify(worker, collector)
@@ -544,11 +549,51 @@ def test_sign_failure_flushes_native_frames_then_releases_ownership():
   put_inflight(worker, seq, sign)
   worker.update(batch(response(seq, b"\x00\x00\x00\x00", status=1)), state)
 
-  # Fail-open preserves source order with untouched Toyota frames before
-  # releasing relay ownership back to normal forwarding.
-  assert collector.batches[-2] == [CanData(NATIVE_08A_ADDR, first, 0), CanData(NATIVE_08A_ADDR, second, 0)]
+  # A signing failure ends only the current authority interval. Panda resumes
+  # stock forwarding; do not replay stale blocked generations from the host.
   assert collector.batches[-1] == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)]
-  assert not worker.active and not worker.qualified
+  assert not worker.active and worker.qualified
+  assert worker.authority_failure_count == 1
+  assert worker.last_authority_failure_reason == "oracle_sign_failure"
+  assert worker.authority_failure_alert_active()
+  assert not worker.jobs and not worker.inflight and not worker.pending_outputs
+
+  # The next source-real generation advances the preserved tracker and begins a
+  # fresh atomic handoff without brute-force recovery.
+  third = native_frame(11, 12, target_id=0, angle_raw=90, semantic=0x5B)
+  worker.update(batch((NATIVE_08A_ADDR, third, 2)), state)
+  assert worker.arm_pending
+  assert worker.qualified
+  assert worker.recovery_count == 1  # only the original startup recovery
+  assert collector.flat[-1] == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80100000000"), ADMIN_BUS)
+
+
+def test_active_host_reject_preserves_qualification_and_rearms_next_native():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  qualify(worker, collector)
+  state = cs()
+  assert worker.active and worker.qualified
+
+  source = native_frame(9, 10, target_id=0, angle_raw=100, semantic=0x59)
+  worker.update(batch((NATIVE_08A_ADDR, source, 2)), state)
+  sign = worker.jobs.popleft()
+  cmac = bytes.fromhex("12345678")
+  signed = build_signed_frame(sign.application, int(sign.reset_counter), int(sign.message_counter), cmac)
+
+  # Simulate Panda rejecting the otherwise attempted host generation.
+  worker.update(batch((NATIVE_08A_ADDR, signed, DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET)), state)
+  assert not worker.active
+  assert worker.qualified
+  assert worker.authority_failure_count == 1
+  assert worker.last_authority_failure_reason == "host_08a_rejected"
+  assert worker.authority_failure_alert_active()
+
+  following = native_frame(10, 11, target_id=0, angle_raw=95, semantic=0x5A)
+  worker.update(batch((NATIVE_08A_ADDR, following, 2)), state)
+  assert worker.arm_pending
+  assert worker.qualified
+  assert worker.recovery_count == 1
 
 
 def test_control_target_can_change_while_sign_job_keeps_native_generation_snapshot():

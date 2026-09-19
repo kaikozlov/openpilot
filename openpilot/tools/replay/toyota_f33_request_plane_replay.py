@@ -23,6 +23,7 @@ from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
 parser = argparse.ArgumentParser(description="Replay a local F33 route through current CarController, request proxy, and Panda safety")
 parser.add_argument("route", type=Path, help="local route directory containing segment subdirectories with rlog.zst")
 parser.add_argument("--drop-sign-response", type=int, metavar="N", help="drop the Nth first-attempt sign response to exercise retry behavior")
+parser.add_argument("--oracle-response-delay-ms", type=float, default=20.0, help="synthetic successful oracle response latency (default: 20 ms)")
 args = parser.parse_args()
 ROOT = args.route
 files = sorted(ROOT.glob('*/rlog.zst'), key=lambda p: int(p.parent.name.rsplit('--', 1)[1]))
@@ -264,6 +265,8 @@ def host_tx(msgs):
       ident = bytes(m.dat)[21] & 0x3F
       if ident != 11:
         failures.append(('owned_non_id11_tx', sim[0], ident, bytes(m.dat).hex()))
+      elif bytes(m.dat)[24] != 100:
+        failures.append(('owned_id11_wrong_assist_gain', sim[0], bytes(m.dat)[24], bytes(m.dat).hex()))
       else:
         strict_host_id11 += 1
     echo_queue.append((int(m.address), bytes(m.dat), int(m.src) + (0x80 if ok else 0xC0)))
@@ -344,7 +347,7 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
     cmac = oracle_cmac(job)
     data = bytes((0x07, 0xC9, seq, 0)) + cmac
     response_serial += 1
-    heapq.heappush(responses, (sim[0] + 0.020, response_serial, seq, data))
+    heapq.heappush(responses, (sim[0] + args.oracle_response_delay_ms / 1000.0, response_serial, seq, data))
 
   # advance simulation in 1ms scheduler ticks only when needed; route event cadence remains source-real.
   def advance_to(target_ns):
