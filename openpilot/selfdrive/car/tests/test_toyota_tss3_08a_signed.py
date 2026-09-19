@@ -83,6 +83,7 @@ def put_inflight(worker: ToyotaTss3RequestProxy, seq: int, job):
 
 def qualify(worker: ToyotaTss3RequestProxy, collector: Collector, *, next_seq: int = 1) -> int:
   state = cs()
+  worker.set_control(True, 0.0)
   worker.update(batch((SECOC_SYNC_ADDR, sync_frame(), 0)), state)
   for i in range(8):
     worker.update(batch((NATIVE_08A_ADDR, native_frame(i, i + 1, semantic=0x50 + i), 2)), state)
@@ -153,20 +154,70 @@ def test_freshness_tracker_continues_across_reset_progression():
   assert ok and reset_changed and tracker.message_counter == 12
 
 
-def test_id11_builder_changes_only_pinion_angle():
-  native = native_frame(4, 5, target_id=11, angle_raw=123, semantic=0x77)[:28]
-  modified = build_id11_application(native, -456)
-  assert modified[18:20] == (-456).to_bytes(2, "big", signed=True)
-  assert modified[:18] == native[:18]
-  assert modified[20:] == native[20:]
+def test_id11_builder_preserves_native_envelope_and_promotes_id0():
+  native11 = native_frame(4, 5, target_id=11, angle_raw=123, semantic=0x77)[:28]
+  modified11 = build_id11_application(native11, -456)
+  assert modified11[18:20] == (-456).to_bytes(2, "big", signed=True)
+  assert modified11[:18] == native11[:18]
+  assert modified11[20:] == native11[20:]
 
-  non_id11 = native_frame(4, 5, target_id=18)[:28]
+  native0 = native_frame(4, 5, target_id=0, angle_raw=123, semantic=0x78)[:28]
+  modified0 = build_id11_application(native0, 321)
+  assert modified0[18:20] == (321).to_bytes(2, "big", signed=True)
+  assert modified0[21] == ((native0[21] & 0xC0) | 11)
+  for i in range(28):
+    if i not in (18, 19, 21):
+      assert modified0[i] == native0[i]
+
+  id18 = native_frame(4, 5, target_id=18)[:28]
   try:
-    build_id11_application(non_id11, 0)
+    build_id11_application(id18, 0)
   except ValueError:
     pass
   else:
-    raise AssertionError("non-ID11 application unexpectedly accepted")
+    raise AssertionError("non-ID0/ID11 application unexpectedly accepted")
+
+
+def test_relay_ownership_follows_lat_active_without_losing_qualification():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  qualify(worker, collector)
+  assert worker.active and worker.qualified
+
+  worker.set_control(False, 0.0)
+  assert not worker.active and worker.qualified
+  assert collector.flat[-1] == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)
+
+  # Re-enable uses the already-qualified freshness state and begins a new
+  # atomic handoff without running recovery again.
+  recovery_before = worker.recovery_count
+  worker.set_control(True, 0.5)
+  assert worker.arm_pending and worker.qualified
+  assert worker.recovery_count == recovery_before
+  assert collector.flat[-1] == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80100000000"), ADMIN_BUS)
+
+
+def test_inactive_qualified_proxy_does_not_arm_until_lat_active():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  # Qualify manually while lateral is inactive.
+  state = cs()
+  worker.update(batch((SECOC_SYNC_ADDR, sync_frame(), 0)), state)
+  for i in range(8):
+    worker.update(batch((NATIVE_08A_ADDR, native_frame(i, i + 1, semantic=0x50 + i), 2)), state)
+  seq = 1
+  for expected_message in (0, 4, 8):
+    job = worker.jobs.popleft()
+    put_inflight(worker, seq, job)
+    worker.update(batch(response(seq, KNOWN_CMAC4 if expected_message == 8 else bytes.fromhex("aaaaaaaa"))), state)
+    seq += 1
+  verify = worker.jobs.popleft()
+  put_inflight(worker, seq, verify)
+  worker.update(batch(response(seq, KNOWN_CMAC4)), state)
+  assert worker.qualified and not worker.active and not worker.arm_pending
+
+  worker.set_control(True, 0.0)
+  assert worker.arm_pending
 
 
 def test_active_non_id11_and_inactive_id11_are_exact_clones():
@@ -182,10 +233,14 @@ def test_active_non_id11_and_inactive_id11_are_exact_clones():
   assert collector.batches[before] == [CanData(NATIVE_08A_ADDR, id18, 0)]
 
   worker.set_control(False, -4.0)
+  release_batch_count = len(collector.batches)
+  assert collector.batches[-1] == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)]
   id11 = native_frame(10, 11, target_id=11, angle_raw=300, semantic=0x5A)
   worker.update(batch((NATIVE_08A_ADDR, id11, 2)), state)
-  assert collector.batches[-1] == [CanData(NATIVE_08A_ADDR, id11, 0)]
-  assert worker.transparent_tx_count == 2
+  # Stock forwarding owns the path while lateral is inactive; the host emits
+  # no exact replacement clone.
+  assert len(collector.batches) == release_batch_count
+  assert worker.transparent_tx_count == 1
 
 
 def test_sync_ahead_of_native_fv4_signs_the_native_epoch_without_releasing_ownership():
@@ -234,6 +289,36 @@ def test_sync_ahead_of_native_fv4_signs_the_native_epoch_without_releasing_owner
   sent_new = collector.batches[-1][0].dat
   assert sent_new[28] >> 4 == new_epoch_source[28] >> 4
   assert worker.active
+
+
+def test_active_id0_is_promoted_to_signed_id11_on_same_native_generation():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  seq = qualify(worker, collector)
+  state = cs()
+
+  worker.set_control(True, 1.5)
+  source = native_frame(9, 10, target_id=0, angle_raw=-120, semantic=0x59)
+  before_batches = len(collector.batches)
+  worker.update(batch((NATIVE_08A_ADDR, source, 2)), state)
+  assert len(collector.batches) == before_batches
+
+  sign = worker.jobs.popleft()
+  assert sign.kind == "sign" and sign.native_index == 10 and sign.message_counter == 10
+  expected_app = build_id11_application(source[:28], round(1.5 / (1024 / 17870)))
+  assert sign.application == expected_app
+  assert (sign.application[21] & 0x3F) == 11
+  for i in range(28):
+    if i not in (18, 19, 21):
+      assert sign.application[i] == source[i]
+
+  cmac = bytes.fromhex("12345678")
+  put_inflight(worker, seq, sign)
+  worker.update(batch(response(seq, cmac)), state)
+  sent = collector.batches[-1][0].dat
+  assert sent == build_signed_frame(expected_app, 1109, 10, cmac)
+  assert (sent[21] & 0x3F) == 11
+  assert worker.modified_tx_count == 1
 
 
 def test_active_id11_signs_exact_native_generation_and_preserves_every_other_field():

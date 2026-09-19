@@ -54,7 +54,9 @@ ORACLE_FAILURE_COOLDOWN_S = 2.0
 MAX_NATIVE_HISTORY = 256
 MAX_NATIVE_GAP = 8
 
+TSS3_IDLE_ID = 0
 TSS3_LTA_LCA_ID = 11
+TSS3_LATERAL_SOURCE_IDS = (TSS3_IDLE_ID, TSS3_LTA_LCA_ID)
 LATERAL_ANGLE_OFFSET = 18
 LATERAL_ANGLE_SIZE = 2
 
@@ -145,14 +147,22 @@ def build_signed_frame(application: bytes, reset_counter: int, message_counter: 
 
 
 def build_id11_application(native_application: bytes, target_angle_raw: int) -> bytes:
-  """Change only the ID11 pinion-angle request inside a native 0x08A application."""
+  """Build an ID11 lateral request from a native ID0/ID11 0x08A application.
+
+  ID0 is Toyota's no-lateral-request state. While openpilot lateral control is
+  active, promote only that low-6-bit request identity to ID11 and replace the
+  two-byte pinion-angle request. Every other native application byte remains
+  source-real and the exact native generation is re-signed by the EPS oracle.
+  """
   if len(native_application) != 28:
     raise ValueError("native 0x08A application must be 28 bytes")
-  if (native_application[21] & 0x3F) != TSS3_LTA_LCA_ID:
-    raise ValueError("selective lateral substitution requires native ID11")
+  native_id = native_application[21] & 0x3F
+  if native_id not in TSS3_LATERAL_SOURCE_IDS:
+    raise ValueError("lateral substitution requires native ID0 or ID11")
   if not -(1 << 15) <= target_angle_raw < (1 << 15):
     raise ValueError("target angle must fit signed16")
   application = bytearray(native_application)
+  application[21] = (application[21] & 0xC0) | TSS3_LTA_LCA_ID
   application[LATERAL_ANGLE_OFFSET:LATERAL_ANGLE_OFFSET + LATERAL_ANGLE_SIZE] = target_angle_raw.to_bytes(2, "big", signed=True)
   return bytes(application)
 
@@ -287,8 +297,25 @@ class ToyotaTss3RequestProxy:
 
   def set_control(self, lat_active: bool, target_angle_deg: float) -> None:
     with self._cv:
+      was_lat_active = self.control_lat_active
       self.control_lat_active = bool(lat_active)
       self.control_target_angle_raw = target_angle_deg_to_raw(float(target_angle_deg))
+
+      # Relay ownership follows the normal openpilot lateral-authority boundary.
+      # Do not proxy exact Toyota frames through driver override/disengagement:
+      # CarController resets its angle target to measured steering while
+      # CC.latActive is false, and Panda must begin the next handoff from that
+      # same baseline.
+      if was_lat_active and not self.control_lat_active:
+        self._release_locked(restore_pending=False)
+        # Cancel any source-generation sign work that became irrelevant at the
+        # authority transition while preserving recovered freshness/qualification.
+        self.state_generation += 1
+        self.jobs.clear()
+        self.inflight.clear()
+        self._cv.notify_all()
+      elif not was_lat_active and self.control_lat_active:
+        self._maybe_arm_locked()
 
   def _clear_oracle_state_locked(self) -> None:
     self.state_generation += 1
@@ -410,7 +437,7 @@ class ToyotaTss3RequestProxy:
     ), front=True)
 
   def _maybe_arm_locked(self) -> None:
-    if self.active or self.arm_pending or not self.qualified or not self.can_valid:
+    if self.active or self.arm_pending or not self.control_lat_active or not self.qualified or not self.can_valid:
       return
     admin = make_admin(True)
     self._send_can([admin])
@@ -450,7 +477,7 @@ class ToyotaTss3RequestProxy:
       self.next_output_index = event.index
 
     native = event.frame
-    if not self.control_lat_active or event.target_id != TSS3_LTA_LCA_ID:
+    if not self.control_lat_active or event.target_id not in TSS3_LATERAL_SOURCE_IDS:
       self.pending_outputs[event.index] = PendingOutput(native, native, False)
       self._flush_outputs_locked()
       return
