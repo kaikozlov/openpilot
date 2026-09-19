@@ -585,11 +585,9 @@ class ToyotaTss3RequestProxy:
       return
 
     application = build_id11_application(event.application, self.control_target_angle_raw)
-    if application == event.application:
-      self.pending_outputs[event.index] = PendingOutput(native, native, False)
-      self._flush_outputs_locked()
-      return
-
+    # Once the atomic handoff is complete, every owned source generation is
+    # re-signed through the EPS oracle. Do not special-case byte equality with
+    # Toyota's source request: equal bytes do not make Toyota the authority.
     self.pending_outputs[event.index] = PendingOutput(native, None, True)
     self._queue_job_locked(OracleJob(
       kind="sign",
