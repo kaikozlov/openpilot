@@ -51,7 +51,7 @@ ORACLE_NSDU_LEN = 40
 ORACLE_PRE_CF_DELAY_S = 0.005
 ORACLE_PERIOD_S = 0.025
 ORACLE_TIMEOUT_S = 0.12
-ORACLE_SIGN_TIMEOUT_S = 0.040
+ORACLE_SIGN_TIMEOUT_S = 0.045
 ORACLE_MAX_INFLIGHT = 4
 ORACLE_FAILURE_COOLDOWN_S = 2.0
 AUTHORITY_FAILURE_ALERT_S = 1.0
@@ -675,6 +675,7 @@ class ToyotaTss3RequestProxy:
     if job is None:
       return
     self.oracle_response_count += 1
+    self._cv.notify_all()
     if job.generation != self.state_generation:
       return
     if status != 0:
@@ -755,25 +756,44 @@ class ToyotaTss3RequestProxy:
 
   def _next_job_locked(self, now: float) -> tuple[int, OracleJob] | None:
     self._expire_inflight_locked(now)
-    if now < self.cooldown_until or now < self.next_oracle_send_at or len(self.inflight) >= ORACLE_MAX_INFLIGHT:
+    if now < self.cooldown_until:
       return None
-    while self.jobs:
-      job = self.jobs.popleft()
-      if job.generation != self.state_generation:
-        continue
+
+    while self.jobs and self.jobs[0].generation != self.state_generation:
+      self.jobs.popleft()
+    if not self.jobs:
+      return None
+
+    job = self.jobs[0]
+    if job.kind == "sign":
+      # Active command-5 signing is strictly serialized. Real-road failures
+      # showed that overlapping sign transactions can each receive ISO-TP FC
+      # while one private 0xC9 response disappears. One-at-a-time service keeps
+      # source order explicit; successful responses wake this sender immediately,
+      # so the observed 22.3-ms mean RTT provides catch-up capacity vs 25-ms 0x08A.
+      if self.inflight:
+        return None
+      self.jobs.popleft()
       seq = self._alloc_seq_locked()
       job.sent_at = now
       self.inflight[seq] = job
-      # Keep the 40-Hz sender phase-locked to its prior deadline. Using
-      # `now + period` accumulates every scheduler wakeup delay and eventually
-      # lets signed generations fall out of Panda's native-history window.
-      if self.next_oracle_send_at <= 0.0:
-        self.next_oracle_send_at = now + ORACLE_PERIOD_S
-      else:
-        next_deadline = self.next_oracle_send_at + ORACLE_PERIOD_S
-        self.next_oracle_send_at = next_deadline if next_deadline > now else now + ORACLE_PERIOD_S
       return seq, job
-    return None
+
+    if now < self.next_oracle_send_at or len(self.inflight) >= ORACLE_MAX_INFLIGHT:
+      return None
+
+    self.jobs.popleft()
+    seq = self._alloc_seq_locked()
+    job.sent_at = now
+    self.inflight[seq] = job
+    # Recovery/verify retain the qualified 40-Hz pipelined transport and
+    # phase-lock to the prior deadline so scheduler lateness does not accumulate.
+    if self.next_oracle_send_at <= 0.0:
+      self.next_oracle_send_at = now + ORACLE_PERIOD_S
+    else:
+      next_deadline = self.next_oracle_send_at + ORACLE_PERIOD_S
+      self.next_oracle_send_at = next_deadline if next_deadline > now else now + ORACLE_PERIOD_S
+    return seq, job
 
   def _oracle_sender_loop(self) -> None:
     while True:

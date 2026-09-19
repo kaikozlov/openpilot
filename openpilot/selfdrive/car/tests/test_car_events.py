@@ -21,6 +21,17 @@ class TestCarEvents(unittest.TestCase):
 
     self.assertNotIn(EventName.wrongCruiseMode, events.names)
 
+  def test_warning_only_steering_fault_does_not_soft_disable(self):
+    cp = car.CarParams(carFingerprint=CAR.TOYOTA_CAMRY_TSS3, brand="toyota")
+    state = non_adaptive_cruise_state()
+    state.steerFaultTemporarySilent = True
+
+    events = CarEvents(cp).update(state, state, car.CarControl())
+
+    self.assertIn(EventName.steerTempUnavailableSilent, events.names)
+    self.assertNotIn(EventName.steerTempUnavailable, events.names)
+
+
   def test_non_adaptive_cruise_still_blocks_other_toyotas(self):
     cp = car.CarParams(carFingerprint=CAR.TOYOTA_COROLLA_TSS3, brand="toyota")
     state = non_adaptive_cruise_state()

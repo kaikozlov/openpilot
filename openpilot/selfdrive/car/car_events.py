@@ -163,6 +163,9 @@ class CarEvents:
         events.add(EventName.buttonCancel)
 
     # Handle permanent and temporary steering faults
+    if CS.steerFaultTemporarySilent:
+      events.add(EventName.steerTempUnavailableSilent)
+
     self.steering_unpressed = 0 if CS.steeringPressed else self.steering_unpressed + 1
     if CS.steerFaultTemporary:
       if CS.steeringPressed and (not CS_prev.steerFaultTemporary or self.no_steer_warning):
