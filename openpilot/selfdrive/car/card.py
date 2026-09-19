@@ -183,6 +183,8 @@ class Car:
       # event. Do not reuse steerFaultTemporary: that event can soft-disable
       # lateral control and turn a brief authority drop into a ~1-second limp gap.
       CS.steerFaultTemporarySilent = self.tss3_08a_proxy.authority_unavailable()
+      if self.CP.openpilotLongitudinalControl:
+        CS.accFaulted = CS.accFaulted or self.tss3_08a_proxy.longitudinal_authority_unavailable()
 
     # Update radar tracks from CAN
     RD: structs.RadarDataT | None = self.RI.update(can_list)
@@ -257,7 +259,9 @@ class Car:
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
       if self.tss3_08a_proxy is not None:
-        self.tss3_08a_proxy.set_control(CC.latActive, self.last_actuators_output.steeringAngleDeg)
+        self.tss3_08a_proxy.set_control(CC.latActive, self.last_actuators_output.steeringAngleDeg,
+                                       self.CP.openpilotLongitudinalControl and CC.longActive,
+                                       self.last_actuators_output.accel)
       self._send_can(can_sends, valid=CS.canValid)
 
       self.CC_prev = CC

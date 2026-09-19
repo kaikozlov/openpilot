@@ -1,8 +1,8 @@
 """Exact-F33 authenticated 0x08A request-plane replacement.
 
-The FRC supplies each source generation and all non-lateral request fields. When
-openpilot owns the request plane, the observed Camry lateral owner is replaced
-with comma ID11 on that same source generation and the EPS RAM resident signs the
+The FRC supplies each source generation and all Toyota-owned request fields.
+Openpilot selectively replaces its lateral and/or ordinary DRCC acceleration
+fields on that same source generation, and the EPS RAM resident signs the
 modified application. No future-generation prediction or host SecOC key is used.
 """
 from __future__ import annotations
@@ -16,7 +16,11 @@ from dataclasses import dataclass
 
 from opendbc.car import structs
 from opendbc.car.can_definitions import CanData
-from opendbc.car.toyota.tss3 import target_angle_deg_to_raw
+from opendbc.car.toyota.tss3 import (
+  TSS3_LATERAL_SOURCE_IDS,
+  build_request_application,
+  target_angle_deg_to_raw,
+)
 from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
 from openpilot.common.swaglog import cloudlog
 
@@ -42,11 +46,6 @@ ORACLE_SEQUENCE_MAX = 0x1F
 # 100 ms replacement watchdog has already had time to fail open.
 ORACLE_RETRY_TIMEOUT_S = 0.050
 ORACLE_DEAD_TIMEOUT_S = 0.120
-
-TSS3_LATERAL_SOURCE_IDS = (0, 4, 11, 18)  # No Request, LDA, LTA/LCA, SDG
-TSS3_LTA_LCA_ID = 11
-TSS3_LTA_ASSIST_GAIN_RAW = 100
-
 
 def decode_sync(data: bytes) -> tuple[int, int]:
   if len(data) != 8:
@@ -125,17 +124,9 @@ def build_signed_frame(application: bytes, reset_counter: int, message_counter: 
 
 
 def build_id11_application(native_application: bytes, target_angle_raw: int) -> bytes:
-  if len(native_application) != 28:
-    raise ValueError("native 0x08A application must be 28 bytes")
-  native_id = native_application[21] & 0x3F
-  if native_id not in TSS3_LATERAL_SOURCE_IDS:
-    raise ValueError(f"unsupported native lateral request ID {native_id}")
-  application = bytearray(native_application)
-  application[18:20] = target_angle_raw.to_bytes(2, "big", signed=True)
-  application[21] = (application[21] & 0xC0) | TSS3_LTA_LCA_ID
-  if native_id != TSS3_LTA_LCA_ID:
-    application[24] = TSS3_LTA_ASSIST_GAIN_RAW
-  return bytes(application)
+  """Compatibility wrapper for lateral-only analysis and tests."""
+  return build_request_application(native_application, lat_active=True, target_angle_raw=target_angle_raw,
+                                   long_active=False, accel=0.0)
 
 
 @dataclass(frozen=True)
@@ -231,6 +222,8 @@ class ToyotaTss3RequestProxy:
     self.can_valid = False
     self.control_lat_active = False
     self.control_target_angle_raw = 0
+    self.control_long_active = False
+    self.control_accel = 0.0
     self.sync_trip: int | None = None
     self.sync_reset: int | None = None
     self.native_index = 0
@@ -258,14 +251,21 @@ class ToyotaTss3RequestProxy:
   def freshness_ready(self) -> bool:
     return self.tracker.ready
 
-  def set_control(self, lat_active: bool, target_angle_deg: float) -> None:
+  @property
+  def control_active(self) -> bool:
+    return self.control_lat_active or self.control_long_active
+
+  def set_control(self, lat_active: bool, target_angle_deg: float,
+                  long_active: bool = False, accel: float = 0.0) -> None:
     with self._cv:
-      was_active = self.control_lat_active
+      was_active = self.control_active
       self.control_lat_active = bool(lat_active)
       self.control_target_angle_raw = target_angle_deg_to_raw(float(target_angle_deg))
-      if was_active and not self.control_lat_active:
+      self.control_long_active = bool(long_active)
+      self.control_accel = float(accel)
+      if was_active and not self.control_active:
         self._release_control_locked()
-      elif not was_active and self.control_lat_active:
+      elif not was_active and self.control_active:
         self._maybe_arm_locked()
 
   def consume_handoff_completed(self) -> bool:
@@ -280,6 +280,10 @@ class ToyotaTss3RequestProxy:
       # a steering-unavailable warning. A failed handoff clears arm_pending and
       # is reported normally on the next state update.
       return self.control_lat_active and not self.active and not self.arm_pending
+
+  def longitudinal_authority_unavailable(self) -> bool:
+    with self._cv:
+      return self.control_long_active and not self.active and not self.arm_pending
 
   def _record_failure_locked(self, reason: str) -> None:
     self.last_failure_reason = reason
@@ -311,7 +315,7 @@ class ToyotaTss3RequestProxy:
     self._release_control_locked()
 
   def _maybe_arm_locked(self) -> None:
-    if self.active or self.arm_pending or not self.control_lat_active or not self.tracker.ready or not self.can_valid:
+    if self.active or self.arm_pending or not self.control_active or not self.tracker.ready or not self.can_valid:
       return
     self._send_can([make_admin(True)])
     self.arm_pending = True
@@ -335,14 +339,20 @@ class ToyotaTss3RequestProxy:
       pass
 
   def _queue_sign_locked(self, event: NativeEvent) -> None:
-    if event.target_id not in TSS3_LATERAL_SOURCE_IDS:
+    if self.control_lat_active and event.target_id not in TSS3_LATERAL_SOURCE_IDS:
       self._authority_failure_locked("unsupported_native_lateral_id")
       return
     message_counter = self.tracker.message_counter
     if message_counter is None:
       self._authority_failure_locked("freshness_not_ready")
       return
-    application = build_id11_application(event.application, self.control_target_angle_raw)
+    application = build_request_application(
+      event.application,
+      lat_active=self.control_lat_active,
+      target_angle_raw=self.control_target_angle_raw,
+      long_active=self.control_long_active,
+      accel=self.control_accel,
+    )
     if self.next_output_index is None:
       self.next_output_index = event.index
     self.pending_outputs[event.index] = None
@@ -352,14 +362,14 @@ class ToyotaTss3RequestProxy:
   def _observe_native_locked(self, frame: bytes) -> None:
     event = self._make_native_event_locked(frame)
     if event is None or not self.can_valid:
-      if self.control_lat_active or self.active or self.arm_pending:
+      if self.control_active or self.active or self.arm_pending:
         self._authority_failure_locked("native_event_invalid")
       self.tracker.reset()
       return
 
     ready, lost = self.tracker.update(event)
     if lost:
-      if self.control_lat_active or self.active or self.arm_pending:
+      if self.control_active or self.active or self.arm_pending:
         self._record_failure_locked("freshness_lost")
       self._release_control_locked()
       return

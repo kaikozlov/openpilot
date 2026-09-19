@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from opendbc.car.can_definitions import CanData
+from opendbc.car.toyota.tss3 import build_request_application
 from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
 from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
   ADMIN_ADDR, ADMIN_BUS, DOWNSTREAM_BUS, NATIVE_08A_ADDR, PANDA_REJECTED_OFFSET,
@@ -165,6 +166,56 @@ def test_id11_builder_has_only_bounded_lateral_edits():
         assert out[i] == app[i]
 
 
+def test_request_builder_replaces_only_normal_drcc_acceleration_bounds():
+  app = bytearray(native_frame(4, 5, target_id=0)[:28])
+  app[6:8] = bytes((0x2D, 0x47))
+  out = build_request_application(bytes(app), lat_active=False, target_angle_raw=0,
+                                  long_active=True, accel=-0.5)
+  assert out[8:10] == (-500).to_bytes(2, "big", signed=True)
+  assert out[11:13] == (-500).to_bytes(2, "big", signed=True)
+  for i in range(28):
+    if i not in (8, 9, 11, 12):
+      assert out[i] == app[i]
+
+  idle = bytearray(app)
+  idle[6:8] = bytes((0x00, 0x12))
+  promoted = build_request_application(bytes(idle), lat_active=False, target_angle_raw=0,
+                                       long_active=True, accel=0.3)
+  assert promoted[6:8] == bytes((0x2D, 0x47))
+  assert promoted[8:10] == (300).to_bytes(2, "big", signed=True)
+  assert promoted[11:13] == (300).to_bytes(2, "big", signed=True)
+  for i in range(28):
+    if i not in (6, 7, 8, 9, 11, 12):
+      assert promoted[i] == idle[i]
+
+
+def test_request_builder_preserves_alternate_toyota_longitudinal_tuple():
+  app = bytearray(native_frame(4, 5, target_id=18)[:28])
+  app[5:13] = bytes.fromhex("043553ff51000000")
+  out = build_request_application(bytes(app), lat_active=False, target_angle_raw=0,
+                                  long_active=True, accel=-0.5)
+  assert out == app
+
+  combined = build_request_application(bytes(app), lat_active=True, target_angle_raw=-123,
+                                       long_active=True, accel=-0.5)
+  assert combined[5:13] == app[5:13]
+  assert combined[18:20] == (-123).to_bytes(2, "big", signed=True)
+  assert (combined[21] & 0x3F) == 11
+
+  delayed_hold = bytearray(app)
+  delayed_hold[4] |= 0x20
+  delayed_hold[6:8] = bytes((0x2D, 0x67))
+  resumed = build_request_application(bytes(delayed_hold), lat_active=False, target_angle_raw=0,
+                                      long_active=True, accel=0.5)
+  assert resumed[4] == (delayed_hold[4] & ~0x20)
+  assert resumed[6:8] == bytes((0x2D, 0x47))
+  assert resumed[8:10] == (500).to_bytes(2, "big", signed=True)
+  assert resumed[11:13] == (500).to_bytes(2, "big", signed=True)
+  for i in range(28):
+    if i not in (4, 6, 7, 8, 9, 11, 12):
+      assert resumed[i] == delayed_hold[i]
+
+
 def test_request_plane_enable_is_topology_flag_only():
   on = SimpleNamespace(carFingerprint=CAR.TOYOTA_CAMRY_TSS3, passive=False,
                        safetyConfigs=[SimpleNamespace(safetyParam=ToyotaSafetyFlags.TSS3_08A_HOST.value)])
@@ -228,6 +279,46 @@ def test_sign_response_publishes_same_source_generation():
   assert (out.dat[21] & 0x3F) == 11 and out.dat[24] == 100
   assert out.dat[26] == source[26]
   assert (out.dat[28] >> 4) == (source[28] >> 4)
+
+
+def test_long_only_control_owns_request_plane_and_replaces_bounds():
+  collector = Collector()
+  clock = Clock()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False, monotonic=clock)
+  seed_at_next_epoch(worker)
+  worker.set_control(False, 0.0, True, -0.5)
+  assert worker.arm_pending
+  handoff = native_frame(12, 2, reset=1110)
+  worker.update(batch((NATIVE_08A_ADDR, handoff, 2)), cs())
+  worker.update(batch((NATIVE_08A_ADDR, handoff, DOWNSTREAM_BUS + 0x80)), cs())
+  assert worker.active
+
+  source = native_frame(13, 3, reset=1110, target_id=18, angle_raw=10)
+  source_app = bytearray(source[:28])
+  source_app[6:8] = bytes((0x2D, 0x47))
+  source = bytes(source_app) + source[28:]
+  worker.update(batch((NATIVE_08A_ADDR, source, 2)), cs())
+  with worker._cv:
+    seq, job = worker._next_job_locked(clock.now)
+  assert job.application[8:10] == (-500).to_bytes(2, "big", signed=True)
+  assert job.application[11:13] == (-500).to_bytes(2, "big", signed=True)
+  assert job.application[18:25] == source[18:25]
+  worker.update(batch(private_response(seq)), cs())
+  assert collector.batches[-1][0].dat[8:10] == (-500).to_bytes(2, "big", signed=True)
+
+  worker.set_control(False, 0.0, False, 0.0)
+  assert not worker.active
+
+
+def test_each_axis_can_release_without_dropping_authority_for_the_other():
+  worker, collector, _ = start_active_worker()
+  releases_before = sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat)
+  worker.set_control(True, 0.0, True, -0.2)
+  worker.set_control(False, 0.0, True, -0.2)
+  assert worker.active and not worker.authority_unavailable()
+  worker.set_control(False, 0.0, False, 0.0)
+  assert not worker.active
+  assert sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat) == releases_before + 1
 
 
 def test_later_oracle_reply_retries_missing_generation_without_releasing_or_reordering():
