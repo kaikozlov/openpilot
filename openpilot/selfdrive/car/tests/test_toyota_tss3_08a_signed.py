@@ -241,6 +241,57 @@ def test_inactive_qualified_proxy_does_not_arm_until_lat_active():
   assert worker.arm_pending
 
 
+def test_verify_timeout_retries_current_tracker_and_can_qualify():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  state = cs()
+  worker.update(batch((SECOC_SYNC_ADDR, sync_frame(), 0)), state)
+  source = native_frame(7, 8, semantic=0x57)
+  event_now = worker._make_native_event_locked(source)
+  assert event_now is not None
+  assert worker.tracker.seed(event_now, 8)
+  worker.state_generation = 7
+
+  verify = OracleJob(
+    kind="verify", generation=7,
+    domain=build_secoc_domain(event_now.application, event_now.trip_counter, event_now.reset_counter, 8),
+    expected_mac28=event_now.mac28_hex, native_index=event_now.index, candidate_message=8,
+    sent_at=1.0,
+  )
+  worker.inflight[10] = verify
+  with worker._cv:
+    worker._expire_inflight_locked(1.121)
+
+  assert not worker.qualified
+  assert not worker.inflight
+  assert worker.jobs
+  retry = worker.jobs[0]
+  assert retry.kind == "verify"
+  assert retry.retry_count == 1
+  assert retry.candidate_message == 8
+
+  worker.jobs.popleft()
+  put_inflight(worker, 11, retry)
+  worker.update(batch(response(11, KNOWN_CMAC4)), state)
+  assert worker.qualified
+
+
+def test_lat_active_without_request_plane_authority_keeps_warning_asserted():
+  worker = ToyotaTss3RequestProxy(Collector(), start_thread=False)
+  worker.set_control(True, 0.0)
+  assert worker.control_lat_active
+  assert not worker.active and not worker.arm_pending
+  assert worker.authority_failure_alert_active()
+
+  worker.qualified = True
+  worker.arm_pending = True
+  assert not worker.authority_failure_alert_active()
+
+  worker.arm_pending = False
+  worker.active = True
+  assert not worker.authority_failure_alert_active()
+
+
 def test_brake_press_releases_before_controlsd_lat_active_catches_up():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
