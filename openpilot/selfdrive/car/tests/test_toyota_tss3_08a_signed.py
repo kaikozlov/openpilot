@@ -60,8 +60,8 @@ def batch(*frames: tuple[int, bytes, int]):
   return [(1_000_000_000, list(frames))]
 
 
-def cs(valid: bool = True, gas_pressed: bool = False):
-  return SimpleNamespace(canValid=valid, gasPressed=gas_pressed)
+def cs(valid: bool = True, gas_pressed: bool = False, brake_pressed: bool = False):
+  return SimpleNamespace(canValid=valid, gasPressed=gas_pressed, brakePressed=brake_pressed)
 
 
 class Clock:
@@ -440,6 +440,16 @@ def test_gas_override_tx_reject_does_not_release_request_plane():
   worker.set_control(True, 0.0, long_enabled=True, long_active=True, accel=-0.5)
   worker.update(batch((NATIVE_08A_ADDR, b"x" * 32, DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET)),
                 cs(gas_pressed=True))
+  assert worker.active
+  assert not worker.authority_unavailable()
+  assert not worker.longitudinal_authority_unavailable()
+
+
+def test_brake_disengage_tx_reject_does_not_report_lost_authority():
+  worker, _, _ = start_active_worker()
+  worker.set_control(True, 0.0, long_enabled=True, long_active=True, accel=-0.5)
+  worker.update(batch((NATIVE_08A_ADDR, b"x" * 32, DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET)),
+                cs(brake_pressed=True))
   assert worker.active
   assert not worker.authority_unavailable()
   assert not worker.longitudinal_authority_unavailable()
