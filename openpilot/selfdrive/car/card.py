@@ -247,6 +247,12 @@ class Car:
       self.params.put_bool("ControlsReady", True)
 
     if self.sm.all_alive(['carControl']):
+      # The F33 request-plane controller and Panda must share one steering-rate
+      # baseline. Until the already-existing proxy has completed its atomic
+      # ownership handoff, keep Toyota CarController pinned to measured steering.
+      if self.tss3_08a_proxy is not None and hasattr(self.CI.CC, "tss3_request_plane_active"):
+        self.CI.CC.tss3_request_plane_active = self.tss3_08a_proxy.active
+
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
