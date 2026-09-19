@@ -180,6 +180,10 @@ class Car:
     CS = self.CI.update(can_list)
     if self.tss3_08a_proxy is not None:
       self.tss3_08a_proxy.update(can_list, CS)
+      # Surface request-plane authority failures through the ordinary temporary
+      # steering-fault UI/event path. The pulse is short enough to warn without
+      # converting a recoverable request-plane drop into a persistent disable.
+      CS.steerFaultTemporary = CS.steerFaultTemporary or self.tss3_08a_proxy.authority_failure_alert_active()
 
     # Update radar tracks from CAN
     RD: structs.RadarDataT | None = self.RI.update(can_list)
