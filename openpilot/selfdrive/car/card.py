@@ -42,7 +42,6 @@ def obd_callback(params: Params) -> ObdCallback:
 
 
 
-
 def can_comm_callbacks(logcan: messaging.SubSocket, sendcan: messaging.PubSocket) -> tuple[CanRecvCallable, CanSendCallable]:
   def can_recv(wait_for_one: bool = False) -> list[list[CanData]]:
     """
@@ -258,14 +257,13 @@ class Car:
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
       if self.tss3_08a_proxy is not None:
-        # The request-plane proxy consumes the same rate-limited steering target
-        # CarController reports to the rest of openpilot. Incoming 0x08A cadence
-        # drives actual request transmission; this only updates the desired ID11
-        # pinion angle and normal controlsd-owned latActive state.
         self.tss3_08a_proxy.set_control(CC.latActive, self.last_actuators_output.steeringAngleDeg)
       self._send_can(can_sends, valid=CS.canValid)
 
       self.CC_prev = CC
+    elif self.tss3_08a_proxy is not None:
+      # Never let the asynchronous signer outlive the normal CarControl stream.
+      self.tss3_08a_proxy.set_control(False, 0.0)
 
   def step(self):
     CS, RD = self.state_update()
