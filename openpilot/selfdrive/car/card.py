@@ -183,7 +183,7 @@ class Car:
       # Surface request-plane authority failures through a warning-only steering
       # event. Do not reuse steerFaultTemporary: that event can soft-disable
       # lateral control and turn a brief authority drop into a ~1-second limp gap.
-      CS.steerFaultTemporarySilent = self.tss3_08a_proxy.authority_failure_alert_active()
+      CS.steerFaultTemporarySilent = self.tss3_08a_proxy.authority_unavailable()
 
     # Update radar tracks from CAN
     RD: structs.RadarDataT | None = self.RI.update(can_list)
@@ -251,16 +251,13 @@ class Car:
       self.params.put_bool("ControlsReady", True)
 
     if self.sm.all_alive(['carControl']):
-      # The F33 request-plane controller and Panda must share one steering-rate
-      # baseline. Until the already-existing proxy has completed its atomic
-      # ownership handoff, keep Toyota CarController pinned to measured steering.
-      if self.tss3_08a_proxy is not None and hasattr(self.CI.CC, "tss3_request_plane_active"):
-        self.CI.CC.tss3_request_plane_active = self.tss3_08a_proxy.active
+      if self.tss3_08a_proxy is not None and self.tss3_08a_proxy.consume_handoff_completed():
+        self.CI.CC.reset_tss3_lateral_target(CS.steeringAngleDeg + CS.steeringAngleOffsetDeg)
 
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
-      if self.tss3_08a_proxy is not None and hasattr(self.tss3_08a_proxy, "set_control"):
+      if self.tss3_08a_proxy is not None:
         # The request-plane proxy consumes the same rate-limited steering target
         # CarController reports to the rest of openpilot. Incoming 0x08A cadence
         # drives actual request transmission; this only updates the desired ID11

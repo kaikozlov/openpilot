@@ -1,11 +1,11 @@
 """Exact-F33 authenticated 0x08A request-plane replacement.
 
-The FRC remains the source of truth for the complete TSS3 request envelope. Once
-freshness is qualified and Panda has atomically handed 0x08A forwarding to the
-host, native ID11 keeps its source-real envelope with only the lateral pinion
-angle replaced. Native ID0 is promoted to Toyota's observed ID11 shape by also
-setting the request ID and B24 assist gain raw 100 (1.00). Other application IDs
-remain source-real.
+The FRC remains the source of truth for the complete TSS3 source generation and
+all non-lateral request fields. Once freshness is qualified and Panda has
+atomically handed 0x08A forwarding to the host, every observed Camry lateral
+owner (ID0/4/11/18) is expressed downstream as comma-owned ID11. The host changes
+only the bounded lateral owner/angle/gain fields needed for that ID11 request and
+re-signs the exact source freshness generation.
 
 The host never learns the TSK key. It asks the EPS RAM resident to run ICU-S
 command 5 / selector 4 over the ordinary 0x008A SecOC domain and receives only
@@ -53,12 +53,8 @@ ORACLE_PERIOD_S = 0.025
 ORACLE_TIMEOUT_S = 0.12
 ORACLE_SIGN_TIMEOUT_S = 0.045
 ORACLE_SIGN_REPAIR_TIMEOUT_S = 0.025
-ORACLE_VERIFY_MAX_RETRIES = 2
 ORACLE_MAX_INFLIGHT = 4
-ORACLE_FAILURE_COOLDOWN_S = 2.0
-AUTHORITY_FAILURE_ALERT_S = 1.0
 MAX_NATIVE_HISTORY = 256
-MAX_NATIVE_GAP = 8
 
 TSS3_IDLE_ID = 0
 TSS3_LDA_ID = 4
@@ -72,14 +68,13 @@ TSS3_LTA_ASSIST_GAIN_RAW = 100
 LATERAL_ANGLE_OFFSET = 18
 LATERAL_ANGLE_SIZE = 2
 
-JobKind = Literal["recover", "verify", "sign"]
+JobKind = Literal["recover", "sign"]
 
 
 def request_plane_enabled(CP: structs.CarParams) -> bool:
   """Return whether CarParams selected the relay-correct F33 request plane."""
   return (CP.carFingerprint == CAR.TOYOTA_CAMRY_TSS3 and not CP.passive and bool(CP.safetyConfigs) and
-          bool(CP.safetyConfigs[0].safetyParam & ToyotaSafetyFlags.TSS3_08A_HOST.value) and
-          bool(CP.safetyConfigs[0].safetyParam & ToyotaSafetyFlags.TSS3_08A_SIGNED.value))
+          bool(CP.safetyConfigs[0].safetyParam & ToyotaSafetyFlags.TSS3_08A_HOST.value))
 
 
 def shift_reset_epoch(trip_counter: int, reset_counter: int, delta: int) -> tuple[int, int]:
@@ -225,7 +220,7 @@ class NativeFreshnessTracker:
     prev = self.event
     reset_changed = (event.trip_counter, event.reset_counter) != (prev.trip_counter, prev.reset_counter)
     delta = (event.b26 - prev.b26) & 0x3F
-    if not 1 <= delta <= MAX_NATIVE_GAP:
+    if delta != 1:
       return False, False
 
     if reset_changed:
@@ -258,16 +253,8 @@ class OracleJob:
   reset_counter: int | None = None
   message_counter: int | None = None
   sent_at: float | None = None
-  retry_count: int = 0
   flow_control_seen: bool = False
   cf_repair_sent_at: float | None = None
-
-
-@dataclass
-class PendingOutput:
-  native_frame: bytes
-  ready_frame: bytes | None
-  modified: bool
 
 
 class ToyotaTss3RequestProxy:
@@ -286,8 +273,6 @@ class ToyotaTss3RequestProxy:
     self.can_valid = False
     self.control_lat_active = False
     self.control_target_angle_raw = 0
-    self.native_cruise_operating = False
-    self.brake_pressed = False
 
     self.sync_trip: int | None = None
     self.sync_reset: int | None = None
@@ -299,38 +284,30 @@ class ToyotaTss3RequestProxy:
     self.tracker = NativeFreshnessTracker()
     self.qualified = False
     self.recovery_active = False
-    self.recovery_sample_index: int | None = None
     self.recovery_remaining = 0
     self.state_generation = 0
-    self.cooldown_until = 0.0
 
     self.jobs: deque[OracleJob] = deque()
     self.inflight: dict[int, OracleJob] = {}
     self.next_oracle_seq = 1
     self.next_oracle_send_at = 0.0
-    self.oracle_failures = 0
 
     self.active = False
     self.arm_pending = False
-    self.arm_admin_data: bytes | None = None
-    self.arm_accepted = False
-    self.arm_clone_index: int | None = None
     self.arm_clone_frame: bytes | None = None
+    self.handoff_completed = False
 
-    self.pending_outputs: dict[int, PendingOutput] = {}
+    self.pending_outputs: dict[int, bytes | None] = {}
     self.next_output_index: int | None = None
 
     self.arm_count = 0
     self.modified_tx_count = 0
-    self.transparent_tx_count = 0
     self.release_count = 0
     self.oracle_response_count = 0
     self.oracle_timeout_count = 0
     self.recovery_count = 0
-    self.verification_count = 0
     self.authority_failure_count = 0
     self.last_authority_failure_reason = ""
-    self.authority_failure_alert_until = 0.0
 
     if start_thread:
       self._thread = threading.Thread(target=self._oracle_sender_loop, name="tss3_08a_oracle", daemon=True)
@@ -352,19 +329,21 @@ class ToyotaTss3RequestProxy:
       elif not was_lat_active and self.control_lat_active:
         self._maybe_arm_locked()
 
-  def authority_failure_alert_active(self) -> bool:
+  def consume_handoff_completed(self) -> bool:
     with self._cv:
-      # A transient failure gets a short warning pulse. More importantly, never
-      # let openpilot claim lateral activity silently while the request plane has
-      # neither active authority nor an atomic handoff in progress.
-      unavailable = self.control_lat_active and not (self.active or self.arm_pending)
-      return self._monotonic() < self.authority_failure_alert_until or unavailable
+      completed = self.handoff_completed
+      self.handoff_completed = False
+      return completed
+
+  def authority_unavailable(self) -> bool:
+    with self._cv:
+      # Surface exactly the state the driver cares about: controlsd still wants
+      # lateral control, but the request plane is not owned or handing off.
+      return self.control_lat_active and not (self.active or self.arm_pending)
 
   def _record_failure_locked(self, reason: str, *, full_recovery: bool) -> None:
     self.authority_failure_count += 1
     self.last_authority_failure_reason = reason
-    now = self._monotonic()
-    self.authority_failure_alert_until = max(self.authority_failure_alert_until, now + AUTHORITY_FAILURE_ALERT_S)
     cloudlog.event(
       "toyota_f33_request_plane_failure",
       reason=reason,
@@ -384,10 +363,10 @@ class ToyotaTss3RequestProxy:
     # only the current authority interval and preserve the proven tracker and
     # qualification so the next eligible native generation can re-arm.
     self._record_failure_locked(reason, full_recovery=False)
-    self._release_control_locked(restore_pending=False)
+    self._release_control_locked()
 
-  def _release_control_locked(self, *, restore_pending: bool = False) -> None:
-    self._release_locked(restore_pending=restore_pending)
+  def _release_control_locked(self) -> None:
+    self._release_locked()
     # Sign work belongs to the authority interval that just ended. Preserve the
     # recovered native freshness tracker/qualification, but invalidate queued
     # and in-flight modified generations so they cannot transmit after release.
@@ -402,7 +381,6 @@ class ToyotaTss3RequestProxy:
     self.inflight.clear()
     self.qualified = False
     self.recovery_active = False
-    self.recovery_sample_index = None
     self.recovery_remaining = 0
     self._cv.notify_all()
 
@@ -411,26 +389,17 @@ class ToyotaTss3RequestProxy:
       return
     out: list[CanData] = []
     while True:
-      slot = self.pending_outputs.get(self.next_output_index)
-      if slot is None or slot.ready_frame is None:
+      frame = self.pending_outputs.get(self.next_output_index)
+      if frame is None:
         break
-      out.append(CanData(NATIVE_08A_ADDR, slot.ready_frame, DOWNSTREAM_BUS))
-      if slot.modified:
-        self.modified_tx_count += 1
-      else:
-        self.transparent_tx_count += 1
+      out.append(CanData(NATIVE_08A_ADDR, frame, DOWNSTREAM_BUS))
+      self.modified_tx_count += 1
       del self.pending_outputs[self.next_output_index]
       self.next_output_index += 1
     if out:
       self._send_can(out)
 
-  def _restore_pending_native_locked(self) -> None:
-    for slot in self.pending_outputs.values():
-      slot.ready_frame = slot.native_frame
-      slot.modified = False
-    self._flush_outputs_locked()
-
-  def _release_locked(self, *, restore_pending: bool = False, send_admin: bool = True) -> None:
+  def _release_locked(self, *, send_admin: bool = True) -> None:
     was_active = self.active
     was_arm_pending = self.arm_pending
 
@@ -440,24 +409,20 @@ class ToyotaTss3RequestProxy:
     self.active = False
     self.arm_pending = False
 
-    if restore_pending and was_active:
-      self._restore_pending_native_locked()
     if send_admin and (was_active or was_arm_pending):
       self._send_can([make_admin(False)])
       self.release_count += 1
-    self.arm_admin_data = None
-    self.arm_accepted = False
-    self.arm_clone_index = None
     self.arm_clone_frame = None
+    self.handoff_completed = False
     self.pending_outputs.clear()
     self.next_output_index = None
 
   def _fail_open_locked(self, reason: str) -> None:
-    # Initial startup can see native 0x08A before the first usable 0x00F sync;
-    # that is not an authority failure and should not warn the driver. Once any
-    # freshness/authority state exists, a full reset is a real visible failure.
-    had_state = self.active or self.arm_pending or self.qualified or self.recovery_active or self.tracker.event is not None
-    if had_state:
+    # Freshness can be lost while lateral control is inactive (for example a
+    # source/recorder delivery gap). Reset and requalify silently in that case.
+    # It is an authority failure only if controlsd currently expects lateral
+    # authority or a handoff/owned interval is actually in progress.
+    if self.control_lat_active or self.active or self.arm_pending:
       self._record_failure_locked(reason, full_recovery=True)
     self._release_locked()
     self._clear_oracle_state_locked()
@@ -465,19 +430,21 @@ class ToyotaTss3RequestProxy:
     self.stable_native_frames = 0
     self.last_native_b26 = None
 
-  def _queue_job_locked(self, job: OracleJob, *, front: bool = False) -> None:
-    if front:
-      self.jobs.appendleft(job)
-    else:
-      self.jobs.append(job)
+  def _queue_job_locked(self, job: OracleJob) -> None:
+    self.jobs.append(job)
     self._cv.notify_all()
 
+  def _abort_recovery_locked(self) -> None:
+    self._clear_oracle_state_locked()
+    self.tracker = NativeFreshnessTracker()
+    self.stable_native_frames = 0
+    self.last_native_b26 = None
+
   def _start_recovery_locked(self, event: NativeEvent) -> None:
-    if self._monotonic() < self.cooldown_until or self.recovery_active:
+    if self.recovery_active:
       return
     self._clear_oracle_state_locked()
     self.recovery_active = True
-    self.recovery_sample_index = event.index
     self.recovery_remaining = 64
     self.recovery_count += 1
     generation = self.state_generation
@@ -512,34 +479,17 @@ class ToyotaTss3RequestProxy:
     self.jobs.clear()
     self.inflight.clear()
     self.recovery_active = False
-    self.recovery_sample_index = None
     self.recovery_remaining = 0
-    self.qualified = False
-    if tracker.event is not None and tracker.message_counter is not None:
-      self._queue_verify_locked(tracker.event, tracker.message_counter)
+    self.qualified = True
+    self._maybe_arm_locked()
     return True
 
-  def _queue_verify_locked(self, event: NativeEvent, message_counter: int, *, retry_count: int = 0) -> None:
-    self.verification_count += 1
-    self._queue_job_locked(OracleJob(
-      kind="verify",
-      generation=self.state_generation,
-      domain=build_secoc_domain(event.application, event.trip_counter, event.reset_counter, message_counter),
-      expected_mac28=event.mac28_hex,
-      native_index=event.index,
-      candidate_message=message_counter,
-      retry_count=retry_count,
-    ), front=True)
-
   def _maybe_arm_locked(self) -> None:
-    if (self.active or self.arm_pending or not self.control_lat_active or not self.native_cruise_operating or
-        self.brake_pressed or not self.qualified or not self.can_valid):
+    if self.active or self.arm_pending or not self.control_lat_active or not self.qualified or not self.can_valid:
       return
-    admin = make_admin(True)
-    self._send_can([admin])
+    self._send_can([make_admin(True)])
     self.arm_pending = True
-    self.arm_admin_data = admin.dat
-    self.arm_accepted = False
+    self.arm_clone_frame = None
 
   def _make_native_event_locked(self, frame: bytes) -> NativeEvent | None:
     if len(frame) != 32 or self.sync_trip is None or self.sync_reset is None:
@@ -572,10 +522,7 @@ class ToyotaTss3RequestProxy:
     if self.next_output_index is None:
       self.next_output_index = event.index
 
-    native = event.frame
     if not self.control_lat_active:
-      self.pending_outputs[event.index] = PendingOutput(native, native, False)
-      self._flush_outputs_locked()
       return
     if event.target_id not in TSS3_LATERAL_SOURCE_IDS:
       # Unknown Toyota lateral semantics are not a valid fallback while comma
@@ -588,7 +535,7 @@ class ToyotaTss3RequestProxy:
     # Once the atomic handoff is complete, every owned source generation is
     # re-signed through the EPS oracle. Do not special-case byte equality with
     # Toyota's source request: equal bytes do not make Toyota the authority.
-    self.pending_outputs[event.index] = PendingOutput(native, None, True)
+    self.pending_outputs[event.index] = None
     self._queue_job_locked(OracleJob(
       kind="sign",
       generation=self.state_generation,
@@ -606,25 +553,12 @@ class ToyotaTss3RequestProxy:
       self._fail_open_locked("native_event_invalid")
       return
 
-    # Use the same source-real cruise latch that Panda uses for controls_allowed.
-    # This closes the one-generation race where controlsd can still report
-    # latActive after Toyota has already dropped steering authority.
-    self.native_cruise_operating = bool(frame[3] & 0x08)
-
     if self.last_native_b26 is not None and event.b26 == ((self.last_native_b26 + 1) & 0x3F):
       self.stable_native_frames += 1
     else:
       self.stable_native_frames = 1
     self.last_native_b26 = event.b26
     self.history.append(event)
-
-    if not self.native_cruise_operating and (self.active or self.arm_pending):
-      # Toyota withdrew the source-side operating latch. This ends the comma
-      # authority interval; do not replay the blocked withdrawal generation as
-      # Toyota while the host still owns the relay. Release first and let the
-      # next native publication cross under stock forwarding.
-      self._release_control_locked()
-      return
 
     if self.tracker.event is None or self.tracker.message_counter is None:
       if self.stable_native_frames >= STABLE_NATIVE_FRAMES:
@@ -645,8 +579,13 @@ class ToyotaTss3RequestProxy:
     message_counter = self.tracker.message_counter
 
     if self.arm_pending:
-      self.arm_clone_index = event.index
+      if self.arm_clone_frame is not None:
+        # A second source generation arrived before the one-frame handoff was
+        # acknowledged. Do not emit another Toyota clone into owned mode.
+        self._authority_failure_locked("handoff_source_overrun")
+        return
       self.arm_clone_frame = event.frame
+      self.next_output_index = event.index + 1
       self._send_can([CanData(NATIVE_08A_ADDR, event.frame, DOWNSTREAM_BUS)])
     elif self.active:
       self._queue_active_output_locked(event, message_counter)
@@ -654,29 +593,35 @@ class ToyotaTss3RequestProxy:
     self._maybe_arm_locked()
 
   def _observe_tx_echo_locked(self, address: int, data: bytes, src: int) -> None:
-    if address == ADMIN_ADDR and self.arm_pending and data == self.arm_admin_data:
-      if src == ADMIN_BUS + PANDA_RETURNED_OFFSET:
-        self.arm_accepted = True
-      elif src == ADMIN_BUS + PANDA_REJECTED_OFFSET:
+    if address == ADMIN_ADDR and self.arm_pending and data == make_admin(True).dat:
+      if src == ADMIN_BUS + PANDA_REJECTED_OFFSET:
         self._authority_failure_locked("arm_admin_rejected")
       return
 
     if address != NATIVE_08A_ADDR:
       return
 
-    if src == DOWNSTREAM_BUS + PANDA_RETURNED_OFFSET and self.arm_pending and self.arm_accepted and data == self.arm_clone_frame:
+    if src == DOWNSTREAM_BUS + PANDA_RETURNED_OFFSET and self.arm_pending and data == self.arm_clone_frame:
       self.active = True
       self.arm_pending = False
-      self.arm_admin_data = None
-      self.arm_accepted = False
-      self.next_output_index = (self.arm_clone_index + 1) if self.arm_clone_index is not None else None
-      self.arm_clone_index = None
+      self.handoff_completed = True
       self.arm_clone_frame = None
       self.arm_count += 1
     elif src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET and self.arm_pending and data == self.arm_clone_frame:
       self._authority_failure_locked("handoff_clone_rejected")
     elif src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET and self.active:
-      self._authority_failure_locked("host_08a_rejected")
+      # A Panda TX reject is factual transport telemetry, not by itself a second
+      # authority classifier. Panda may beat controlsd to a normal disengagement
+      # edge by a few milliseconds. Release immediately; if latActive remains
+      # true, the derived unavailable state surfaces the real loss of authority.
+      cloudlog.event(
+        "toyota_f33_request_plane_tx_reject",
+        native_index=self.native_index,
+        pending_outputs=len(self.pending_outputs),
+        inflight=len(self.inflight),
+        error=True,
+      )
+      self._release_control_locked()
 
   def _observe_oracle_response_locked(self, data: bytes) -> None:
     if len(data) != 8:
@@ -708,31 +653,21 @@ class ToyotaTss3RequestProxy:
 
     cmac4 = data[4:8]
     mac28 = mac28_hex_from_cmac4(cmac4)
-    self.oracle_failures = 0
     if job.kind == "recover":
       self.recovery_remaining -= 1
       if mac28 == job.expected_mac28 and job.native_index is not None and job.candidate_message is not None:
         if not self._seed_tracker_from_recovery_locked(job.native_index, job.candidate_message):
-          self.cooldown_until = self._monotonic() + ORACLE_FAILURE_COOLDOWN_S
+          self._abort_recovery_locked()
       elif self.recovery_remaining <= 0:
         self.recovery_active = False
-        self.cooldown_until = self._monotonic() + ORACLE_FAILURE_COOLDOWN_S
-    elif job.kind == "verify":
-      if mac28 == job.expected_mac28:
-        self.qualified = True
-        self._maybe_arm_locked()
-      elif self.tracker.event is not None:
-        latest = self.tracker.event
-        self.tracker = NativeFreshnessTracker()
-        self._start_recovery_locked(latest)
     elif job.kind == "sign":
       if None in (job.native_index, job.application, job.reset_counter, job.message_counter):
         self._authority_failure_locked("invalid_sign_job")
         return
-      slot = self.pending_outputs.get(int(job.native_index))
-      if slot is None:
+      native_index = int(job.native_index)
+      if native_index not in self.pending_outputs:
         return
-      slot.ready_frame = build_signed_frame(job.application, int(job.reset_counter), int(job.message_counter), cmac4)
+      self.pending_outputs[native_index] = build_signed_frame(job.application, int(job.reset_counter), int(job.message_counter), cmac4)
       self._flush_outputs_locked()
 
   def _job_failure_locked(self, job: OracleJob) -> None:
@@ -741,28 +676,14 @@ class ToyotaTss3RequestProxy:
       self._authority_failure_locked("oracle_sign_failure")
       return
 
-    if job.kind == "verify":
-      # Verification is the final qualification step. A single missing private
-      # C9 response must never strand the proxy forever with a valid tracker but
-      # qualified=False. Retry against the *current* tracker event because native
-      # freshness may have advanced while the prior verify was in flight.
-      if (job.retry_count < ORACLE_VERIFY_MAX_RETRIES and self.tracker.event is not None and
-          self.tracker.message_counter is not None):
-        self._queue_verify_locked(self.tracker.event, self.tracker.message_counter, retry_count=job.retry_count + 1)
-        return
-
+    if job.kind == "recover":
+      # A missing/error recovery response may have been the one MAC candidate
+      # that would identify the full counter. Do not skip it or count toward an
+      # arbitrary retry threshold: abandon this attempt and retry after another
+      # eight clean source generations.
       self.oracle_timeout_count += 1
-      self._fail_open_locked("oracle_verify_failure")
+      self._abort_recovery_locked()
       return
-
-    if job.kind == "recover" and self.recovery_remaining > 0:
-      self.recovery_remaining -= 1
-    self.oracle_failures += 1
-    if self.oracle_failures >= 4:
-      self.oracle_timeout_count += self.oracle_failures
-      self.oracle_failures = 0
-      self.cooldown_until = self._monotonic() + ORACLE_FAILURE_COOLDOWN_S
-      self._fail_open_locked("oracle_recovery_failure")
 
   def _alloc_seq_locked(self) -> int:
     for _ in range(255):
@@ -803,9 +724,6 @@ class ToyotaTss3RequestProxy:
 
   def _next_job_locked(self, now: float) -> tuple[int, OracleJob] | None:
     self._expire_inflight_locked(now)
-    if now < self.cooldown_until:
-      return None
-
     while self.jobs and self.jobs[0].generation != self.state_generation:
       self.jobs.popleft()
     if not self.jobs:
@@ -833,7 +751,7 @@ class ToyotaTss3RequestProxy:
     seq = self._alloc_seq_locked()
     job.sent_at = now
     self.inflight[seq] = job
-    # Recovery/verify retain the qualified 40-Hz pipelined transport and
+    # Recovery retains the qualified 40-Hz pipelined transport and
     # phase-lock to the prior deadline so scheduler lateness does not accumulate.
     if self.next_oracle_send_at <= 0.0:
       self.next_oracle_send_at = now + ORACLE_PERIOD_S
@@ -870,14 +788,8 @@ class ToyotaTss3RequestProxy:
   def update(self, can_list: list, CS: structs.CarState) -> None:
     with self._cv:
       self.can_valid = bool(CS.canValid)
-      self.brake_pressed = bool(getattr(CS, "brakePressed", False))
       if not self.can_valid and (self.active or self.arm_pending or self.qualified or self.recovery_active):
         self._fail_open_locked("can_invalid")
-      elif self.brake_pressed and (self.active or self.arm_pending):
-        # Panda's generic safety logic revokes controls_allowed immediately on
-        # brake press, which can precede controlsd's latActive=False by a few ms.
-        # Release on the same fresh CarState boundary to avoid one stale ID11.
-        self._release_control_locked()
 
       for _, packets in can_list:
         for address, dat, src in packets:
