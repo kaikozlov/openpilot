@@ -502,6 +502,28 @@ def test_active_id0_is_promoted_to_signed_id11_on_same_native_generation():
   assert worker.modified_tx_count == 1
 
 
+def test_equal_native_id11_still_queues_oracle_signing():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  qualify(worker, collector)
+  state = cs()
+
+  source_raw = 100
+  worker.set_control(True, source_raw * (1024 / 17870))
+  source = native_frame(9, 10, target_id=11, angle_raw=source_raw, semantic=0x59)
+  before = len(collector.batches)
+  worker.update(batch((NATIVE_08A_ADDR, source, 2)), state)
+
+  # Byte equality with Toyota's request has no authority meaning. The source
+  # generation still requires an EPS-oracle signing job and is not emitted as a
+  # transparent native frame.
+  assert len(collector.batches) == before
+  assert worker.jobs
+  sign = worker.jobs[-1]
+  assert sign.kind == "sign" and sign.native_index == 10
+  assert sign.application == source[:28]
+
+
 def test_active_id11_signs_exact_native_generation_and_preserves_every_other_field():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
