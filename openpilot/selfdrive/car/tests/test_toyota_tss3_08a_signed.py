@@ -7,6 +7,7 @@ from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
   ORACLE_BUS,
   ORACLE_RESPONSE_ADDR,
   OracleJob,
+  PendingOutput,
   NativeEvent,
   NativeFreshnessTracker,
   ToyotaTss3RequestProxy,
@@ -189,13 +190,16 @@ def test_id11_builder_preserves_native_envelope_and_promotes_id0():
     if i not in (18, 19, 21, 24):
       assert modified0[i] == native0[i]
 
-  id18 = native_frame(4, 5, target_id=18)[:28]
-  try:
-    build_id11_application(id18, 0)
-  except ValueError:
-    pass
-  else:
-    raise AssertionError("non-ID0/ID11 application unexpectedly accepted")
+  for source_id, source_gain in ((4, 100), (18, 50)):
+    native_other = bytearray(native_frame(4, 5, target_id=source_id)[:28])
+    native_other[24] = source_gain
+    modified_other = build_id11_application(bytes(native_other), -12)
+    assert (modified_other[21] & 0x3F) == 11
+    assert modified_other[18:20] == (-12).to_bytes(2, "big", signed=True)
+    assert modified_other[24] == 100
+    for i in range(28):
+      if i not in (18, 19, 21, 24):
+        assert modified_other[i] == native_other[i]
 
 
 def test_relay_ownership_follows_lat_active_without_losing_qualification():
@@ -333,8 +337,10 @@ def test_native_cruise_latch_drop_releases_before_next_modified_request():
   assert not worker.active
   assert worker.qualified
   assert not worker.native_cruise_operating
-  assert collector.batches[before] == [CanData(NATIVE_08A_ADDR, pending, 0), CanData(NATIVE_08A_ADDR, dropped, 0)]
-  assert collector.batches[before + 1] == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)]
+  # The blocked withdrawal generation and any pending modified generation are
+  # discarded at the ownership boundary. Toyota resumes on the next native frame
+  # after the relay release; no Toyota request is replayed under comma ownership.
+  assert collector.batches[before] == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)]
   assert not worker.jobs
   assert not worker.inflight
 
@@ -347,17 +353,25 @@ def test_native_cruise_latch_drop_releases_before_next_modified_request():
   assert worker.arm_pending
 
 
-def test_active_non_id11_and_inactive_id11_are_exact_clones():
+def test_active_id18_is_replaced_by_id11_and_inactive_uses_stock_forwarding():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
-  qualify(worker, collector)
+  seq = qualify(worker, collector)
   state = cs()
 
   worker.set_control(True, 3.0)
-  id18 = native_frame(9, 10, target_id=18, angle_raw=200, semantic=0x59)
+  id18 = bytearray(native_frame(9, 10, target_id=18, angle_raw=200, semantic=0x59))
+  id18[24] = 50
   before = len(collector.batches)
-  worker.update(batch((NATIVE_08A_ADDR, id18, 2)), state)
-  assert collector.batches[before] == [CanData(NATIVE_08A_ADDR, id18, 0)]
+  worker.update(batch((NATIVE_08A_ADDR, bytes(id18), 2)), state)
+  assert len(collector.batches) == before
+  sign = worker.jobs.popleft()
+  assert sign.kind == "sign"
+  assert (sign.application[21] & 0x3F) == 11
+  assert sign.application[24] == 100
+  put_inflight(worker, seq, sign)
+  worker.update(batch(response(seq, bytes.fromhex("12345678"))), state)
+  assert (collector.batches[-1][0].dat[21] & 0x3F) == 11
 
   worker.set_control(False, -4.0)
   release_batch_count = len(collector.batches)
@@ -365,9 +379,8 @@ def test_active_non_id11_and_inactive_id11_are_exact_clones():
   id11 = native_frame(10, 11, target_id=11, angle_raw=300, semantic=0x5A)
   worker.update(batch((NATIVE_08A_ADDR, id11, 2)), state)
   # Stock forwarding owns the path while lateral is inactive; the host emits
-  # no exact replacement clone.
+  # no replacement frame.
   assert len(collector.batches) == release_batch_count
-  assert worker.transparent_tx_count == 1
 
 
 def test_large_native_gap_waits_for_sync_catchup_before_recovery():
@@ -517,7 +530,7 @@ def test_active_id11_signs_exact_native_generation_and_preserves_every_other_fie
   assert worker.modified_tx_count == 1
 
 
-def test_output_order_waits_for_earlier_signed_id11():
+def test_output_order_waits_for_every_signed_source_generation():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
   seq = qualify(worker, collector)
@@ -528,18 +541,27 @@ def test_output_order_waits_for_earlier_signed_id11():
   worker.update(batch((NATIVE_08A_ADDR, first, 2)), state)
   sign = worker.jobs.popleft()
 
-  # A later non-ID11 request is ready immediately, but must not overtake the
-  # earlier native generation while its modified ID11 frame is being signed.
-  second = native_frame(10, 11, target_id=18, angle_raw=400, semantic=0x5A)
+  # A later Toyota ID18 owner also becomes comma ID11, but it must not overtake
+  # the earlier source generation while that generation is being signed.
+  second = bytearray(native_frame(10, 11, target_id=18, angle_raw=400, semantic=0x5A))
+  second[24] = 50
   before = len(collector.batches)
-  worker.update(batch((NATIVE_08A_ADDR, second, 2)), state)
+  worker.update(batch((NATIVE_08A_ADDR, bytes(second), 2)), state)
   assert len(collector.batches) == before
+  second_sign = worker.jobs.popleft()
+  assert (second_sign.application[21] & 0x3F) == 11 and second_sign.application[24] == 100
 
   put_inflight(worker, seq, sign)
   cmac = bytes.fromhex("23456789")
   worker.update(batch(response(seq, cmac)), state)
   expected_first = build_signed_frame(sign.application, 1109, 10, cmac)
-  assert collector.batches[-1] == [CanData(NATIVE_08A_ADDR, expected_first, 0), CanData(NATIVE_08A_ADDR, second, 0)]
+  assert collector.batches[-1] == [CanData(NATIVE_08A_ADDR, expected_first, 0)]
+
+  put_inflight(worker, seq + 1, second_sign)
+  cmac2 = bytes.fromhex("3456789a")
+  worker.update(batch(response(seq + 1, cmac2)), state)
+  expected_second = build_signed_frame(second_sign.application, 1109, 11, cmac2)
+  assert collector.batches[-1] == [CanData(NATIVE_08A_ADDR, expected_second, 0)]
 
 
 def test_active_sign_jobs_are_serialized_and_response_driven():
@@ -564,9 +586,9 @@ def test_active_sign_jobs_are_serialized_and_response_driven():
     assert item2 is not None and item2[1] is second
 
 
-def test_sign_timeout_retries_twice_before_authority_release():
+def test_sign_flow_control_triggers_one_same_session_cf_repair_then_failure_releases():
   collector = Collector()
-  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False, monotonic=lambda: 1.020)
   worker.active = True
   worker.qualified = True
   worker.state_generation = 7
@@ -577,49 +599,49 @@ def test_sign_timeout_retries_twice_before_authority_release():
     sent_at=1.0,
   )
   worker.inflight[10] = job
-  worker.next_oracle_send_at = 99.0
 
+  # Real EPS FC belongs to the sole active sign transaction. It does not create
+  # a new FF/sequence; it authorizes one bounded repeat of CF1..CF5.
+  worker.update(batch((ORACLE_RESPONSE_ADDR, bytes.fromhex("3000280000000000"), ORACLE_BUS)), cs())
   with worker._cv:
+    repair = worker._next_cf_repair_locked(1.020)
+    assert repair == (10, job)
+    assert job.cf_repair_sent_at == 1.020
+    assert worker._next_cf_repair_locked(1.021) is None
+
+    # Repair extends only this same transaction's response deadline.
+    worker._expire_inflight_locked(1.044)
+    assert worker.active and 10 in worker.inflight
     worker._expire_inflight_locked(1.046)
-  assert worker.active
-  assert worker.qualified
-  assert not worker.inflight
-  assert worker.jobs[0] is job
-  assert job.retry_count == 1
-  assert job.sent_at is None
-  assert worker.next_oracle_send_at == 1.046
-  assert worker.oracle_timeout_count == 0
 
-  # A second lost response gets one more serialized retry and still preserves
-  # the current authority interval.
-  worker.jobs.clear()
-  job.sent_at = 2.0
-  worker.inflight[11] = job
-  with worker._cv:
-    worker._expire_inflight_locked(2.046)
-  assert worker.active
-  assert worker.qualified
-  assert not worker.inflight
-  assert worker.jobs[0] is job
-  assert job.retry_count == 2
-  assert job.sent_at is None
-  assert worker.oracle_timeout_count == 0
-  assert worker.authority_failure_count == 0
-
-  # Only a third consecutive miss releases this authority interval. Freshness
-  # qualification remains valid so the next native generation can re-arm.
-  worker.jobs.clear()
-  job.sent_at = 3.0
-  worker.inflight[12] = job
-  with worker._cv:
-    worker._expire_inflight_locked(3.046)
   assert not worker.active
   assert worker.qualified
   assert worker.oracle_timeout_count == 1
   assert worker.authority_failure_count == 1
   assert worker.last_authority_failure_reason == "oracle_sign_failure"
-  assert worker.authority_failure_alert_active()
   assert collector.flat[-1] == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)
+
+
+def test_sign_response_after_cf_repair_preserves_authority():
+  worker = ToyotaTss3RequestProxy(Collector(), start_thread=False)
+  worker.active = True
+  worker.qualified = True
+  worker.state_generation = 7
+  frame = native_frame(9, 8, target_id=11)
+  worker.next_output_index = 1
+  worker.pending_outputs[1] = PendingOutput(frame, None, True)
+  job = OracleJob(
+    kind="sign", generation=7, domain=KNOWN_DOMAIN, native_index=1,
+    application=KNOWN_APP, trip_counter=620, reset_counter=1109, message_counter=8,
+    sent_at=1.0, flow_control_seen=True,
+  )
+  worker.inflight[10] = job
+  with worker._cv:
+    assert worker._next_cf_repair_locked(1.020) == (10, job)
+  worker.update(batch(response(10, bytes.fromhex("12345678"))), cs())
+  assert worker.active and worker.qualified
+  assert not worker.inflight
+  assert worker.authority_failure_count == 0
 
 
 def test_sign_failure_releases_authority_but_preserves_qualification_and_rearms():

@@ -23,7 +23,7 @@ from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
 parser = argparse.ArgumentParser(description="Replay a local F33 route through current CarController, request proxy, and Panda safety")
 parser.add_argument("route", type=Path, help="local route directory containing segment subdirectories with rlog.zst")
 parser.add_argument("--drop-sign-response", type=int, metavar="N", help="drop the Nth first-attempt sign response to exercise retry behavior")
-parser.add_argument("--drop-sign-attempts", type=int, default=1, choices=(1, 2), help="number of attempts to drop for the selected source generation")
+parser.add_argument("--drop-sign-attempts", type=int, default=1, choices=(1, 2), help="drop primary reply only (1) or primary+CF-repair reply (2)")
 parser.add_argument("--drop-verify-response", action="store_true", help="drop the first qualification verify response")
 parser.add_argument("--oracle-response-delay-ms", type=float, default=20.0, help="synthetic successful oracle response latency (default: 20 ms)")
 args = parser.parse_args()
@@ -267,15 +267,12 @@ def host_tx(msgs):
       failures.append(('safety_tx_reject', sim[0], hex(int(m.address)), int(m.src), bytes(m.dat).hex()))
     if int(m.address) == NATIVE_08A_ADDR and proxy.active and proxy.control_lat_active:
       ident = bytes(m.dat)[21] & 0x3F
-      if ident == 0:
-        failures.append(('owned_idle_id0_tx', sim[0], bytes(m.dat).hex()))
-      elif ident == 11:
-        if bytes(m.dat)[24] != 100:
-          failures.append(('owned_id11_wrong_assist_gain', sim[0], bytes(m.dat)[24], bytes(m.dat).hex()))
-        else:
-          strict_host_id11 += 1
-      # Native non-lateral application IDs (LDA/PDA/etc.) remain Toyota-owned
-      # and are allowed only as exact clones; Panda safety enforces that shape.
+      if ident != 11:
+        failures.append(('owned_non_id11_tx', sim[0], ident, bytes(m.dat).hex()))
+      elif bytes(m.dat)[24] != 100:
+        failures.append(('owned_id11_wrong_assist_gain', sim[0], bytes(m.dat)[24], bytes(m.dat).hex()))
+      else:
+        strict_host_id11 += 1
     echo_queue.append((int(m.address), bytes(m.dat), int(m.src) + (0x80 if ok else 0xC0)))
 
 
@@ -332,6 +329,26 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
     global response_serial, first_drop_done, sign_generation_count, dropped_native_index, dropped_attempts
     global drop_retry_exercised, verify_drop_done
     with proxy._cv:
+      repair = proxy._next_cf_repair_locked(sim[0])
+    if repair is not None:
+      seq, job = repair
+      _, cfs = build_oracle_transport(seq, job.domain)
+      host_tx(cfs)
+      drain_echo()
+      stats[('oracle_cf_repair', job.kind)] += 1
+      if job.kind == 'sign' and dropped_native_index == job.native_index:
+        drop_retry_exercised = True
+        stats['injected_sign_cf_repair'] += 1
+        if args.drop_sign_attempts >= 2:
+          stats['injected_sign_repair_drop'] += 1
+          return
+        cmac = oracle_cmac(job)
+        data = bytes((0x07, 0xC9, seq, 0)) + cmac
+        response_serial += 1
+        heapq.heappush(responses, (sim[0] + 0.010, response_serial, seq, data))
+      return
+
+    with proxy._cv:
       item = proxy._next_job_locked(sim[0])
     if item is None:
       return
@@ -351,14 +368,16 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
         if args.drop_sign_response is not None and sign_generation_count == args.drop_sign_response:
           first_drop_done = True
           dropped_native_index = job.native_index
-      if dropped_native_index is not None and job.native_index == dropped_native_index:
-        if getattr(job, 'retry_count', 0) > 0:
-          drop_retry_exercised = True
-          stats['injected_sign_retry'] += 1
-        if dropped_attempts < args.drop_sign_attempts:
-          dropped_attempts += 1
-          stats['injected_sign_drop'] += 1
-          return
+      if dropped_native_index is not None and job.native_index == dropped_native_index and dropped_attempts == 0:
+        dropped_attempts = 1
+        stats['injected_sign_drop'] += 1
+        # Model the road failure class: EPS flow-control arrives, but the private
+        # reply does not. Production then repairs this same FF/session with one
+        # bounded repeat of CF1..CF5 rather than opening a new transaction.
+        fc = bytes.fromhex("3000280000000000")
+        response_serial += 1
+        heapq.heappush(responses, (sim[0] + 0.017, response_serial, seq, fc))
+        return
     cmac = oracle_cmac(job)
     data = bytes((0x07, 0xC9, seq, 0)) + cmac
     response_serial += 1
@@ -491,7 +510,7 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
   # Strict gate: route must exercise ownership; every owned native is blocked, no Panda rejects, no wrong freshness.
   if args.drop_sign_response is not None:
     assert first_drop_done, f'did not reach sign generation {args.drop_sign_response}'
-    assert drop_retry_exercised, f'dropped sign generation {args.drop_sign_response} was not retried under authority'
+    assert drop_retry_exercised, f'dropped sign generation {args.drop_sign_response} did not exercise same-session CF repair'
   if args.drop_verify_response:
     assert verify_drop_done, 'verify response injection was not exercised'
   assert proxy.arm_count > 0, 'never armed'
