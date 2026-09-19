@@ -52,7 +52,7 @@ ORACLE_PRE_CF_DELAY_S = 0.005
 ORACLE_PERIOD_S = 0.025
 ORACLE_TIMEOUT_S = 0.12
 ORACLE_SIGN_TIMEOUT_S = 0.045
-ORACLE_SIGN_MAX_RETRIES = 2
+ORACLE_SIGN_REPAIR_TIMEOUT_S = 0.025
 ORACLE_VERIFY_MAX_RETRIES = 2
 ORACLE_MAX_INFLIGHT = 4
 ORACLE_FAILURE_COOLDOWN_S = 2.0
@@ -61,8 +61,13 @@ MAX_NATIVE_HISTORY = 256
 MAX_NATIVE_GAP = 8
 
 TSS3_IDLE_ID = 0
+TSS3_LDA_ID = 4
 TSS3_LTA_LCA_ID = 11
-TSS3_LATERAL_SOURCE_IDS = (TSS3_IDLE_ID, TSS3_LTA_LCA_ID)
+TSS3_SDG_ID = 18
+# Exact Camry road corpus: these are the only observed lateral request owners.
+# While comma owns the request plane, every one of them is replaced by ID11;
+# none is allowed to pass through as a competing Toyota lateral owner.
+TSS3_LATERAL_SOURCE_IDS = (TSS3_IDLE_ID, TSS3_LDA_ID, TSS3_LTA_LCA_ID, TSS3_SDG_ID)
 TSS3_LTA_ASSIST_GAIN_RAW = 100
 LATERAL_ANGLE_OFFSET = 18
 LATERAL_ANGLE_SIZE = 2
@@ -154,25 +159,26 @@ def build_signed_frame(application: bytes, reset_counter: int, message_counter: 
 
 
 def build_id11_application(native_application: bytes, target_angle_raw: int) -> bytes:
-  """Build an ID11 lateral request from a native ID0/ID11 0x08A application.
+  """Build comma's ID11 request from any observed Toyota lateral owner.
 
-  ID0 is Toyota's no-lateral-request state. While openpilot lateral control is
-  active, promote that request to Toyota's observed LTA/LCA shape: low-six-bit
-  request identity ID11, the two-byte pinion-angle request, and B24 assist gain
-  raw 100 (1.00). Native ID11 already carries the source-real assist gain and is
-  otherwise preserved. The exact native generation is re-signed by the EPS oracle.
+  The FRC can select ID0 (no request), ID4 (LDA), ID11 (LTA/LCA), or ID18
+  (SDG/PDA-SA) on this Camry. Once comma owns the request plane, allowing any of
+  those Toyota identities through would break the chain of authority. Preserve
+  the exact source generation/envelope, but force the lateral owner to ID11,
+  replace the pinion target, and normalize B24 to the observed ID11 assist gain
+  raw 100. The exact modified generation is re-signed by the EPS oracle.
   """
   if len(native_application) != 28:
     raise ValueError("native 0x08A application must be 28 bytes")
   native_id = native_application[21] & 0x3F
   if native_id not in TSS3_LATERAL_SOURCE_IDS:
-    raise ValueError("lateral substitution requires native ID0 or ID11")
+    raise ValueError(f"unsupported native lateral request ID {native_id}")
   if not -(1 << 15) <= target_angle_raw < (1 << 15):
     raise ValueError("target angle must fit signed16")
   application = bytearray(native_application)
   application[21] = (application[21] & 0xC0) | TSS3_LTA_LCA_ID
   application[LATERAL_ANGLE_OFFSET:LATERAL_ANGLE_OFFSET + LATERAL_ANGLE_SIZE] = target_angle_raw.to_bytes(2, "big", signed=True)
-  if native_id == TSS3_IDLE_ID:
+  if native_id != TSS3_LTA_LCA_ID:
     application[24] = TSS3_LTA_ASSIST_GAIN_RAW
   return bytes(application)
 
@@ -253,6 +259,8 @@ class OracleJob:
   message_counter: int | None = None
   sent_at: float | None = None
   retry_count: int = 0
+  flow_control_seen: bool = False
+  cf_repair_sent_at: float | None = None
 
 
 @dataclass
@@ -378,7 +386,7 @@ class ToyotaTss3RequestProxy:
     self._record_failure_locked(reason, full_recovery=False)
     self._release_control_locked(restore_pending=False)
 
-  def _release_control_locked(self, *, restore_pending: bool = True) -> None:
+  def _release_control_locked(self, *, restore_pending: bool = False) -> None:
     self._release_locked(restore_pending=restore_pending)
     # Sign work belongs to the authority interval that just ended. Preserve the
     # recovered native freshness tracker/qualification, but invalidate queued
@@ -422,14 +430,13 @@ class ToyotaTss3RequestProxy:
       slot.modified = False
     self._flush_outputs_locked()
 
-  def _release_locked(self, *, restore_pending: bool = True, send_admin: bool = True) -> None:
+  def _release_locked(self, *, restore_pending: bool = False, send_admin: bool = True) -> None:
     was_active = self.active
     was_arm_pending = self.arm_pending
 
-    # Logical steering authority ends before any source-restoration frames are
-    # emitted. Panda relay ownership remains active until the admin release below,
-    # which lets those exact native frames cross the split without ever appearing
-    # as host lateral authority.
+    # End logical authority atomically. Pending blocked source generations are
+    # discarded rather than replayed as Toyota requests at the comma->stock
+    # ownership boundary; stock forwarding resumes with the next native frame.
     self.active = False
     self.arm_pending = False
 
@@ -566,9 +573,15 @@ class ToyotaTss3RequestProxy:
       self.next_output_index = event.index
 
     native = event.frame
-    if not self.control_lat_active or event.target_id not in TSS3_LATERAL_SOURCE_IDS:
+    if not self.control_lat_active:
       self.pending_outputs[event.index] = PendingOutput(native, native, False)
       self._flush_outputs_locked()
+      return
+    if event.target_id not in TSS3_LATERAL_SOURCE_IDS:
+      # Unknown Toyota lateral semantics are not a valid fallback while comma
+      # claims request-plane authority. End this authority interval instead of
+      # submitting a competing Toyota owner to Brake/VMM.
+      self._authority_failure_locked("unsupported_native_lateral_id")
       return
 
     application = build_id11_application(event.application, self.control_target_angle_raw)
@@ -608,18 +621,11 @@ class ToyotaTss3RequestProxy:
     self.history.append(event)
 
     if not self.native_cruise_operating and (self.active or self.arm_pending):
-      # Panda has already blocked this source frame because replacement ownership
-      # was active when it arrived. Preserve source continuity by sending this
-      # generation exactly, flush any earlier pending generations exactly, then
-      # release ownership. Do not re-arm until the native latch returns.
-      if self.active:
-        if self.next_output_index is None:
-          self.next_output_index = event.index
-        self.pending_outputs[event.index] = PendingOutput(event.frame, event.frame, False)
-        self._release_control_locked()
-      else:
-        self._send_can([CanData(NATIVE_08A_ADDR, event.frame, DOWNSTREAM_BUS)])
-        self._release_control_locked(restore_pending=False)
+      # Toyota withdrew the source-side operating latch. This ends the comma
+      # authority interval; do not replay the blocked withdrawal generation as
+      # Toyota while the host still owns the relay. Release first and let the
+      # next native publication cross under stock forwarding.
+      self._release_control_locked()
       return
 
     if self.tracker.event is None or self.tracker.message_counter is None:
@@ -675,7 +681,20 @@ class ToyotaTss3RequestProxy:
       self._authority_failure_locked("host_08a_rejected")
 
   def _observe_oracle_response_locked(self, data: bytes) -> None:
-    if len(data) != 8 or data[0] != 0x07 or data[1] != ORACLE_PRIVATE_SID:
+    if len(data) != 8:
+      return
+    if data[:3] == bytes((0x30, 0x00, ORACLE_NSDU_LEN)):
+      # Active signing uses one transaction at a time. The production fast path
+      # sends CF1..CF5 speculatively after 5 ms; when the EPS later emits its real
+      # ISO-TP flow-control without a private reply in the same incoming CAN
+      # batch, wake the sender to repeat only those CFs for this same FF/session.
+      sign_jobs = [(seq, job) for seq, job in self.inflight.items() if job.kind == "sign"]
+      if len(sign_jobs) == 1:
+        _, job = sign_jobs[0]
+        job.flow_control_seen = True
+        self._cv.notify_all()
+      return
+    if data[0] != 0x07 or data[1] != ORACLE_PRIVATE_SID:
       return
     seq, status = data[2], data[3]
     job = self.inflight.pop(seq, None)
@@ -758,23 +777,31 @@ class ToyotaTss3RequestProxy:
   def _expire_inflight_locked(self, now: float) -> None:
     expired = []
     for seq, job in self.inflight.items():
-      timeout = ORACLE_SIGN_TIMEOUT_S if job.kind == "sign" else ORACLE_TIMEOUT_S
-      if job.sent_at is not None and now - job.sent_at > timeout:
+      if job.kind == "sign":
+        if job.sent_at is None:
+          continue
+        deadline = job.sent_at + ORACLE_SIGN_TIMEOUT_S
+        if job.cf_repair_sent_at is not None:
+          deadline = max(deadline, job.cf_repair_sent_at + ORACLE_SIGN_REPAIR_TIMEOUT_S)
+        if now > deadline:
+          expired.append(seq)
+      elif job.sent_at is not None and now - job.sent_at > ORACLE_TIMEOUT_S:
         expired.append(seq)
 
     for seq in expired:
       job = self.inflight.pop(seq)
-      if job.kind == "sign" and job.retry_count < ORACLE_SIGN_MAX_RETRIES:
-        # Private 0x7A9 responses can disappear even after ISO-TP FC. Preserve
-        # the exact source generation and retry under a fresh transaction
-        # sequence before giving up authority. Active signing is serialized, so
-        # retries cannot overlap a newer source generation.
-        job.retry_count += 1
-        job.sent_at = None
-        self.jobs.appendleft(job)
-        self.next_oracle_send_at = min(self.next_oracle_send_at, now)
-        continue
+      # A sign failure after same-session CF repair ends this authority interval.
+      # Never skip the source generation, replay Toyota under comma authority, or
+      # start a fresh FF whose latency would build a multi-generation backlog.
       self._job_failure_locked(job)
+
+  def _next_cf_repair_locked(self, now: float) -> tuple[int, OracleJob] | None:
+    for seq, job in self.inflight.items():
+      if (job.kind == "sign" and job.generation == self.state_generation and
+          job.flow_control_seen and job.cf_repair_sent_at is None):
+        job.cf_repair_sent_at = now
+        return seq, job
+    return None
 
   def _next_job_locked(self, now: float) -> tuple[int, OracleJob] | None:
     self._expire_inflight_locked(now)
@@ -823,6 +850,14 @@ class ToyotaTss3RequestProxy:
         if self._stop:
           return
         now = self._monotonic()
+        repair = self._next_cf_repair_locked(now)
+        if repair is not None:
+          seq, job = repair
+          _, cfs = build_oracle_transport(seq, job.domain)
+          # Same FF/session, same transaction sequence: repair only receiver
+          # admission. No new signing request or source generation is created.
+          self._send_can(cfs)
+          continue
         item = self._next_job_locked(now)
         if item is None:
           self._cv.wait(timeout=0.005)
@@ -831,7 +866,7 @@ class ToyotaTss3RequestProxy:
       ff, cfs = build_oracle_transport(seq, job.domain)
       self._send_can([ff])
       self._sleep(ORACLE_PRE_CF_DELAY_S)
-      # Preserve the live-qualified transport shape: five CFs in one Panda batch.
+      # Fast first attempt; a later EPS FC can trigger one same-session CF repair.
       self._send_can(cfs)
 
   def update(self, can_list: list, CS: structs.CarState) -> None:
