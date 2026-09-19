@@ -76,11 +76,7 @@ class Collector:
 
 
 def private_response(seq: int, cmac4: bytes = KNOWN_CMAC4, status: int = 0):
-  return ORACLE_RESPONSE_ADDR, bytes((0x07, 0xC9, seq, status)) + cmac4, ORACLE_BUS
-
-
-def fc():
-  return ORACLE_RESPONSE_ADDR, bytes.fromhex("3000280000000000"), ORACLE_BUS
+  return ORACLE_RESPONSE_ADDR, bytes((0xC9, seq, status, seq ^ 0xFF)) + cmac4, ORACLE_BUS
 
 
 def seed_at_next_epoch(worker: ToyotaTss3RequestProxy, *, reset: int = 1109, b26: int = 10):
@@ -116,12 +112,12 @@ def start_active_worker():
 def test_known_live_domain_and_transport_geometry():
   assert build_secoc_domain(KNOWN_APP, 620, 1109, 8) == KNOWN_DOMAIN
   assert build_signed_frame(KNOWN_APP, 1109, 8, KNOWN_CMAC4).hex() == KNOWN_APP.hex() + "1d64e2a5"
-  ff, cfs = build_oracle_transport(1, KNOWN_DOMAIN)
-  assert ff == CanData(0x7A1, bytes.fromhex("1028c9c901008a00"), ORACLE_BUS)
-  assert [m.dat.hex() for m in cfs] == [
-    "2100000080000012", "22ffae00ffae7fff", "23007fff004b0000",
-    "24000000001e0002", "256c00455084fe00",
-  ]
+  frames = build_oracle_transport(1, KNOWN_APP, 8, 1109)
+  assert len(frames) == 5
+  assert all(m.address == 0x1FDC0002 and m.src == ORACLE_BUS and len(m.dat) == 8 for m in frames)
+  assert [m.dat[0] for m in frames] == [0x01, 0x21, 0x41, 0x61, 0x81]
+  assert b"".join(m.dat[1:] for m in frames[:4]) == KNOWN_APP
+  assert frames[4].dat == bytes.fromhex("810855c9a8fe5aa5")
 
 
 def test_resolve_epoch_nearest_low2():
@@ -183,8 +179,8 @@ def test_proxy_seeds_passively_without_any_oracle_recovery_jobs():
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
   seed_at_next_epoch(worker)
   assert worker.freshness_ready
-  assert not worker.jobs and not worker.inflight and worker.transport is None
-  assert not any(m.address == 0x7A1 for m in collector.flat)
+  assert not worker.jobs and not worker.inflight
+  assert not any(m.address == 0x1FDC0002 for m in collector.flat)
 
 
 def test_handoff_is_one_exact_source_clone_and_pending_is_unavailable():
@@ -203,7 +199,7 @@ def test_handoff_is_one_exact_source_clone_and_pending_is_unavailable():
   assert sum(m.address == NATIVE_08A_ADDR for m in collector.flat) == count
 
 
-def test_sign_transport_waits_for_actual_fc_before_sending_cfs():
+def test_sign_transport_is_one_stateless_classic_batch():
   worker, collector, clock = start_active_worker()
   source = native_frame(13, 3, reset=1110, target_id=0, angle_raw=10)
   worker.set_control(True, 1.0)
@@ -211,12 +207,12 @@ def test_sign_transport_waits_for_actual_fc_before_sending_cfs():
   assert len(worker.jobs) == 1
   with worker._cv:
     seq, job = worker._next_job_locked(clock.now)
-  ff, cfs = build_oracle_transport(seq, job.domain)
-  collector([ff])
-  assert not any(m.dat[0] in range(0x21, 0x26) for m in collector.flat[:-1])
-  worker.update(batch(fc()), cs())
-  assert collector.batches[-1] == cfs
-  assert worker.transport is None and seq in worker.inflight
+  frames = build_oracle_transport(seq, job.application, job.message_counter, job.reset_counter)
+  collector(frames)
+  assert collector.batches[-1] == frames
+  assert len(frames) == 5 and seq in worker.inflight
+  assert [m.dat[0] >> 5 for m in frames] == [0, 1, 2, 3, 4]
+  assert all(m.address == 0x1FDC0002 and m.src == ORACLE_BUS for m in frames)
 
 
 def test_sign_response_publishes_same_source_generation():
@@ -225,8 +221,7 @@ def test_sign_response_publishes_same_source_generation():
   source = native_frame(13, 3, reset=1110, target_id=18, angle_raw=10)
   worker.update(batch((NATIVE_08A_ADDR, source, 2)), cs())
   with worker._cv:
-    seq, job = worker._next_job_locked(clock.now)
-  worker.update(batch(fc()), cs())
+    seq, _ = worker._next_job_locked(clock.now)
   worker.update(batch(private_response(seq)), cs())
   out = collector.batches[-1][0]
   assert out.address == NATIVE_08A_ADDR and out.src == DOWNSTREAM_BUS
@@ -242,7 +237,6 @@ def test_out_of_order_oracle_replies_do_not_reorder_08a_outputs():
     worker.update(batch((NATIVE_08A_ADDR, native_frame(b26, msg, reset=1110), 2)), cs())
     with worker._cv:
       seq, job = worker._next_job_locked(clock.now)
-    worker.update(batch(fc()), cs())
     if b26 == 13:
       first = (seq, job)
     else:
@@ -255,24 +249,11 @@ def test_out_of_order_oracle_replies_do_not_reorder_08a_outputs():
   assert [m.dat[26] & 0x3F for m in collector.batches[-1]] == [13, 14]
 
 
-def test_fc_timeout_releases_authority_without_retry_state_machine():
-  worker, _, clock = start_active_worker()
-  worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110), 2)), cs())
-  with worker._cv:
-    worker._next_job_locked(clock.now)
-    clock.now = 0.041
-    worker._expire_locked(clock.now)
-  assert not worker.active
-  assert worker.last_failure_reason == "oracle_fc_timeout"
-  assert not worker.jobs and not worker.inflight and worker.transport is None
-
-
 def test_response_timeout_releases_authority_without_generation_fallback():
   worker, _, clock = start_active_worker()
   worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110), 2)), cs())
   with worker._cv:
     seq, _ = worker._next_job_locked(clock.now)
-  worker.update(batch(fc()), cs())
   clock.now = 0.031
   with worker._cv:
     worker._expire_locked(clock.now)

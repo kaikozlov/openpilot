@@ -31,14 +31,11 @@ PANDA_RETURNED_OFFSET = 0x80
 PANDA_REJECTED_OFFSET = 0xC0
 SendCan = Callable[[list[CanData]], None]
 
-ORACLE_REQUEST_ADDR = 0x7A1
-ORACLE_RESPONSE_ADDR = 0x7A9
+ORACLE_REQUEST_ADDR = 0x1FDC0002
+ORACLE_RESPONSE_ADDR = 0x1FE00002
 ORACLE_BUS = 0
 ORACLE_PRIVATE_SID = 0xC9
-ORACLE_DOMAIN_LEN = 36
-ORACLE_NSDU_LEN = 40
-# Recorded road traffic: FF->FC max 33.7 ms; FC->private-response max 20.9 ms.
-ORACLE_FC_TIMEOUT_S = 0.040
+ORACLE_SEQUENCE_MAX = 0x1F
 ORACLE_RESPONSE_TIMEOUT_S = 0.030
 
 TSS3_LATERAL_SOURCE_IDS = (0, 4, 11, 18)  # No Request, LDA, LTA/LCA, SDG
@@ -86,23 +83,32 @@ def build_secoc_domain(application: bytes, trip_counter: int, reset_counter: int
   return b"\x00\x8A" + application + freshness
 
 
-def build_oracle_transport(seq: int, domain: bytes) -> tuple[CanData, list[CanData]]:
-  if not 1 <= seq <= 0xFF:
-    raise ValueError("oracle sequence must be 1..255")
-  if len(domain) != ORACLE_DOMAIN_LEN or domain[:2] != b"\x00\x8A":
-    raise ValueError("oracle domain must be exact 36-byte 0x008A domain")
-  nsdu = bytes((ORACLE_PRIVATE_SID, ORACLE_PRIVATE_SID, seq)) + domain + bytes((seq ^ 0xFF,))
-  if len(nsdu) != ORACLE_NSDU_LEN:
-    raise AssertionError("oracle N-SDU geometry drift")
-  ff = CanData(ORACLE_REQUEST_ADDR, bytes((0x10, ORACLE_NSDU_LEN)) + nsdu[:6], ORACLE_BUS)
-  remaining = nsdu[6:]
-  cfs = []
-  for sn in range(1, 6):
-    chunk, remaining = remaining[:7], remaining[7:]
-    cfs.append(CanData(ORACLE_REQUEST_ADDR, bytes((0x20 | sn,)) + chunk + bytes(7 - len(chunk)), ORACLE_BUS))
-  if remaining:
-    raise AssertionError("oracle CF geometry drift")
-  return ff, cfs
+def build_oracle_transport(seq: int, application: bytes, message_counter: int, reset_counter: int) -> list[CanData]:
+  """Build one stateless raw-classic signer transaction.
+
+  Four fragments carry the exact 28 application bytes. The fifth carries only
+  freshness metadata and a fixed trailer. All five are submitted together; the
+  EPS resident reads them from the pre-staging RX ring, so there is no ISO-TP
+  flow-control or receiver-paced transport state.
+  """
+  if not 1 <= seq <= ORACLE_SEQUENCE_MAX:
+    raise ValueError(f"oracle sequence must be 1..{ORACLE_SEQUENCE_MAX}")
+  if len(application) != 28:
+    raise ValueError("oracle application must be exactly 28 bytes")
+  if not 0 <= message_counter <= 0xFF:
+    raise ValueError("oracle message counter must fit u8")
+
+  frames = []
+  for fragment in range(4):
+    header = (fragment << 5) | seq
+    frames.append(CanData(ORACLE_REQUEST_ADDR,
+                          bytes((header,)) + application[fragment * 7:(fragment + 1) * 7],
+                          ORACLE_BUS))
+  frames.append(CanData(ORACLE_REQUEST_ADDR,
+                        bytes(((4 << 5) | seq, message_counter, reset_counter & 0xFF,
+                               ORACLE_PRIVATE_SID, 0xA8, seq ^ 0xFF, 0x5A, 0xA5)),
+                        ORACLE_BUS))
+  return frames
 
 
 def build_signed_frame(application: bytes, reset_counter: int, message_counter: int, cmac4: bytes) -> bytes:
@@ -202,9 +208,7 @@ class SignJob:
   application: bytes
   reset_counter: int
   message_counter: int
-  domain: bytes
-  ff_sent_at: float | None = None
-  cfs_sent_at: float | None = None
+  sent_at: float | None = None
 
 
 class ToyotaTss3RequestProxy:
@@ -226,8 +230,7 @@ class ToyotaTss3RequestProxy:
     self.tracker = NativeFreshnessTracker()
 
     self.jobs: deque[SignJob] = deque()
-    self.transport: tuple[int, SignJob] | None = None  # FF sent, waiting for EPS FC
-    self.inflight: dict[int, SignJob] = {}             # CFs sent, waiting for private response
+    self.inflight: dict[int, SignJob] = {}
     self.next_oracle_seq = 1
 
     self.active = False
@@ -276,7 +279,6 @@ class ToyotaTss3RequestProxy:
 
   def _invalidate_signing_locked(self) -> None:
     self.jobs.clear()
-    self.transport = None
     self.inflight.clear()
     self.pending_outputs.clear()
     self.next_output_index = None
@@ -334,10 +336,7 @@ class ToyotaTss3RequestProxy:
     if self.next_output_index is None:
       self.next_output_index = event.index
     self.pending_outputs[event.index] = None
-    self.jobs.append(SignJob(
-      event.index, application, event.reset_counter, message_counter,
-      build_secoc_domain(application, event.trip_counter, event.reset_counter, message_counter),
-    ))
+    self.jobs.append(SignJob(event.index, application, event.reset_counter, message_counter))
     self._cv.notify_all()
 
   def _observe_native_locked(self, frame: bytes) -> None:
@@ -399,22 +398,11 @@ class ToyotaTss3RequestProxy:
       self._send_can(out)
 
   def _observe_oracle_response_locked(self, data: bytes) -> None:
-    if len(data) != 8:
+    if len(data) != 8 or data[0] != ORACLE_PRIVATE_SID:
       return
-    if data[:3] == bytes((0x30, 0x00, ORACLE_NSDU_LEN)):
-      if self.transport is None:
-        return
-      seq, job = self.transport
-      self.transport = None
-      _, cfs = build_oracle_transport(seq, job.domain)
-      job.cfs_sent_at = self._monotonic()
-      self.inflight[seq] = job
-      self._send_can(cfs)
-      self._cv.notify_all()
+    seq, status = data[1], data[2]
+    if not 1 <= seq <= ORACLE_SEQUENCE_MAX or data[3] != (seq ^ 0xFF):
       return
-    if data[0] != 0x07 or data[1] != ORACLE_PRIVATE_SID:
-      return
-    seq, status = data[2], data[3]
     job = self.inflight.pop(seq, None)
     if job is None:
       return
@@ -429,36 +417,27 @@ class ToyotaTss3RequestProxy:
 
   def _alloc_seq_locked(self) -> int:
     used = set(self.inflight)
-    if self.transport is not None:
-      used.add(self.transport[0])
-    for _ in range(255):
+    for _ in range(ORACLE_SEQUENCE_MAX):
       seq = self.next_oracle_seq
-      self.next_oracle_seq = (seq % 255) + 1
+      self.next_oracle_seq = (seq % ORACLE_SEQUENCE_MAX) + 1
       if seq not in used:
         return seq
     raise RuntimeError("oracle sequence space exhausted")
 
   def _expire_locked(self, now: float) -> None:
-    if self.transport is not None:
-      _, job = self.transport
-      if job.ff_sent_at is not None and now - job.ff_sent_at > ORACLE_FC_TIMEOUT_S:
-        self._authority_failure_locked("oracle_fc_timeout")
-        return
     for job in tuple(self.inflight.values()):
-      if job.cfs_sent_at is not None and now - job.cfs_sent_at > ORACLE_RESPONSE_TIMEOUT_S:
+      if job.sent_at is not None and now - job.sent_at > ORACLE_RESPONSE_TIMEOUT_S:
         self._authority_failure_locked("oracle_response_timeout")
         return
 
   def _next_job_locked(self, now: float) -> tuple[int, SignJob] | None:
     self._expire_locked(now)
-    if self.transport is not None:
-      return None
     if not self.jobs:
       return None
     job = self.jobs.popleft()
     seq = self._alloc_seq_locked()
-    job.ff_sent_at = now
-    self.transport = (seq, job)
+    job.sent_at = now
+    self.inflight[seq] = job
     return seq, job
 
   def _oracle_sender_loop(self) -> None:
@@ -471,8 +450,7 @@ class ToyotaTss3RequestProxy:
           self._cv.wait(timeout=0.002)
           continue
       seq, job = item
-      ff, _ = build_oracle_transport(seq, job.domain)
-      self._send_can([ff])
+      self._send_can(build_oracle_transport(seq, job.application, job.message_counter, job.reset_counter))
 
   def update(self, can_list: list, CS: structs.CarState) -> None:
     with self._cv:
