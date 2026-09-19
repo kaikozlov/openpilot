@@ -240,7 +240,6 @@ sign_generation_count = 0
 dropped_native_index = None
 dropped_attempts = 0
 drop_retry_exercised = False
-superseded_before_drop = 0
 verify_drop_done = False
 
 
@@ -261,24 +260,15 @@ def set_clock(ns):
 def host_tx(msgs):
   global strict_host_id11
   for m in msgs:
-    data = bytes(m.dat)
-    desired_before = safety.get_desired_angle_last() if int(m.address) == NATIVE_08A_ADDR else None
-    p = packet(int(m.address), int(m.src), data)
+    p = packet(int(m.address), int(m.src), bytes(m.dat))
     ok = bool(safety.safety_tx_hook(p))
     stats[('host_tx', hex(int(m.address)), 'A' if ok else 'R')] += 1
     if not ok:
-      detail = None
-      if int(m.address) == NATIVE_08A_ADDR and len(data) == 32:
-        detail = {'id': data[21] & 0x3F, 'target_raw': int.from_bytes(data[18:20], 'big', signed=True),
-                  'desired_before': desired_before, 'controls_allowed': bool(safety.get_controls_allowed())}
-      failures.append(('safety_tx_reject', sim[0], hex(int(m.address)), int(m.src), data.hex(), detail))
+      failures.append(('safety_tx_reject', sim[0], hex(int(m.address)), int(m.src), bytes(m.dat).hex()))
     if int(m.address) == NATIVE_08A_ADDR and proxy.active and proxy.control_lat_active:
       ident = bytes(m.dat)[21] & 0x3F
       if ident == 0:
-        # A missed/late oracle response deliberately degrades this source
-        # generation to its exact authenticated FRC ID0 frame. This preserves
-        # downstream request cadence while withholding only this steering update.
-        stats['host_exact_id0_fallback'] += 1
+        failures.append(('owned_idle_id0_tx', sim[0], bytes(m.dat).hex()))
       elif ident == 11:
         if bytes(m.dat)[24] != 100:
           failures.append(('owned_id11_wrong_assist_gain', sim[0], bytes(m.dat)[24], bytes(m.dat).hex()))
@@ -340,7 +330,7 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
 
   def run_oracle_step():
     global response_serial, first_drop_done, sign_generation_count, dropped_native_index, dropped_attempts
-    global drop_retry_exercised, superseded_before_drop, verify_drop_done
+    global drop_retry_exercised, verify_drop_done
     with proxy._cv:
       item = proxy._next_job_locked(sim[0])
     if item is None:
@@ -361,7 +351,6 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
         if args.drop_sign_response is not None and sign_generation_count == args.drop_sign_response:
           first_drop_done = True
           dropped_native_index = job.native_index
-          superseded_before_drop = proxy.superseded_sign_count
       if dropped_native_index is not None and job.native_index == dropped_native_index:
         if getattr(job, 'retry_count', 0) > 0:
           drop_retry_exercised = True
@@ -426,9 +415,6 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
       with structs.CarControl.from_bytes(payload) as CC:
         if hasattr(ci.CC, 'tss3_request_plane_active'):
           ci.CC.tss3_request_plane_active = proxy.active
-          baseline_angle = proxy.consume_controller_baseline_angle_deg()
-          if baseline_angle is not None and hasattr(ci.CC, 'tss3_request_plane_baseline_angle_deg'):
-            ci.CC.tss3_request_plane_baseline_angle_deg = baseline_angle
         out, can_sends = ci.apply(CC, t)
         if can_sends:
           host_tx(can_sends)
@@ -505,10 +491,7 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
   # Strict gate: route must exercise ownership; every owned native is blocked, no Panda rejects, no wrong freshness.
   if args.drop_sign_response is not None:
     assert first_drop_done, f'did not reach sign generation {args.drop_sign_response}'
-    drop_handled = drop_retry_exercised or proxy.superseded_sign_count > superseded_before_drop
-    assert drop_handled, (
-      f'dropped sign generation {args.drop_sign_response} was neither retried nor superseded under authority'
-    )
+    assert drop_retry_exercised, f'dropped sign generation {args.drop_sign_response} was not retried under authority'
   if args.drop_verify_response:
     assert verify_drop_done, 'verify response injection was not exercised'
   assert proxy.arm_count > 0, 'never armed'
