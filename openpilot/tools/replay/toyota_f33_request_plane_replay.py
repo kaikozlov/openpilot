@@ -23,6 +23,7 @@ from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
 parser = argparse.ArgumentParser(description="Replay a local F33 route through current CarController, request proxy, and Panda safety")
 parser.add_argument("route", type=Path, help="local route directory containing segment subdirectories with rlog.zst")
 parser.add_argument("--drop-sign-response", type=int, metavar="N", help="drop the Nth first-attempt sign response to exercise retry behavior")
+parser.add_argument("--drop-sign-attempts", type=int, default=1, choices=(1, 2), help="number of attempts to drop for the selected source generation")
 parser.add_argument("--oracle-response-delay-ms", type=float, default=20.0, help="synthetic successful oracle response latency (default: 20 ms)")
 args = parser.parse_args()
 ROOT = args.route
@@ -236,6 +237,7 @@ strict_host_id11 = 0
 first_drop_done = False
 sign_generation_count = 0
 dropped_native_index = None
+dropped_attempts = 0
 drop_retry_exercised = False
 
 
@@ -322,7 +324,7 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
         drain_echo()
 
   def run_oracle_step():
-    global response_serial, first_drop_done, sign_generation_count, dropped_native_index, drop_retry_exercised
+    global response_serial, first_drop_done, sign_generation_count, dropped_native_index, dropped_attempts, drop_retry_exercised
     with proxy._cv:
       item = proxy._next_job_locked(sim[0])
     if item is None:
@@ -334,14 +336,17 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
     drain_echo()
     stats[('oracle_job', job.kind)] += 1
     if job.kind == 'sign':
-      if dropped_native_index is not None and job.native_index == dropped_native_index and getattr(job, 'retry_count', 0) == 1:
-        drop_retry_exercised = True
-        stats['injected_sign_retry'] += 1
       if getattr(job, 'retry_count', 0) == 0:
         sign_generation_count += 1
         if args.drop_sign_response is not None and sign_generation_count == args.drop_sign_response:
           first_drop_done = True
           dropped_native_index = job.native_index
+      if dropped_native_index is not None and job.native_index == dropped_native_index:
+        if getattr(job, 'retry_count', 0) > 0:
+          drop_retry_exercised = True
+          stats['injected_sign_retry'] += 1
+        if dropped_attempts < args.drop_sign_attempts:
+          dropped_attempts += 1
           stats['injected_sign_drop'] += 1
           return
     cmac = oracle_cmac(job)
