@@ -23,8 +23,7 @@ from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
 
 parser = argparse.ArgumentParser(description="Replay F33 native inputs through current controller, signer adapter, and Panda safety")
 parser.add_argument("route", type=Path)
-parser.add_argument("--oracle-fc-delay-ms", type=float, default=17.0)
-parser.add_argument("--oracle-response-after-fc-ms", type=float, default=8.0)
+parser.add_argument("--oracle-response-delay-ms", type=float, default=8.0)
 parser.add_argument("--drop-sign-response", type=int, metavar="N", help="drop the Nth sign response to exercise fail-open/re-arm")
 args = parser.parse_args()
 files = sorted(args.route.glob('*/rlog.zst'), key=lambda p: int(p.parent.name.rsplit('--', 1)[1]))
@@ -39,6 +38,8 @@ sync_seq = []
 native_seq = []
 recorded_oracle_tx = []
 recorded_oracle_rx = []
+HISTORICAL_ORACLE_REQUEST_ADDR = 0x7A1
+HISTORICAL_ORACLE_RESPONSE_ADDR = 0x7A9
 order = 0
 for f in files:
   for m in LogReader(str(f), sort_by_time=False):
@@ -48,10 +49,10 @@ for f in files:
     elif m.which() == 'can':
       for x in m.can:
         d, a, s = bytes(x.dat), int(x.address), int(x.src)
-        if a == ORACLE_RESPONSE_ADDR and s == ORACLE_BUS and len(d) == 8 and d[:2] == b'\x07\xc9':
+        if a == HISTORICAL_ORACLE_RESPONSE_ADDR and s == ORACLE_BUS and len(d) == 8 and d[:2] == b'\x07\xc9':
           recorded_oracle_rx.append((t, d))
       frames = [(int(x.address), bytes(x.dat), int(x.src)) for x in m.can
-                if int(x.src) < 128 and int(x.address) != ORACLE_RESPONSE_ADDR]
+                if int(x.src) < 128 and int(x.address) not in (HISTORICAL_ORACLE_RESPONSE_ADDR, ORACLE_RESPONSE_ADDR)]
       if frames:
         events.append((t, 0, order, 'can', frames)); order += 1
         for a, d, s in frames:
@@ -61,7 +62,7 @@ for f in files:
             native_seq.append((t, order, d))
     elif m.which() == 'sendcan':
       for x in m.sendcan:
-        if int(x.address) == 0x7A1 and int(x.src) == ORACLE_BUS and len(x.dat) == 8:
+        if int(x.address) == HISTORICAL_ORACLE_REQUEST_ADDR and int(x.src) == ORACLE_BUS and len(x.dat) == 8:
           recorded_oracle_tx.append((t, bytes(x.dat)))
     elif m.which() == 'carControl':
       events.append((t, 1, order, 'cc', m.carControl.as_builder().to_bytes())); order += 1
@@ -255,36 +256,30 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
     heapq.heappush(scheduled, (when, schedule_serial, kind, seq, job))
 
   def deliver_due():
-    global sign_generation_count, drop_exercised
     while scheduled and scheduled[0][0] <= sim[0] + 1e-12:
       _, _, kind, seq, job = heapq.heappop(scheduled)
-      if current_cs[0] is None:
+      if current_cs[0] is None or kind != 'response':
         continue
-      if kind == 'fc':
-        proxy.update([(now_ns[0], [(ORACLE_RESPONSE_ADDR, bytes.fromhex('3000280000000000'), ORACLE_BUS)])], current_cs[0])
-        drain_echo()
-        if seq in proxy.inflight:
-          sign_generation_count += 1
-          if args.drop_sign_response is not None and sign_generation_count == args.drop_sign_response:
-            drop_exercised = True
-            stats['injected_sign_drop'] += 1
-          else:
-            schedule(sim[0] + args.oracle_response_after_fc_ms / 1000.0, 'response', seq, job)
-      else:
-        data = bytes((0x07, 0xC9, seq, 0)) + oracle_cmac(job)
-        proxy.update([(now_ns[0], [(ORACLE_RESPONSE_ADDR, data, ORACLE_BUS)])], current_cs[0])
-        drain_echo()
+      data = bytes((0xC9, seq, 0, seq ^ 0xFF)) + oracle_cmac(job)
+      proxy.update([(now_ns[0], [(ORACLE_RESPONSE_ADDR, data, ORACLE_BUS)])], current_cs[0])
+      drain_echo()
 
   def run_oracle_step():
+    global sign_generation_count, drop_exercised
     with proxy._cv:
       item = proxy._next_job_locked(sim[0])
     if item is None:
       return
     seq, job = item
-    ff, _ = build_oracle_transport(seq, job.domain)
-    host_tx([ff]); drain_echo()
-    stats['oracle_ff'] += 1
-    schedule(sim[0] + args.oracle_fc_delay_ms / 1000.0, 'fc', seq, job)
+    frames = build_oracle_transport(seq, job.application, job.message_counter, job.reset_counter)
+    host_tx(frames); drain_echo()
+    stats['oracle_request_batches'] += 1
+    sign_generation_count += 1
+    if args.drop_sign_response is not None and sign_generation_count == args.drop_sign_response:
+      drop_exercised = True
+      stats['injected_sign_drop'] += 1
+    else:
+      schedule(sim[0] + args.oracle_response_delay_ms / 1000.0, 'response', seq, job)
 
   def advance_to(target_ns):
     while now_ns[0] + 1_000_000 < target_ns:

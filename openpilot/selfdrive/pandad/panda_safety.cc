@@ -76,9 +76,9 @@ void PandaSafety::setSafetyMode(const std::string &params_string) {
   const bool toyota_tss3_08a_host = (safety_model == cereal::CarParams::SafetyModel::TOYOTA) &&
                                     ((safety_param & TOYOTA_PARAM_TSS3_08A_HOST) != 0U);
   panda_->set_can_fd_auto(1, !toyota_tss3_signer);
-  // Relay-correct F33 host mode mixes classic EPS diagnostics (0x7A1/0x7A9)
-  // with explicit CAN-FD 0x08A on bus 0. Keep host-created frame format
-  // authoritative instead of promoting 8-byte UDS through sticky bus-wide FD.
+  // Relay-correct F33 host mode mixes the raw-classic 0x08A signer mailbox
+  // (0x1FDC0002/0x1FE00002) with explicit CAN-FD 0x08A on bus 0. Keep the
+  // host-created frame format authoritative instead of sticky bus-wide FD.
   panda_->set_can_fd_auto(0, !toyota_tss3_08a_host);
 
   panda_->set_alternative_experience(alternative_experience);
