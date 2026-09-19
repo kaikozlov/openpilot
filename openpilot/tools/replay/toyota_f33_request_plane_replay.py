@@ -239,6 +239,7 @@ sign_generation_count = 0
 dropped_native_index = None
 dropped_attempts = 0
 drop_retry_exercised = False
+superseded_before_drop = 0
 
 
 # Helper to package CAN for C safety.
@@ -324,7 +325,7 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
         drain_echo()
 
   def run_oracle_step():
-    global response_serial, first_drop_done, sign_generation_count, dropped_native_index, dropped_attempts, drop_retry_exercised
+    global response_serial, first_drop_done, sign_generation_count, dropped_native_index, dropped_attempts, drop_retry_exercised, superseded_before_drop
     with proxy._cv:
       item = proxy._next_job_locked(sim[0])
     if item is None:
@@ -341,6 +342,7 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
         if args.drop_sign_response is not None and sign_generation_count == args.drop_sign_response:
           first_drop_done = True
           dropped_native_index = job.native_index
+          superseded_before_drop = proxy.superseded_sign_count
       if dropped_native_index is not None and job.native_index == dropped_native_index:
         if getattr(job, 'retry_count', 0) > 0:
           drop_retry_exercised = True
@@ -481,7 +483,10 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
   # Strict gate: route must exercise ownership; every owned native is blocked, no Panda rejects, no wrong freshness.
   if args.drop_sign_response is not None:
     assert first_drop_done, f'did not reach sign generation {args.drop_sign_response}'
-    assert drop_retry_exercised, f'dropped sign generation {args.drop_sign_response} was not retried under authority'
+    drop_handled = drop_retry_exercised or proxy.superseded_sign_count > superseded_before_drop
+    assert drop_handled, (
+      f'dropped sign generation {args.drop_sign_response} was neither retried nor superseded under authority'
+    )
   assert proxy.arm_count > 0, 'never armed'
   assert proxy.arm_count == proxy.release_count == active_windows, (proxy.arm_count, proxy.release_count, active_windows)
   assert strict_host_id11 > 100, f'not enough sustained host ID11: {strict_host_id11}'

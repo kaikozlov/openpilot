@@ -259,6 +259,7 @@ class PendingOutput:
   native_frame: bytes
   ready_frame: bytes | None
   modified: bool
+  skipped: bool = False
 
 
 class ToyotaTss3RequestProxy:
@@ -317,6 +318,7 @@ class ToyotaTss3RequestProxy:
     self.release_count = 0
     self.oracle_response_count = 0
     self.oracle_timeout_count = 0
+    self.superseded_sign_count = 0
     self.recovery_count = 0
     self.verification_count = 0
     self.authority_failure_count = 0
@@ -399,7 +401,13 @@ class ToyotaTss3RequestProxy:
     out: list[CanData] = []
     while True:
       slot = self.pending_outputs.get(self.next_output_index)
-      if slot is None or slot.ready_frame is None:
+      if slot is None:
+        break
+      if slot.skipped:
+        del self.pending_outputs[self.next_output_index]
+        self.next_output_index += 1
+        continue
+      if slot.ready_frame is None:
         break
       out.append(CanData(NATIVE_08A_ADDR, slot.ready_frame, DOWNSTREAM_BUS))
       if slot.modified:
@@ -413,8 +421,26 @@ class ToyotaTss3RequestProxy:
 
   def _restore_pending_native_locked(self) -> None:
     for slot in self.pending_outputs.values():
+      if slot.skipped:
+        continue
       slot.ready_frame = slot.native_frame
       slot.modified = False
+    self._flush_outputs_locked()
+
+  def _coalesce_queued_signs_locked(self) -> None:
+    # Keep the one sign request already in flight, but never build a FIFO of
+    # stale unsigned steering commands behind it. A newly observed native
+    # generation supersedes every older sign job that has not started yet.
+    kept: deque[OracleJob] = deque()
+    for job in self.jobs:
+      if job.kind == "sign" and job.generation == self.state_generation and job.native_index is not None:
+        slot = self.pending_outputs.get(job.native_index)
+        if slot is not None:
+          slot.skipped = True
+          self.superseded_sign_count += 1
+        continue
+      kept.append(job)
+    self.jobs = kept
     self._flush_outputs_locked()
 
   def _release_locked(self, *, restore_pending: bool = True, send_admin: bool = True) -> None:
@@ -571,6 +597,7 @@ class ToyotaTss3RequestProxy:
       self._flush_outputs_locked()
       return
 
+    self._coalesce_queued_signs_locked()
     self.pending_outputs[event.index] = PendingOutput(native, None, True)
     self._queue_job_locked(OracleJob(
       kind="sign",
@@ -743,16 +770,29 @@ class ToyotaTss3RequestProxy:
 
     for seq in expired:
       job = self.inflight.pop(seq)
-      if job.kind == "sign" and job.retry_count < ORACLE_SIGN_MAX_RETRIES:
-        # Private 0x7A9 responses can disappear even after ISO-TP FC. Preserve
-        # the exact source generation and retry under a fresh transaction
-        # sequence before giving up authority. Active signing is serialized, so
-        # retries cannot overlap a newer source generation.
-        job.retry_count += 1
-        job.sent_at = None
-        self.jobs.appendleft(job)
-        self.next_oracle_send_at = min(self.next_oracle_send_at, now)
-        continue
+      if job.kind == "sign" and job.native_index is not None:
+        newer_sign_waiting = any(
+          queued.kind == "sign" and queued.generation == job.generation and queued.native_index is not None and queued.native_index > job.native_index
+          for queued in self.jobs
+        )
+        if newer_sign_waiting:
+          # The steering command represented by this generation is already
+          # obsolete. Keep comma authority, skip it, and immediately service the
+          # newest queued source generation instead of spending another 45 ms
+          # signing stale steering.
+          slot = self.pending_outputs.get(job.native_index)
+          if slot is not None:
+            slot.skipped = True
+            self.superseded_sign_count += 1
+            self._flush_outputs_locked()
+          self._cv.notify_all()
+          continue
+        if job.retry_count < ORACLE_SIGN_MAX_RETRIES:
+          job.retry_count += 1
+          job.sent_at = None
+          self.jobs.appendleft(job)
+          self.next_oracle_send_at = min(self.next_oracle_send_at, now)
+          continue
       self._job_failure_locked(job)
 
   def _next_job_locked(self, now: float) -> tuple[int, OracleJob] | None:
