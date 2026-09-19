@@ -206,24 +206,28 @@ def set_clock(ns):
 def host_tx(msgs):
   global strict_host_id11
   for m in msgs:
-    ok = bool(safety.safety_tx_hook(packet(int(m.address), int(m.src), bytes(m.dat))))
-    stats[('host_tx', hex(int(m.address)), 'A' if ok else 'R')] += 1
-    if ok and int(m.address) == 0x777 and bytes(m.dat)[:3] == bytes((7, 0xC9, 0xA8)):
-      stats['arm' if bytes(m.dat)[3] else 'release'] += 1
-    if ok and int(m.address) == NATIVE_08A_ADDR:
+    if hasattr(m, 'address'):
+      address, data, bus = int(m.address), bytes(m.dat), int(m.src)
+    else:
+      address, data, bus = int(m[0]), bytes(m[1]), int(m[2])
+    ok = bool(safety.safety_tx_hook(packet(address, bus, data)))
+    stats[('host_tx', hex(address), 'A' if ok else 'R')] += 1
+    if ok and address == 0x777 and data[:3] == bytes((7, 0xC9, 0xA8)):
+      stats['arm' if data[3] else 'release'] += 1
+    if ok and address == NATIVE_08A_ADDR:
       stats['host_08a_accepted'] += 1
     if not ok:
-      if int(m.address) == NATIVE_08A_ADDR and not safety.get_controls_allowed():
+      if address == NATIVE_08A_ADDR and not safety.get_controls_allowed():
         stats['expected_controls_disallowed_08a_reject'] += 1
       else:
-        failures.append(('safety_tx_reject', sim[0], hex(int(m.address)), bytes(m.dat).hex()))
-    if int(m.address) == NATIVE_08A_ADDR and proxy.active and proxy.control_lat_active:
-      d = bytes(m.dat)
+        failures.append(('safety_tx_reject', sim[0], hex(address), data.hex()))
+    if address == NATIVE_08A_ADDR and proxy.active and proxy.control_lat_active:
+      d = data
       if (d[21] & 0x3F) != 11:
         failures.append(('owned_non_id11_tx', sim[0], d[21] & 0x3F, d.hex()))
       else:
         strict_host_id11 += 1
-    echo_queue.append((int(m.address), bytes(m.dat), int(m.src) + (0x80 if ok else 0xC0)))
+    echo_queue.append((address, data, bus + (0x80 if ok else 0xC0)))
 
 
 def drain_echo():
