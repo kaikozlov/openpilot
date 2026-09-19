@@ -256,9 +256,6 @@ class Car:
       # ownership handoff, keep Toyota CarController pinned to measured steering.
       if self.tss3_08a_proxy is not None and hasattr(self.CI.CC, "tss3_request_plane_active"):
         self.CI.CC.tss3_request_plane_active = self.tss3_08a_proxy.active
-        baseline_angle = self.tss3_08a_proxy.consume_controller_baseline_angle_deg()
-        if baseline_angle is not None and hasattr(self.CI.CC, "tss3_request_plane_baseline_angle_deg"):
-          self.CI.CC.tss3_request_plane_baseline_angle_deg = baseline_angle
 
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)

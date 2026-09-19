@@ -23,7 +23,7 @@ from typing import Literal
 
 from opendbc.car import structs
 from opendbc.car.can_definitions import CanData
-from opendbc.car.toyota.tss3 import TSS3_B6_TARGET_ANGLE_SCALE_DEG, target_angle_deg_to_raw
+from opendbc.car.toyota.tss3 import target_angle_deg_to_raw
 from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car.toyota_tss3_08a import (
@@ -278,7 +278,8 @@ class ToyotaTss3RequestProxy:
     self.can_valid = False
     self.control_lat_active = False
     self.control_target_angle_raw = 0
-    self.measured_target_angle_raw = 0
+    self.native_cruise_operating = False
+    self.brake_pressed = False
 
     self.sync_trip: int | None = None
     self.sync_reset: int | None = None
@@ -310,7 +311,6 @@ class ToyotaTss3RequestProxy:
 
     self.pending_outputs: dict[int, PendingOutput] = {}
     self.next_output_index: int | None = None
-    self.controller_baseline_angle_raw: int | None = None
 
     self.arm_count = 0
     self.modified_tx_count = 0
@@ -318,7 +318,6 @@ class ToyotaTss3RequestProxy:
     self.release_count = 0
     self.oracle_response_count = 0
     self.oracle_timeout_count = 0
-    self.superseded_sign_count = 0
     self.recovery_count = 0
     self.verification_count = 0
     self.authority_failure_count = 0
@@ -344,13 +343,6 @@ class ToyotaTss3RequestProxy:
         self._release_control_locked()
       elif not was_lat_active and self.control_lat_active:
         self._maybe_arm_locked()
-
-  def consume_controller_baseline_angle_deg(self) -> float | None:
-    """Return a one-shot Toyota lateral baseline actually sent downstream."""
-    with self._cv:
-      raw = self.controller_baseline_angle_raw
-      self.controller_baseline_angle_raw = None
-      return None if raw is None else raw * TSS3_B6_TARGET_ANGLE_SCALE_DEG
 
   def authority_failure_alert_active(self) -> bool:
     with self._cv:
@@ -412,31 +404,13 @@ class ToyotaTss3RequestProxy:
     out: list[CanData] = []
     while True:
       slot = self.pending_outputs.get(self.next_output_index)
-      if slot is None:
-        break
-      if slot.ready_frame is None:
+      if slot is None or slot.ready_frame is None:
         break
       out.append(CanData(NATIVE_08A_ADDR, slot.ready_frame, DOWNSTREAM_BUS))
       if slot.modified:
         self.modified_tx_count += 1
-        # The final downstream lateral command is the same CarController target
-        # that produced this modified frame, so any earlier fallback baseline in
-        # this flush is superseded.
-        self.controller_baseline_angle_raw = None
       else:
         self.transparent_tx_count += 1
-        native_id = slot.ready_frame[21] & 0x3F
-        if self.control_lat_active:
-          # A transparent generation hands lateral semantics back to Toyota for
-          # this source interval. ID11 commands Toyota's explicit target; ID0
-          # and other applications carry no openpilot lateral command, so resume
-          # from measured steering. Synchronize immediately because this flush
-          # can occur while processing the next native generation, before card's
-          # next 100-Hz CarController update.
-          baseline_raw = (int.from_bytes(slot.ready_frame[18:20], "big", signed=True)
-                          if native_id == 11 else self.measured_target_angle_raw)
-          self.control_target_angle_raw = baseline_raw
-          self.controller_baseline_angle_raw = baseline_raw
       del self.pending_outputs[self.next_output_index]
       self.next_output_index += 1
     if out:
@@ -446,40 +420,6 @@ class ToyotaTss3RequestProxy:
     for slot in self.pending_outputs.values():
       slot.ready_frame = slot.native_frame
       slot.modified = False
-    self._flush_outputs_locked()
-
-  def _fallback_pending_before_locked(self, native_index: int) -> None:
-    # Relay ownership must preserve the FRC publication cadence even when the
-    # EPS oracle misses a private response. Once a newer native generation has
-    # arrived, an older unsigned generation has missed its steering deadline:
-    # forward that exact authenticated Toyota frame instead of creating a hole
-    # in the downstream 0x08A stream.
-    changed = False
-    for index, slot in self.pending_outputs.items():
-      if index < native_index and slot.ready_frame is None:
-        slot.ready_frame = slot.native_frame
-        slot.modified = False
-        self.superseded_sign_count += 1
-        changed = True
-    if changed:
-      self._flush_outputs_locked()
-
-  def _coalesce_queued_signs_locked(self) -> None:
-    # Keep the one sign request already in flight, but never build a FIFO of
-    # stale unsigned steering commands behind it. A newly observed native
-    # generation supersedes every older sign job that has not started yet. Its
-    # downstream representation is the exact native frame, never an omission.
-    kept: deque[OracleJob] = deque()
-    for job in self.jobs:
-      if job.kind == "sign" and job.generation == self.state_generation and job.native_index is not None:
-        slot = self.pending_outputs.get(job.native_index)
-        if slot is not None and slot.ready_frame is None:
-          slot.ready_frame = slot.native_frame
-          slot.modified = False
-          self.superseded_sign_count += 1
-        continue
-      kept.append(job)
-    self.jobs = kept
     self._flush_outputs_locked()
 
   def _release_locked(self, *, restore_pending: bool = True, send_admin: bool = True) -> None:
@@ -504,7 +444,6 @@ class ToyotaTss3RequestProxy:
     self.arm_clone_frame = None
     self.pending_outputs.clear()
     self.next_output_index = None
-    self.controller_baseline_angle_raw = None
 
   def _fail_open_locked(self, reason: str) -> None:
     # Initial startup can see native 0x08A before the first usable 0x00F sync;
@@ -586,7 +525,8 @@ class ToyotaTss3RequestProxy:
     ), front=True)
 
   def _maybe_arm_locked(self) -> None:
-    if self.active or self.arm_pending or not self.control_lat_active or not self.qualified or not self.can_valid:
+    if (self.active or self.arm_pending or not self.control_lat_active or not self.native_cruise_operating or
+        self.brake_pressed or not self.qualified or not self.can_valid):
       return
     admin = make_admin(True)
     self._send_can([admin])
@@ -625,11 +565,6 @@ class ToyotaTss3RequestProxy:
     if self.next_output_index is None:
       self.next_output_index = event.index
 
-    # A source generation is the deadline for every older pending generation.
-    # This bounds downstream request loss to at most one native interval even
-    # when a command-5 response disappears.
-    self._fallback_pending_before_locked(event.index)
-
     native = event.frame
     if not self.control_lat_active or event.target_id not in TSS3_LATERAL_SOURCE_IDS:
       self.pending_outputs[event.index] = PendingOutput(native, native, False)
@@ -642,7 +577,6 @@ class ToyotaTss3RequestProxy:
       self._flush_outputs_locked()
       return
 
-    self._coalesce_queued_signs_locked()
     self.pending_outputs[event.index] = PendingOutput(native, None, True)
     self._queue_job_locked(OracleJob(
       kind="sign",
@@ -661,12 +595,32 @@ class ToyotaTss3RequestProxy:
       self._fail_open_locked("native_event_invalid")
       return
 
+    # Use the same source-real cruise latch that Panda uses for controls_allowed.
+    # This closes the one-generation race where controlsd can still report
+    # latActive after Toyota has already dropped steering authority.
+    self.native_cruise_operating = bool(frame[3] & 0x08)
+
     if self.last_native_b26 is not None and event.b26 == ((self.last_native_b26 + 1) & 0x3F):
       self.stable_native_frames += 1
     else:
       self.stable_native_frames = 1
     self.last_native_b26 = event.b26
     self.history.append(event)
+
+    if not self.native_cruise_operating and (self.active or self.arm_pending):
+      # Panda has already blocked this source frame because replacement ownership
+      # was active when it arrived. Preserve source continuity by sending this
+      # generation exactly, flush any earlier pending generations exactly, then
+      # release ownership. Do not re-arm until the native latch returns.
+      if self.active:
+        if self.next_output_index is None:
+          self.next_output_index = event.index
+        self.pending_outputs[event.index] = PendingOutput(event.frame, event.frame, False)
+        self._release_control_locked()
+      else:
+        self._send_can([CanData(NATIVE_08A_ADDR, event.frame, DOWNSTREAM_BUS)])
+        self._release_control_locked(restore_pending=False)
+      return
 
     if self.tracker.event is None or self.tracker.message_counter is None:
       if self.stable_native_frames >= STABLE_NATIVE_FRAMES:
@@ -759,26 +713,15 @@ class ToyotaTss3RequestProxy:
         self._authority_failure_locked("invalid_sign_job")
         return
       slot = self.pending_outputs.get(int(job.native_index))
-      if slot is None or slot.ready_frame is not None:
-        # The next native generation may already have forced an exact fallback
-        # for this source generation. A late MAC must never replace or replay it.
+      if slot is None:
         return
       slot.ready_frame = build_signed_frame(job.application, int(job.reset_counter), int(job.message_counter), cmac4)
       self._flush_outputs_locked()
 
   def _job_failure_locked(self, job: OracleJob) -> None:
     if job.kind == "sign":
-      # Signing transport failure is not request-plane authority failure. Keep
-      # the relay owned and preserve the source generation exactly; Panda's
-      # ordinary steering checks still gate every later modified generation.
       self.oracle_timeout_count += 1
-      if job.native_index is not None:
-        slot = self.pending_outputs.get(job.native_index)
-        if slot is not None and slot.ready_frame is None:
-          slot.ready_frame = slot.native_frame
-          slot.modified = False
-          self._flush_outputs_locked()
-      self._record_failure_locked("oracle_sign_failure", full_recovery=False)
+      self._authority_failure_locked("oracle_sign_failure")
       return
 
     if job.kind == "verify":
@@ -821,30 +764,16 @@ class ToyotaTss3RequestProxy:
 
     for seq in expired:
       job = self.inflight.pop(seq)
-      if job.kind == "sign" and job.native_index is not None:
-        newer_sign_waiting = any(
-          queued.kind == "sign" and queued.generation == job.generation and queued.native_index is not None and queued.native_index > job.native_index
-          for queued in self.jobs
-        )
-        if newer_sign_waiting:
-          # The steering command represented by this generation is already
-          # obsolete. Keep comma authority, forward its exact native source
-          # frame, and immediately service the newest queued generation instead
-          # of spending another 45 ms signing stale steering.
-          slot = self.pending_outputs.get(job.native_index)
-          if slot is not None and slot.ready_frame is None:
-            slot.ready_frame = slot.native_frame
-            slot.modified = False
-            self.superseded_sign_count += 1
-            self._flush_outputs_locked()
-          self._cv.notify_all()
-          continue
-        if job.retry_count < ORACLE_SIGN_MAX_RETRIES:
-          job.retry_count += 1
-          job.sent_at = None
-          self.jobs.appendleft(job)
-          self.next_oracle_send_at = min(self.next_oracle_send_at, now)
-          continue
+      if job.kind == "sign" and job.retry_count < ORACLE_SIGN_MAX_RETRIES:
+        # Private 0x7A9 responses can disappear even after ISO-TP FC. Preserve
+        # the exact source generation and retry under a fresh transaction
+        # sequence before giving up authority. Active signing is serialized, so
+        # retries cannot overlap a newer source generation.
+        job.retry_count += 1
+        job.sent_at = None
+        self.jobs.appendleft(job)
+        self.next_oracle_send_at = min(self.next_oracle_send_at, now)
+        continue
       self._job_failure_locked(job)
 
   def _next_job_locked(self, now: float) -> tuple[int, OracleJob] | None:
@@ -908,11 +837,14 @@ class ToyotaTss3RequestProxy:
   def update(self, can_list: list, CS: structs.CarState) -> None:
     with self._cv:
       self.can_valid = bool(CS.canValid)
-      self.measured_target_angle_raw = target_angle_deg_to_raw(
-        float(CS.steeringAngleDeg + CS.steeringAngleOffsetDeg)
-      )
+      self.brake_pressed = bool(getattr(CS, "brakePressed", False))
       if not self.can_valid and (self.active or self.arm_pending or self.qualified or self.recovery_active):
         self._fail_open_locked("can_invalid")
+      elif self.brake_pressed and (self.active or self.arm_pending):
+        # Panda's generic safety logic revokes controls_allowed immediately on
+        # brake press, which can precede controlsd's latActive=False by a few ms.
+        # Release on the same fresh CarState boundary to avoid one stale ID11.
+        self._release_control_locked()
 
       for _, packets in can_list:
         for address, dat, src in packets:
