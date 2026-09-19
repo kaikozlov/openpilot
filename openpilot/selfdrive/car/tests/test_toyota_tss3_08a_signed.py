@@ -37,8 +37,12 @@ def sync_frame(trip: int = 620, reset: int = 1109) -> bytes:
 
 def native_frame(b26: int, message: int, *, trip: int = 620, reset: int = 1109,
                  target_id: int = 0, angle_raw: int = 0, semantic: int = 0x40,
-                 mac28: str = KNOWN_MAC28) -> bytes:
+                 mac28: str = KNOWN_MAC28, cruise: bool = True) -> bytes:
   app = bytearray(KNOWN_APP)
+  if cruise:
+    app[3] |= 0x08
+  else:
+    app[3] &= ~0x08
   app[18:20] = angle_raw.to_bytes(2, "big", signed=True)
   app[21] = (app[21] & 0xC0) | (target_id & 0x3F)
   app[22] = semantic
@@ -58,8 +62,8 @@ def batch(*frames: tuple[int, bytes, int]):
   return [(1_000_000_000, list(frames))]
 
 
-def cs(*, valid: bool = True):
-  return SimpleNamespace(canValid=valid)
+def cs(*, valid: bool = True, brake: bool = False):
+  return SimpleNamespace(canValid=valid, brakePressed=brake)
 
 
 class Collector:
@@ -144,15 +148,29 @@ def test_resolve_epoch_nearest_low2():
   assert resolve_epoch(620, 1109, 1110 & 3) == (620, 1110)
 
 
-def test_freshness_tracker_continues_across_reset_progression():
+def test_freshness_tracker_resets_message_counter_on_new_reset_epoch():
   tracker = NativeFreshnessTracker()
   assert tracker.seed(event(1, 10, 8), 8)
   ok, reset_changed = tracker.update(event(2, 11, 9))
   assert ok and not reset_changed and tracker.message_counter == 9
   ok, reset_changed = tracker.update(event(3, 13, 11))
   assert ok and not reset_changed and tracker.message_counter == 11
-  ok, reset_changed = tracker.update(event(4, 14, 12, reset=1110))
-  assert ok and reset_changed and tracker.message_counter == 12
+
+  # Source-real Camry behavior: the first 0x08A in a new reset epoch uses
+  # full message counter 1, independent of the previous epoch's full counter.
+  ok, reset_changed = tracker.update(event(4, 14, 1, reset=1110))
+  assert ok and reset_changed and tracker.message_counter == 1
+  ok, reset_changed = tracker.update(event(5, 15, 2, reset=1110))
+  assert ok and not reset_changed and tracker.message_counter == 2
+
+
+def test_freshness_tracker_rejects_missed_reset_boundary():
+  tracker = NativeFreshnessTracker()
+  assert tracker.seed(event(1, 10, 8), 8)
+  # If the first observed generation in the new epoch is not low2=1, the
+  # boundary was missed and full-counter recovery is required.
+  ok, reset_changed = tracker.update(event(2, 13, 3, reset=1110))
+  assert not ok and reset_changed
 
 
 def test_id11_builder_preserves_native_envelope_and_promotes_id0():
@@ -218,6 +236,62 @@ def test_inactive_qualified_proxy_does_not_arm_until_lat_active():
   assert worker.qualified and not worker.active and not worker.arm_pending
 
   worker.set_control(True, 0.0)
+  assert worker.arm_pending
+
+
+def test_brake_press_releases_before_controlsd_lat_active_catches_up():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  qualify(worker, collector)
+  assert worker.active and worker.control_lat_active
+
+  before = len(collector.batches)
+  # Reproduce the live ordering: Panda/CarState sees brake first while the last
+  # CarControl still has latActive=True.
+  worker.update([], cs(brake=True))
+  assert not worker.active
+  assert worker.qualified
+  assert worker.brake_pressed
+  assert collector.batches[before] == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)]
+
+  # Native cruise may still be latched for another generation, but brake state
+  # prevents an immediate re-arm until the safety boundary is clear.
+  source = native_frame(9, 10, target_id=0, cruise=True)
+  worker.update(batch((NATIVE_08A_ADDR, source, 2)), cs(brake=True))
+  assert not worker.arm_pending
+
+
+def test_native_cruise_latch_drop_releases_before_next_modified_request():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  qualify(worker, collector)
+  state = cs()
+  assert worker.active and worker.native_cruise_operating
+
+  # Queue one modified generation first so the release path must also cancel
+  # stale sign work from the authority interval that is ending.
+  pending = native_frame(9, 10, target_id=0, angle_raw=100, semantic=0x59, cruise=True)
+  worker.update(batch((NATIVE_08A_ADDR, pending, 2)), state)
+  assert any(job.kind == "sign" for job in worker.jobs)
+
+  before = len(collector.batches)
+  dropped = native_frame(10, 11, target_id=0, angle_raw=100, semantic=0x5A, cruise=False)
+  worker.update(batch((NATIVE_08A_ADDR, dropped, 2)), state)
+
+  assert not worker.active
+  assert worker.qualified
+  assert not worker.native_cruise_operating
+  assert collector.batches[before] == [CanData(NATIVE_08A_ADDR, pending, 0), CanData(NATIVE_08A_ADDR, dropped, 0)]
+  assert collector.batches[before + 1] == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)]
+  assert not worker.jobs
+  assert not worker.inflight
+
+  # controlsd may still be latActive for one generation, but no re-arm occurs
+  # until Toyota's source-real cruise latch returns.
+  worker.set_control(True, 1.0)
+  assert not worker.arm_pending
+  resumed = native_frame(11, 12, target_id=0, angle_raw=100, semantic=0x5B, cruise=True)
+  worker.update(batch((NATIVE_08A_ADDR, resumed, 2)), state)
   assert worker.arm_pending
 
 
@@ -317,13 +391,13 @@ def test_sync_ahead_of_native_fv4_signs_the_native_epoch_without_releasing_owner
 
   # The following native generation moves onto the new reset epoch normally;
   # no ownership release/recovery is needed at the transition.
-  new_epoch_source = native_frame(10, 11, reset=new_reset, target_id=11, angle_raw=100, semantic=0x5A)
+  new_epoch_source = native_frame(10, 1, reset=new_reset, target_id=11, angle_raw=100, semantic=0x5A)
   worker.update(batch((NATIVE_08A_ADDR, new_epoch_source, 2)), state)
   assert worker.active
   sign_new = worker.jobs.popleft()
   assert sign_new.kind == "sign"
   assert sign_new.reset_counter == new_reset
-  assert sign_new.message_counter == 11
+  assert sign_new.message_counter == 1
   cmac_new = bytes.fromhex("23456789")
   put_inflight(worker, seq, sign_new)
   worker.update(batch(response(seq, cmac_new)), state)
