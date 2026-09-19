@@ -7,6 +7,7 @@ from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
   ORACLE_BUS,
   ORACLE_RESPONSE_ADDR,
   OracleJob,
+  PendingOutput,
   NativeEvent,
   NativeFreshnessTracker,
   ToyotaTss3RequestProxy,
@@ -511,6 +512,64 @@ def test_active_sign_jobs_are_serialized_and_response_driven():
     worker.inflight.clear()
     item2 = worker._next_job_locked(1.002)
     assert item2 is not None and item2[1] is second
+
+
+def test_sign_timeout_supersedes_stale_generation_when_newer_source_waits():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  worker.active = True
+  worker.qualified = True
+  worker.state_generation = 7
+  worker.next_output_index = 1
+
+  first = OracleJob(kind="sign", generation=7, domain=KNOWN_DOMAIN, native_index=1,
+                    application=KNOWN_APP, trip_counter=620, reset_counter=1109, message_counter=8,
+                    sent_at=1.0)
+  latest = OracleJob(kind="sign", generation=7, domain=KNOWN_DOMAIN, native_index=3,
+                     application=KNOWN_APP, trip_counter=620, reset_counter=1109, message_counter=10)
+  worker.pending_outputs[1] = PendingOutput(bytes(32), None, True)
+  worker.pending_outputs[2] = PendingOutput(bytes(32), None, True, skipped=True)
+  worker.pending_outputs[3] = PendingOutput(bytes(32), None, True)
+  worker.inflight[10] = first
+  worker.jobs.append(latest)
+
+  with worker._cv:
+    worker._expire_inflight_locked(1.046)
+
+  assert worker.active
+  assert worker.qualified
+  assert not worker.inflight
+  assert worker.jobs[0] is latest
+  assert 1 not in worker.pending_outputs
+  assert 2 not in worker.pending_outputs
+  assert worker.next_output_index == 3
+  assert worker.superseded_sign_count == 1
+  assert worker.authority_failure_count == 0
+  assert not worker.authority_failure_alert_active()
+
+
+def test_new_native_coalesces_unsent_sign_jobs_to_latest_generation():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  qualify(worker, collector)
+  state = cs()
+
+  worker.set_control(True, 2.0)
+  first = native_frame(9, 10, target_id=0, angle_raw=100, semantic=0x59)
+  worker.update(batch((NATIVE_08A_ADDR, first, 2)), state)
+  first_job = worker.jobs.popleft()
+  put_inflight(worker, 90, first_job)
+
+  second = native_frame(10, 11, target_id=0, angle_raw=95, semantic=0x5A)
+  worker.update(batch((NATIVE_08A_ADDR, second, 2)), state)
+  assert len(worker.jobs) == 1 and worker.jobs[0].native_index == 11
+
+  third = native_frame(11, 12, target_id=0, angle_raw=90, semantic=0x5B)
+  worker.update(batch((NATIVE_08A_ADDR, third, 2)), state)
+  assert len(worker.jobs) == 1 and worker.jobs[0].native_index == 12
+  assert worker.pending_outputs[11].skipped
+  assert worker.superseded_sign_count == 1
+  assert worker.authority_failure_count == 0
 
 
 def test_sign_timeout_retries_twice_before_authority_release():
