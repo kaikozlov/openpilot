@@ -197,7 +197,14 @@ class NativeFreshnessTracker:
     return True
 
   def update(self, event: NativeEvent) -> tuple[bool, bool]:
-    """Return (valid, reset_counter_changed)."""
+    """Return (valid, reset_counter_changed).
+
+    Toyota's 8-bit SecOC message counter is local to each reset-counter epoch:
+    the first 0x08A generation of every newly resolved reset epoch is message 1,
+    then it increments with the native B26 generation sequence inside that epoch.
+    The full Camry route validates this across 874 reset transitions and 19
+    independent oracle-proven full-counter anchors.
+    """
     if self.event is None or self.message_counter is None:
       return False, False
     prev = self.event
@@ -205,9 +212,19 @@ class NativeFreshnessTracker:
     delta = (event.b26 - prev.b26) & 0x3F
     if not 1 <= delta <= MAX_NATIVE_GAP:
       return False, False
-    message = (self.message_counter + delta) & 0xFF
-    if (message & 0x3) != event.message_low2:
-      return False, False
+
+    if reset_changed:
+      # A source-real reset epoch starts at message counter 1. If the first
+      # observed frame is not low2=1, we missed the boundary; force recovery
+      # rather than guessing the high counter bits.
+      if event.message_low2 != 1:
+        return False, True
+      message = 1
+    else:
+      message = (self.message_counter + delta) & 0xFF
+      if (message & 0x3) != event.message_low2:
+        return False, False
+
     self.event = event
     self.message_counter = message
     return True, reset_changed
@@ -252,6 +269,8 @@ class ToyotaTss3RequestProxy:
     self.can_valid = False
     self.control_lat_active = False
     self.control_target_angle_raw = 0
+    self.native_cruise_operating = False
+    self.brake_pressed = False
 
     self.sync_trip: int | None = None
     self.sync_reset: int | None = None
@@ -309,15 +328,19 @@ class ToyotaTss3RequestProxy:
       # CC.latActive is false, and Panda must begin the next handoff from that
       # same baseline.
       if was_lat_active and not self.control_lat_active:
-        self._release_locked(restore_pending=False)
-        # Cancel any source-generation sign work that became irrelevant at the
-        # authority transition while preserving recovered freshness/qualification.
-        self.state_generation += 1
-        self.jobs.clear()
-        self.inflight.clear()
-        self._cv.notify_all()
+        self._release_control_locked()
       elif not was_lat_active and self.control_lat_active:
         self._maybe_arm_locked()
+
+  def _release_control_locked(self, *, restore_pending: bool = True) -> None:
+    self._release_locked(restore_pending=restore_pending)
+    # Sign work belongs to the authority interval that just ended. Preserve the
+    # recovered native freshness tracker/qualification, but invalidate queued
+    # and in-flight modified generations so they cannot transmit after release.
+    self.state_generation += 1
+    self.jobs.clear()
+    self.inflight.clear()
+    self._cv.notify_all()
 
   def _clear_oracle_state_locked(self) -> None:
     self.state_generation += 1
@@ -353,13 +376,21 @@ class ToyotaTss3RequestProxy:
     self._flush_outputs_locked()
 
   def _release_locked(self, *, restore_pending: bool = True, send_admin: bool = True) -> None:
-    if restore_pending and self.active:
-      self._restore_pending_native_locked()
-    if send_admin and (self.active or self.arm_pending):
-      self._send_can([make_admin(False)])
-      self.release_count += 1
+    was_active = self.active
+    was_arm_pending = self.arm_pending
+
+    # Logical steering authority ends before any source-restoration frames are
+    # emitted. Panda relay ownership remains active until the admin release below,
+    # which lets those exact native frames cross the split without ever appearing
+    # as host lateral authority.
     self.active = False
     self.arm_pending = False
+
+    if restore_pending and was_active:
+      self._restore_pending_native_locked()
+    if send_admin and (was_active or was_arm_pending):
+      self._send_can([make_admin(False)])
+      self.release_count += 1
     self.arm_admin_data = None
     self.arm_accepted = False
     self.arm_clone_index = None
@@ -439,7 +470,8 @@ class ToyotaTss3RequestProxy:
     ), front=True)
 
   def _maybe_arm_locked(self) -> None:
-    if self.active or self.arm_pending or not self.control_lat_active or not self.qualified or not self.can_valid:
+    if (self.active or self.arm_pending or not self.control_lat_active or not self.native_cruise_operating or
+        self.brake_pressed or not self.qualified or not self.can_valid):
       return
     admin = make_admin(True)
     self._send_can([admin])
@@ -508,12 +540,32 @@ class ToyotaTss3RequestProxy:
       self._fail_open_locked()
       return
 
+    # Use the same source-real cruise latch that Panda uses for controls_allowed.
+    # This closes the one-generation race where controlsd can still report
+    # latActive after Toyota has already dropped steering authority.
+    self.native_cruise_operating = bool(frame[3] & 0x08)
+
     if self.last_native_b26 is not None and event.b26 == ((self.last_native_b26 + 1) & 0x3F):
       self.stable_native_frames += 1
     else:
       self.stable_native_frames = 1
     self.last_native_b26 = event.b26
     self.history.append(event)
+
+    if not self.native_cruise_operating and (self.active or self.arm_pending):
+      # Panda has already blocked this source frame because replacement ownership
+      # was active when it arrived. Preserve source continuity by sending this
+      # generation exactly, flush any earlier pending generations exactly, then
+      # release ownership. Do not re-arm until the native latch returns.
+      if self.active:
+        if self.next_output_index is None:
+          self.next_output_index = event.index
+        self.pending_outputs[event.index] = PendingOutput(event.frame, event.frame, False)
+        self._release_control_locked()
+      else:
+        self._send_can([CanData(NATIVE_08A_ADDR, event.frame, DOWNSTREAM_BUS)])
+        self._release_control_locked(restore_pending=False)
+      return
 
     if self.tracker.event is None or self.tracker.message_counter is None:
       if self.stable_native_frames >= STABLE_NATIVE_FRAMES:
@@ -664,7 +716,14 @@ class ToyotaTss3RequestProxy:
       seq = self._alloc_seq_locked()
       job.sent_at = now
       self.inflight[seq] = job
-      self.next_oracle_send_at = now + ORACLE_PERIOD_S
+      # Keep the 40-Hz sender phase-locked to its prior deadline. Using
+      # `now + period` accumulates every scheduler wakeup delay and eventually
+      # lets signed generations fall out of Panda's native-history window.
+      if self.next_oracle_send_at <= 0.0:
+        self.next_oracle_send_at = now + ORACLE_PERIOD_S
+      else:
+        next_deadline = self.next_oracle_send_at + ORACLE_PERIOD_S
+        self.next_oracle_send_at = next_deadline if next_deadline > now else now + ORACLE_PERIOD_S
       return seq, job
     return None
 
@@ -688,8 +747,14 @@ class ToyotaTss3RequestProxy:
   def update(self, can_list: list, CS: structs.CarState) -> None:
     with self._cv:
       self.can_valid = bool(CS.canValid)
+      self.brake_pressed = bool(getattr(CS, "brakePressed", False))
       if not self.can_valid and (self.active or self.arm_pending or self.qualified or self.recovery_active):
         self._fail_open_locked()
+      elif self.brake_pressed and (self.active or self.arm_pending):
+        # Panda's generic safety logic revokes controls_allowed immediately on
+        # brake press, which can precede controlsd's latActive=False by a few ms.
+        # Release on the same fresh CarState boundary to avoid one stale ID11.
+        self._release_control_locked()
 
       for _, packets in can_list:
         for address, dat, src in packets:
