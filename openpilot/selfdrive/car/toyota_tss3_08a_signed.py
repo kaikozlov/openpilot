@@ -36,7 +36,10 @@ ORACLE_RESPONSE_ADDR = 0x1FE00002
 ORACLE_BUS = 0
 ORACLE_PRIVATE_SID = 0xC9
 ORACLE_SEQUENCE_MAX = 0x1F
-ORACLE_RESPONSE_TIMEOUT_S = 0.030
+# Parked raw-classic qualification: 100/100 at 25 ms cadence, p99 25.49 ms,
+# max 36.27 ms. Keep enough margin for the observed tail while remaining well
+# inside Panda's 100 ms request-plane replacement watchdog.
+ORACLE_RESPONSE_TIMEOUT_S = 0.050
 
 TSS3_LATERAL_SOURCE_IDS = (0, 4, 11, 18)  # No Request, LDA, LTA/LCA, SDG
 TSS3_LTA_LCA_ID = 11

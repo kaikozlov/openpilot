@@ -249,13 +249,15 @@ def test_out_of_order_oracle_replies_do_not_reorder_08a_outputs():
   assert [m.dat[26] & 0x3F for m in collector.batches[-1]] == [13, 14]
 
 
-def test_response_timeout_releases_authority_without_generation_fallback():
+def test_response_timeout_allows_live_tail_then_releases_without_generation_fallback():
   worker, _, clock = start_active_worker()
   worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110), 2)), cs())
   with worker._cv:
     seq, _ = worker._next_job_locked(clock.now)
-  clock.now = 0.031
-  with worker._cv:
+    clock.now = 0.040
+    worker._expire_locked(clock.now)
+    assert worker.active and seq in worker.inflight
+    clock.now = 0.051
     worker._expire_locked(clock.now)
   assert not worker.active
   assert worker.last_failure_reason == "oracle_response_timeout"
