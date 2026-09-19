@@ -261,15 +261,24 @@ def set_clock(ns):
 def host_tx(msgs):
   global strict_host_id11
   for m in msgs:
-    p = packet(int(m.address), int(m.src), bytes(m.dat))
+    data = bytes(m.dat)
+    desired_before = safety.get_desired_angle_last() if int(m.address) == NATIVE_08A_ADDR else None
+    p = packet(int(m.address), int(m.src), data)
     ok = bool(safety.safety_tx_hook(p))
     stats[('host_tx', hex(int(m.address)), 'A' if ok else 'R')] += 1
     if not ok:
-      failures.append(('safety_tx_reject', sim[0], hex(int(m.address)), int(m.src), bytes(m.dat).hex()))
+      detail = None
+      if int(m.address) == NATIVE_08A_ADDR and len(data) == 32:
+        detail = {'id': data[21] & 0x3F, 'target_raw': int.from_bytes(data[18:20], 'big', signed=True),
+                  'desired_before': desired_before, 'controls_allowed': bool(safety.get_controls_allowed())}
+      failures.append(('safety_tx_reject', sim[0], hex(int(m.address)), int(m.src), data.hex(), detail))
     if int(m.address) == NATIVE_08A_ADDR and proxy.active and proxy.control_lat_active:
       ident = bytes(m.dat)[21] & 0x3F
       if ident == 0:
-        failures.append(('owned_idle_id0_tx', sim[0], bytes(m.dat).hex()))
+        # A missed/late oracle response deliberately degrades this source
+        # generation to its exact authenticated FRC ID0 frame. This preserves
+        # downstream request cadence while withholding only this steering update.
+        stats['host_exact_id0_fallback'] += 1
       elif ident == 11:
         if bytes(m.dat)[24] != 100:
           failures.append(('owned_id11_wrong_assist_gain', sim[0], bytes(m.dat)[24], bytes(m.dat).hex()))
@@ -417,6 +426,9 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
       with structs.CarControl.from_bytes(payload) as CC:
         if hasattr(ci.CC, 'tss3_request_plane_active'):
           ci.CC.tss3_request_plane_active = proxy.active
+          baseline_angle = proxy.consume_controller_baseline_angle_deg()
+          if baseline_angle is not None and hasattr(ci.CC, 'tss3_request_plane_baseline_angle_deg'):
+            ci.CC.tss3_request_plane_baseline_angle_deg = baseline_angle
         out, can_sends = ci.apply(CC, t)
         if can_sends:
           host_tx(can_sends)

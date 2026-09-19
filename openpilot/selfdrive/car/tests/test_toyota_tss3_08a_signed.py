@@ -1,8 +1,9 @@
 from types import SimpleNamespace
 
 from opendbc.car.can_definitions import CanData
-from openpilot.selfdrive.car.toyota_tss3_08a import ADMIN_ADDR, ADMIN_BUS, DOWNSTREAM_BUS, NATIVE_08A_ADDR, PANDA_REJECTED_OFFSET, SECOC_SYNC_ADDR
+from opendbc.car.toyota.tss3 import TSS3_B6_TARGET_ANGLE_SCALE_DEG
 from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
+from openpilot.selfdrive.car.toyota_tss3_08a import ADMIN_ADDR, ADMIN_BUS, DOWNSTREAM_BUS, NATIVE_08A_ADDR, PANDA_REJECTED_OFFSET, SECOC_SYNC_ADDR
 from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
   ORACLE_BUS,
   ORACLE_RESPONSE_ADDR,
@@ -63,8 +64,13 @@ def batch(*frames: tuple[int, bytes, int]):
   return [(1_000_000_000, list(frames))]
 
 
-def cs(*, valid: bool = True, brake: bool = False):
-  return SimpleNamespace(canValid=valid, brakePressed=brake)
+def cs(*, valid: bool = True, brake: bool = False, steering_angle_deg: float = 0.0):
+  return SimpleNamespace(
+    canValid=valid,
+    brakePressed=brake,
+    steeringAngleDeg=steering_angle_deg,
+    steeringAngleOffsetDeg=0.0,
+  )
 
 
 class Collector:
@@ -292,37 +298,35 @@ def test_lat_active_without_request_plane_authority_keeps_warning_asserted():
   assert not worker.authority_failure_alert_active()
 
 
-def test_brake_press_releases_before_controlsd_lat_active_catches_up():
+def test_brake_state_does_not_duplicate_controlsd_authority_policy():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
   qualify(worker, collector)
   assert worker.active and worker.control_lat_active
 
   before = len(collector.batches)
-  # Reproduce the live ordering: Panda/CarState sees brake first while the last
-  # CarControl still has latActive=True.
+  # Brake is already part of openpilot's normal engagement/safety path. The
+  # proxy must not invent an earlier, second release boundary while the latest
+  # CarControl still says latActive=True.
   worker.update([], cs(brake=True))
-  assert not worker.active
+  assert worker.active
   assert worker.qualified
-  assert worker.brake_pressed
-  assert collector.batches[before] == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)]
+  assert len(collector.batches) == before
 
-  # Native cruise may still be latched for another generation, but brake state
-  # prevents an immediate re-arm until the safety boundary is clear.
-  source = native_frame(9, 10, target_id=0, cruise=True)
-  worker.update(batch((NATIVE_08A_ADDR, source, 2)), cs(brake=True))
-  assert not worker.arm_pending
+  # controlsd owns the transition. Once CC.latActive falls, the proxy releases
+  # the relay exactly once through its normal control boundary.
+  worker.set_control(False, 0.0)
+  assert not worker.active
+  assert collector.batches[-1] == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)]
 
 
-def test_native_cruise_latch_drop_releases_before_next_modified_request():
+def test_native_cruise_latch_does_not_duplicate_controlsd_authority_policy():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
   qualify(worker, collector)
   state = cs()
-  assert worker.active and worker.native_cruise_operating
+  assert worker.active and worker.control_lat_active
 
-  # Queue one modified generation first so the release path must also cancel
-  # stale sign work from the authority interval that is ending.
   pending = native_frame(9, 10, target_id=0, angle_raw=100, semantic=0x59, cruise=True)
   worker.update(batch((NATIVE_08A_ADDR, pending, 2)), state)
   assert any(job.kind == "sign" for job in worker.jobs)
@@ -331,21 +335,44 @@ def test_native_cruise_latch_drop_releases_before_next_modified_request():
   dropped = native_frame(10, 11, target_id=0, angle_raw=100, semantic=0x5A, cruise=False)
   worker.update(batch((NATIVE_08A_ADDR, dropped, 2)), state)
 
-  assert not worker.active
+  # The source-real cruise bit is data, not a second engagement state machine.
+  # Preserve generation continuity and keep the relay owned until controlsd
+  # changes CC.latActive (or Panda rejects a prohibited modified transmission).
+  assert worker.active
   assert worker.qualified
-  assert not worker.native_cruise_operating
-  assert collector.batches[before] == [CanData(NATIVE_08A_ADDR, pending, 0), CanData(NATIVE_08A_ADDR, dropped, 0)]
-  assert collector.batches[before + 1] == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)]
-  assert not worker.jobs
-  assert not worker.inflight
+  assert collector.batches[before] == [CanData(NATIVE_08A_ADDR, pending, DOWNSTREAM_BUS)]
+  assert not any(batch == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)]
+                 for batch in collector.batches[before:])
 
-  # controlsd may still be latActive for one generation, but no re-arm occurs
-  # until Toyota's source-real cruise latch returns.
-  worker.set_control(True, 1.0)
-  assert not worker.arm_pending
-  resumed = native_frame(11, 12, target_id=0, angle_raw=100, semantic=0x5B, cruise=True)
-  worker.update(batch((NATIVE_08A_ADDR, resumed, 2)), state)
-  assert worker.arm_pending
+  worker.set_control(False, 0.0)
+  assert not worker.active
+  assert collector.batches[-2] == [CanData(NATIVE_08A_ADDR, dropped, DOWNSTREAM_BUS)]
+  assert collector.batches[-1] == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)]
+
+
+def test_transparent_generation_exports_one_shot_controller_baseline():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  worker.active = True
+  worker.control_lat_active = True
+  worker.next_output_index = 1
+
+  native_id11 = native_frame(9, 10, target_id=11, angle_raw=123)
+  worker.pending_outputs[1] = PendingOutput(native_id11, native_id11, False)
+  with worker._cv:
+    worker._flush_outputs_locked()
+  assert worker.control_target_angle_raw == 123
+  assert worker.consume_controller_baseline_angle_deg() == 123 * TSS3_B6_TARGET_ANGLE_SCALE_DEG
+  assert worker.consume_controller_baseline_angle_deg() is None
+
+  worker.measured_target_angle_raw = -77
+  native_id0 = native_frame(10, 11, target_id=0, angle_raw=400)
+  worker.pending_outputs[2] = PendingOutput(native_id0, native_id0, False)
+  with worker._cv:
+    worker._flush_outputs_locked()
+  assert worker.control_target_angle_raw == -77
+  assert worker.consume_controller_baseline_angle_deg() == -77 * TSS3_B6_TARGET_ANGLE_SCALE_DEG
+  assert worker.consume_controller_baseline_angle_deg() is None
 
 
 def test_active_non_id11_and_inactive_id11_are_exact_clones():
@@ -518,7 +545,7 @@ def test_active_id11_signs_exact_native_generation_and_preserves_every_other_fie
   assert worker.modified_tx_count == 1
 
 
-def test_output_order_waits_for_earlier_signed_id11():
+def test_new_native_deadline_preserves_order_with_exact_fallback():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
   seq = qualify(worker, collector)
@@ -529,18 +556,24 @@ def test_output_order_waits_for_earlier_signed_id11():
   worker.update(batch((NATIVE_08A_ADDR, first, 2)), state)
   sign = worker.jobs.popleft()
 
-  # A later non-ID11 request is ready immediately, but must not overtake the
-  # earlier native generation while its modified ID11 frame is being signed.
+  # The next native generation is the deadline for the earlier sign. Preserve
+  # source order by falling generation 10 back to its exact authenticated frame
+  # before the immediately-ready generation 11 crosses downstream.
   second = native_frame(10, 11, target_id=18, angle_raw=400, semantic=0x5A)
-  before = len(collector.batches)
+  before = len(collector.flat)
   worker.update(batch((NATIVE_08A_ADDR, second, 2)), state)
-  assert len(collector.batches) == before
+  assert collector.flat[before:] == [
+    CanData(NATIVE_08A_ADDR, first, DOWNSTREAM_BUS),
+    CanData(NATIVE_08A_ADDR, second, DOWNSTREAM_BUS),
+  ]
 
+  # A late MAC for the already-forwarded generation is consumed as transport
+  # completion only; it must not replay the generation as modified ID11.
   put_inflight(worker, seq, sign)
   cmac = bytes.fromhex("23456789")
+  before = len(collector.flat)
   worker.update(batch(response(seq, cmac)), state)
-  expected_first = build_signed_frame(sign.application, 1109, 10, cmac)
-  assert collector.batches[-1] == [CanData(NATIVE_08A_ADDR, expected_first, 0), CanData(NATIVE_08A_ADDR, second, 0)]
+  assert len(collector.flat) == before
 
 
 def test_active_sign_jobs_are_serialized_and_response_driven():
@@ -565,7 +598,7 @@ def test_active_sign_jobs_are_serialized_and_response_driven():
     assert item2 is not None and item2[1] is second
 
 
-def test_sign_timeout_supersedes_stale_generation_when_newer_source_waits():
+def test_sign_timeout_falls_back_exact_when_newer_source_waits():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
   worker.active = True
@@ -573,14 +606,19 @@ def test_sign_timeout_supersedes_stale_generation_when_newer_source_waits():
   worker.state_generation = 7
   worker.next_output_index = 1
 
+  first_native = native_frame(9, 8, angle_raw=100)
+  second_native = native_frame(10, 9, angle_raw=95)
+  third_native = native_frame(11, 10, angle_raw=90)
   first = OracleJob(kind="sign", generation=7, domain=KNOWN_DOMAIN, native_index=1,
                     application=KNOWN_APP, trip_counter=620, reset_counter=1109, message_counter=8,
                     sent_at=1.0)
   latest = OracleJob(kind="sign", generation=7, domain=KNOWN_DOMAIN, native_index=3,
                      application=KNOWN_APP, trip_counter=620, reset_counter=1109, message_counter=10)
-  worker.pending_outputs[1] = PendingOutput(bytes(32), None, True)
-  worker.pending_outputs[2] = PendingOutput(bytes(32), None, True, skipped=True)
-  worker.pending_outputs[3] = PendingOutput(bytes(32), None, True)
+  worker.pending_outputs[1] = PendingOutput(first_native, None, True)
+  # Generation 2 was already superseded before this timeout and therefore has
+  # an exact source fallback ready behind generation 1.
+  worker.pending_outputs[2] = PendingOutput(second_native, second_native, False)
+  worker.pending_outputs[3] = PendingOutput(third_native, None, True)
   worker.inflight[10] = first
   worker.jobs.append(latest)
 
@@ -594,12 +632,16 @@ def test_sign_timeout_supersedes_stale_generation_when_newer_source_waits():
   assert 1 not in worker.pending_outputs
   assert 2 not in worker.pending_outputs
   assert worker.next_output_index == 3
+  assert collector.batches[-1] == [
+    CanData(NATIVE_08A_ADDR, first_native, DOWNSTREAM_BUS),
+    CanData(NATIVE_08A_ADDR, second_native, DOWNSTREAM_BUS),
+  ]
   assert worker.superseded_sign_count == 1
   assert worker.authority_failure_count == 0
   assert not worker.authority_failure_alert_active()
 
 
-def test_new_native_coalesces_unsent_sign_jobs_to_latest_generation():
+def test_new_native_falls_back_unsent_generations_and_keeps_latest_sign_job():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
   qualify(worker, collector)
@@ -614,12 +656,14 @@ def test_new_native_coalesces_unsent_sign_jobs_to_latest_generation():
   second = native_frame(10, 11, target_id=0, angle_raw=95, semantic=0x5A)
   worker.update(batch((NATIVE_08A_ADDR, second, 2)), state)
   assert len(worker.jobs) == 1 and worker.jobs[0].native_index == 11
+  assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, first, DOWNSTREAM_BUS)
 
   third = native_frame(11, 12, target_id=0, angle_raw=90, semantic=0x5B)
   worker.update(batch((NATIVE_08A_ADDR, third, 2)), state)
   assert len(worker.jobs) == 1 and worker.jobs[0].native_index == 12
-  assert worker.pending_outputs[11].skipped
-  assert worker.superseded_sign_count == 1
+  assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, second, DOWNSTREAM_BUS)
+  assert 11 not in worker.pending_outputs
+  assert worker.superseded_sign_count == 2
   assert worker.authority_failure_count == 0
 
 
@@ -665,23 +709,23 @@ def test_sign_timeout_retries_twice_before_authority_release():
   assert worker.oracle_timeout_count == 0
   assert worker.authority_failure_count == 0
 
-  # Only a third consecutive miss releases this authority interval. Freshness
-  # qualification remains valid so the next native generation can re-arm.
+  # A third consecutive miss is visible, but it is not request-plane loss:
+  # the exact source generation is the fallback and relay ownership remains.
   worker.jobs.clear()
   job.sent_at = 3.0
   worker.inflight[12] = job
   with worker._cv:
     worker._expire_inflight_locked(3.046)
-  assert not worker.active
+  assert worker.active
   assert worker.qualified
   assert worker.oracle_timeout_count == 1
   assert worker.authority_failure_count == 1
   assert worker.last_authority_failure_reason == "oracle_sign_failure"
   assert worker.authority_failure_alert_active()
-  assert collector.flat[-1] == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)
+  assert not collector.flat or collector.flat[-1] != CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)
 
 
-def test_sign_failure_releases_authority_but_preserves_qualification_and_rearms():
+def test_sign_failure_keeps_authority_and_exact_source_fallback():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
   seq = qualify(worker, collector)
@@ -692,28 +736,29 @@ def test_sign_failure_releases_authority_but_preserves_qualification_and_rearms(
   worker.update(batch((NATIVE_08A_ADDR, first, 2)), state)
   sign = worker.jobs.popleft()
   second = native_frame(10, 11, target_id=18, angle_raw=400, semantic=0x5A)
+  before = len(collector.flat)
   worker.update(batch((NATIVE_08A_ADDR, second, 2)), state)
+  assert collector.flat[before:] == [
+    CanData(NATIVE_08A_ADDR, first, DOWNSTREAM_BUS),
+    CanData(NATIVE_08A_ADDR, second, DOWNSTREAM_BUS),
+  ]
 
   put_inflight(worker, seq, sign)
   worker.update(batch(response(seq, b"\x00\x00\x00\x00", status=1)), state)
 
-  # A signing failure ends only the current authority interval. Panda resumes
-  # stock forwarding; do not replay stale blocked generations from the host.
-  assert collector.batches[-1] == [CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)]
-  assert not worker.active and worker.qualified
+  # The failed MAC arrived after this generation's exact fallback. It is visible
+  # to diagnostics, but it must not tear down the healthy request-plane relay.
+  assert worker.active and worker.qualified
   assert worker.authority_failure_count == 1
   assert worker.last_authority_failure_reason == "oracle_sign_failure"
   assert worker.authority_failure_alert_active()
-  assert not worker.jobs and not worker.inflight and not worker.pending_outputs
+  assert not worker.inflight
+  assert all(m.dat != bytes.fromhex("07c9a80000000000") for m in collector.flat[-2:])
 
-  # The next source-real generation advances the preserved tracker and begins a
-  # fresh atomic handoff without brute-force recovery.
-  third = native_frame(11, 12, target_id=0, angle_raw=90, semantic=0x5B)
-  worker.update(batch((NATIVE_08A_ADDR, third, 2)), state)
-  assert worker.arm_pending
-  assert worker.qualified
-  assert worker.recovery_count == 1  # only the original startup recovery
-  assert collector.flat[-1] == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80100000000"), ADMIN_BUS)
+  # Non-lateral Toyota applications continue to cross exactly under the same
+  # ownership interval; no release/re-arm ceremony is required.
+  assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, second, DOWNSTREAM_BUS)
+  assert worker.recovery_count == 1
 
 
 def test_active_host_reject_preserves_qualification_and_rearms_next_native():
