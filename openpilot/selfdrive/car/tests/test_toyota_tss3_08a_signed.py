@@ -491,6 +491,28 @@ def test_output_order_waits_for_earlier_signed_id11():
   assert collector.batches[-1] == [CanData(NATIVE_08A_ADDR, expected_first, 0), CanData(NATIVE_08A_ADDR, second, 0)]
 
 
+def test_active_sign_jobs_are_serialized_and_response_driven():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  worker.state_generation = 7
+  first = OracleJob(kind="sign", generation=7, domain=KNOWN_DOMAIN, native_index=1,
+                    application=KNOWN_APP, trip_counter=620, reset_counter=1109, message_counter=8)
+  second = OracleJob(kind="sign", generation=7, domain=KNOWN_DOMAIN, native_index=2,
+                     application=KNOWN_APP, trip_counter=620, reset_counter=1109, message_counter=9)
+  worker.jobs.extend((first, second))
+  worker.next_oracle_send_at = 99.0  # active sign jobs ignore recovery pacing
+
+  with worker._cv:
+    item = worker._next_job_locked(1.0)
+    assert item is not None and item[1] is first
+    assert worker._next_job_locked(1.001) is None
+    # Simulate the first private response completing. The next source generation
+    # is immediately dispatchable; there is no fixed 25-ms sign cadence.
+    worker.inflight.clear()
+    item2 = worker._next_job_locked(1.002)
+    assert item2 is not None and item2[1] is second
+
+
 def test_sign_timeout_retries_once_with_fresh_sequence_before_fail_open():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
@@ -507,14 +529,14 @@ def test_sign_timeout_retries_once_with_fresh_sequence_before_fail_open():
   worker.next_oracle_send_at = 99.0
 
   with worker._cv:
-    worker._expire_inflight_locked(1.041)
+    worker._expire_inflight_locked(1.046)
   assert worker.active
   assert worker.qualified
   assert not worker.inflight
   assert worker.jobs[0] is job
   assert job.retry_count == 1
   assert job.sent_at is None
-  assert worker.next_oracle_send_at == 1.041
+  assert worker.next_oracle_send_at == 1.046
   assert worker.oracle_timeout_count == 0
 
   # A second lost response drops only this authority interval. Freshness
@@ -523,7 +545,7 @@ def test_sign_timeout_retries_once_with_fresh_sequence_before_fail_open():
   job.sent_at = 2.0
   worker.inflight[11] = job
   with worker._cv:
-    worker._expire_inflight_locked(2.041)
+    worker._expire_inflight_locked(2.046)
   assert not worker.active
   assert worker.qualified
   assert worker.oracle_timeout_count == 1
