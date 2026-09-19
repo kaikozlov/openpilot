@@ -3,7 +3,7 @@ from opendbc.car.structs import car
 from opendbc.car import DT_CTRL, structs
 from opendbc.car.car_helpers import interfaces
 from opendbc.car.interfaces import MAX_CTRL_SPEED
-from opendbc.car.toyota.values import CAR as TOYOTA_CAR, ToyotaFlags
+from opendbc.car.toyota.values import ToyotaFlags
 
 from openpilot.selfdrive.selfdrived.events import Events
 
@@ -125,10 +125,7 @@ class CarEvents:
       events.add(EventName.stockLkas)
     if CS.vEgo > MAX_CTRL_SPEED:
       events.add(EventName.speedTooHigh)
-    # Temporary TSS3 Camry bring-up exception: lateral control remains available
-    # while Toyota is in conventional-cruise mode, so don't block engagement on
-    # the generic adaptive-cruise requirement. Keep CarState.nonAdaptive truthful.
-    if CS.cruiseState.nonAdaptive and self.CP.carFingerprint != TOYOTA_CAR.TOYOTA_CAMRY_TSS3:
+    if CS.cruiseState.nonAdaptive:
       events.add(EventName.wrongCruiseMode)
     if CS.brakeHoldActive and self.CP.openpilotLongitudinalControl:
       events.add(EventName.brakeHold)
@@ -163,9 +160,6 @@ class CarEvents:
         events.add(EventName.buttonCancel)
 
     # Handle permanent and temporary steering faults
-    if CS.steerFaultTemporarySilent:
-      events.add(EventName.steerTempUnavailableSilent)
-
     self.steering_unpressed = 0 if CS.steeringPressed else self.steering_unpressed + 1
     if CS.steerFaultTemporary:
       if CS.steeringPressed and (not CS_prev.steerFaultTemporary or self.no_steer_warning):

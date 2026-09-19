@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from opendbc.car.can_definitions import CanData
 from opendbc.car.toyota.tss3 import build_request_application
 from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
@@ -92,7 +94,7 @@ def seed_at_next_epoch(worker: ToyotaTss3RequestProxy, *, reset: int = 1109, b26
 
 def complete_handoff(worker: ToyotaTss3RequestProxy, collector: Collector, *, reset: int = 1110, b26: int = 12):
   state = cs()
-  worker.set_control(True, 0.0)
+  worker.set_control(True, True, 0.0)
   assert worker.arm_pending
   source = native_frame(b26, 2, reset=reset)
   worker.update(batch((NATIVE_08A_ADDR, source, 2)), state)
@@ -160,7 +162,7 @@ def test_id11_builder_has_only_bounded_lateral_edits():
     out = build_id11_application(bytes(app), -123)
     assert (out[21] & 0x3F) == 11
     assert out[18:20] == (-123).to_bytes(2, "big", signed=True)
-    assert out[24] == (100 if native_id != 11 else gain)
+    assert out[24] == 100
     for i in range(28):
       if i not in (18, 19, 21, 24):
         assert out[i] == app[i]
@@ -189,12 +191,18 @@ def test_request_builder_replaces_only_normal_drcc_acceleration_bounds():
       assert promoted[i] == idle[i]
 
 
-def test_request_builder_preserves_alternate_toyota_longitudinal_tuple():
+def test_request_builder_preserves_alternate_toyota_longitudinal_tuple_and_disables_lateral():
   app = bytearray(native_frame(4, 5, target_id=18)[:28])
   app[5:13] = bytes.fromhex("043553ff51000000")
   out = build_request_application(bytes(app), lat_active=False, target_angle_raw=0,
                                   long_control=True, accel=-0.5)
-  assert out == app
+  assert out[5:13] == app[5:13]
+  assert out[18:20] == bytes(2)
+  assert (out[21] & 0x3F) == 0
+  assert out[24] == app[24]
+  for i in range(28):
+    if i not in (18, 19, 21, 24):
+      assert out[i] == app[i]
 
   combined = build_request_application(bytes(app), lat_active=True, target_angle_raw=-123,
                                        long_control=True, accel=-0.5)
@@ -212,8 +220,20 @@ def test_request_builder_preserves_alternate_toyota_longitudinal_tuple():
   assert resumed[8:10] == (500).to_bytes(2, "big", signed=True)
   assert resumed[11:13] == (500).to_bytes(2, "big", signed=True)
   for i in range(28):
-    if i not in (4, 6, 7, 8, 9, 11, 12):
+    if i not in (4, 6, 7, 8, 9, 11, 12, 18, 19, 21, 24):
       assert resumed[i] == delayed_hold[i]
+
+
+def test_request_builder_preserves_unknown_toyota_lateral_interventions():
+  app = bytearray(native_frame(4, 5, target_id=1, angle_raw=123)[:28])
+  app[24] = 50
+  inactive = build_request_application(bytes(app), lat_active=False, target_angle_raw=0,
+                                       long_control=False, accel=0.0)
+  assert inactive == app
+
+  with pytest.raises(ValueError, match="unsupported native lateral request ID 1"):
+    build_request_application(bytes(app), lat_active=True, target_angle_raw=0,
+                              long_control=False, accel=0.0)
 
 
 def test_request_plane_enable_is_topology_flag_only():
@@ -238,7 +258,7 @@ def test_handoff_is_one_exact_source_clone_without_transient_unavailable_warning
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
   seed_at_next_epoch(worker)
-  worker.set_control(True, 0.0)
+  worker.set_control(True, True, 0.0)
   assert worker.arm_pending and not worker.authority_unavailable()
   first = native_frame(12, 2, reset=1110)
   worker.update(batch((NATIVE_08A_ADDR, first, 2)), cs())
@@ -253,7 +273,7 @@ def test_handoff_is_one_exact_source_clone_without_transient_unavailable_warning
 def test_sign_transport_is_one_stateless_classic_batch():
   worker, collector, clock = start_active_worker()
   source = native_frame(13, 3, reset=1110, target_id=0, angle_raw=10)
-  worker.set_control(True, 1.0)
+  worker.set_control(True, True, 1.0)
   worker.update(batch((NATIVE_08A_ADDR, source, 2)), cs())
   assert len(worker.jobs) == 1
   with worker._cv:
@@ -268,7 +288,7 @@ def test_sign_transport_is_one_stateless_classic_batch():
 
 def test_sign_response_publishes_same_source_generation():
   worker, collector, clock = start_active_worker()
-  worker.set_control(True, 1.0)
+  worker.set_control(True, True, 1.0)
   source = native_frame(13, 3, reset=1110, target_id=18, angle_raw=10)
   worker.update(batch((NATIVE_08A_ADDR, source, 2)), cs())
   with worker._cv:
@@ -286,7 +306,7 @@ def test_long_only_control_owns_request_plane_and_replaces_bounds():
   clock = Clock()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False, monotonic=clock)
   seed_at_next_epoch(worker)
-  worker.set_control(False, 0.0, long_enabled=True, long_active=True, accel=-0.5)
+  worker.set_control(True, False, 0.0, long_enabled=True, long_active=True, accel=-0.5)
   assert worker.arm_pending
   handoff = native_frame(12, 2, reset=1110)
   worker.update(batch((NATIVE_08A_ADDR, handoff, 2)), cs())
@@ -302,13 +322,15 @@ def test_long_only_control_owns_request_plane_and_replaces_bounds():
     seq, job = worker._next_job_locked(clock.now)
   assert job.application[8:10] == (-500).to_bytes(2, "big", signed=True)
   assert job.application[11:13] == (-500).to_bytes(2, "big", signed=True)
-  assert job.application[18:25] == source[18:25]
+  assert job.application[18:20] == bytes(2)
+  assert (job.application[21] & 0x3F) == 0
+  assert job.application[24] == source[24]
   worker.update(batch(private_response(seq)), cs())
   assert collector.batches[-1][0].dat[8:10] == (-500).to_bytes(2, "big", signed=True)
 
   # Gas override keeps the longitudinal session and request-plane handoff, but
   # publishes openpilot's normal inactive acceleration instead of stock DRCC.
-  worker.set_control(False, 0.0, long_enabled=True, long_active=False, accel=-0.5)
+  worker.set_control(True, False, 0.0, long_enabled=True, long_active=False, accel=-0.5)
   assert worker.active and not worker.longitudinal_authority_unavailable()
   inactive_source = native_frame(14, 4, reset=1110, target_id=18, angle_raw=10)
   inactive_app = bytearray(inactive_source[:28])
@@ -321,24 +343,32 @@ def test_long_only_control_owns_request_plane_and_replaces_bounds():
   assert inactive_job.application[8:10] == bytes(2)
   assert inactive_job.application[11:13] == bytes(2)
 
-  worker.set_control(False, 0.0, long_enabled=False)
+  worker.set_control(False, False, 0.0, long_enabled=False)
   assert not worker.active
 
 
-def test_each_axis_can_release_without_dropping_authority_for_the_other():
-  worker, collector, _ = start_active_worker()
+def test_lat_active_changes_do_not_drop_engagement_owned_authority():
+  worker, collector, clock = start_active_worker()
   releases_before = sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat)
-  worker.set_control(True, 0.0, long_enabled=True, long_active=True, accel=-0.2)
-  worker.set_control(False, 0.0, long_enabled=True, long_active=True, accel=-0.2)
+  worker.set_control(True, False, 0.0)
   assert worker.active and not worker.authority_unavailable()
-  worker.set_control(False, 0.0, long_enabled=False)
+
+  source = native_frame(13, 3, reset=1110, target_id=11, angle_raw=10)
+  worker.update(batch((NATIVE_08A_ADDR, source, 2)), cs())
+  with worker._cv:
+    _, job = worker._next_job_locked(clock.now)
+  assert job.application[18:20] == bytes(2)
+  assert (job.application[21] & 0x3F) == 0
+  assert job.application[24] == source[24]
+
+  worker.set_control(False, False, 0.0, long_enabled=False)
   assert not worker.active
   assert sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat) == releases_before + 1
 
 
 def test_later_oracle_reply_retries_missing_generation_without_releasing_or_reordering():
   worker, collector, clock = start_active_worker()
-  worker.set_control(True, 1.0)
+  worker.set_control(True, True, 1.0)
   for b26, msg in ((13, 3), (14, 4)):
     worker.update(batch((NATIVE_08A_ADDR, native_frame(b26, msg, reset=1110), 2)), cs())
     with worker._cv:
@@ -421,7 +451,7 @@ def test_brake_or_native_cruise_bits_are_not_proxy_permission_inputs():
   worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110, cruise=False), 2)), cs())
   assert worker.active
   assert sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat) == releases_before
-  worker.set_control(False, 0.0)
+  worker.set_control(False, False, 0.0)
   assert not worker.active
   assert sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat) == releases_before + 1
   assert collector.flat[-1] == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)
@@ -437,7 +467,7 @@ def test_host_tx_reject_releases_but_does_not_invent_timed_fault_state():
 
 def test_gas_override_tx_reject_does_not_release_request_plane():
   worker, _, _ = start_active_worker()
-  worker.set_control(True, 0.0, long_enabled=True, long_active=True, accel=-0.5)
+  worker.set_control(True, True, 0.0, long_enabled=True, long_active=True, accel=-0.5)
   worker.update(batch((NATIVE_08A_ADDR, b"x" * 32, DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET)),
                 cs(gas_pressed=True))
   assert worker.active
@@ -447,7 +477,7 @@ def test_gas_override_tx_reject_does_not_release_request_plane():
 
 def test_brake_disengage_tx_reject_does_not_report_lost_authority():
   worker, _, _ = start_active_worker()
-  worker.set_control(True, 0.0, long_enabled=True, long_active=True, accel=-0.5)
+  worker.set_control(True, True, 0.0, long_enabled=True, long_active=True, accel=-0.5)
   worker.update(batch((NATIVE_08A_ADDR, b"x" * 32, DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET)),
                 cs(brake_pressed=True))
   assert worker.active

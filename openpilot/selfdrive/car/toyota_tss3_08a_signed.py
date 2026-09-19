@@ -220,6 +220,7 @@ class ToyotaTss3RequestProxy:
     self._thread: threading.Thread | None = None
 
     self.can_valid = False
+    self.control_enabled = False
     self.control_lat_active = False
     self.control_target_angle_raw = 0
     self.control_long_enabled = False
@@ -238,7 +239,6 @@ class ToyotaTss3RequestProxy:
     self.arm_pending = False
     self.arm_clone_frame: bytes | None = None
     self.handoff_completed = False
-
     self.pending_outputs: dict[int, bytes | None] = {}
     self.next_output_index: int | None = None
 
@@ -252,22 +252,19 @@ class ToyotaTss3RequestProxy:
   def freshness_ready(self) -> bool:
     return self.tracker.ready
 
-  @property
-  def control_active(self) -> bool:
-    return self.control_lat_active or self.control_long_enabled
-
-  def set_control(self, lat_active: bool, target_angle_deg: float,
+  def set_control(self, enabled: bool, lat_active: bool, target_angle_deg: float,
                   long_enabled: bool = False, long_active: bool = False, accel: float = 0.0) -> None:
     with self._cv:
-      was_active = self.control_active
-      self.control_lat_active = bool(lat_active)
+      was_enabled = self.control_enabled
+      self.control_enabled = bool(enabled)
+      self.control_lat_active = self.control_enabled and bool(lat_active)
       self.control_target_angle_raw = target_angle_deg_to_raw(float(target_angle_deg))
-      self.control_long_enabled = bool(long_enabled)
+      self.control_long_enabled = self.control_enabled and bool(long_enabled)
       self.control_long_active = self.control_long_enabled and bool(long_active)
       self.control_accel = float(accel) if self.control_long_active else 0.0
-      if was_active and not self.control_active:
+      if was_enabled and not self.control_enabled:
         self._release_control_locked()
-      elif not was_active and self.control_active:
+      elif not was_enabled and self.control_enabled:
         self._maybe_arm_locked()
 
   def consume_handoff_completed(self) -> bool:
@@ -281,7 +278,7 @@ class ToyotaTss3RequestProxy:
       # The one-generation atomic handoff is expected and should not surface as
       # a steering-unavailable warning. A failed handoff clears arm_pending and
       # is reported normally on the next state update.
-      return self.control_lat_active and not self.active and not self.arm_pending
+      return self.control_enabled and not self.active and not self.arm_pending
 
   def longitudinal_authority_unavailable(self) -> bool:
     with self._cv:
@@ -317,7 +314,7 @@ class ToyotaTss3RequestProxy:
     self._release_control_locked()
 
   def _maybe_arm_locked(self) -> None:
-    if self.active or self.arm_pending or not self.control_active or not self.tracker.ready or not self.can_valid:
+    if self.active or self.arm_pending or not self.control_enabled or not self.tracker.ready or not self.can_valid:
       return
     self._send_can([make_admin(True)])
     self.arm_pending = True
@@ -364,14 +361,14 @@ class ToyotaTss3RequestProxy:
   def _observe_native_locked(self, frame: bytes) -> None:
     event = self._make_native_event_locked(frame)
     if event is None or not self.can_valid:
-      if self.control_active or self.active or self.arm_pending:
+      if self.control_enabled or self.active or self.arm_pending:
         self._authority_failure_locked("native_event_invalid")
       self.tracker.reset()
       return
 
     ready, lost = self.tracker.update(event)
     if lost:
-      if self.control_active or self.active or self.arm_pending:
+      if self.control_enabled or self.active or self.arm_pending:
         self._record_failure_locked("freshness_lost")
       self._release_control_locked()
       return

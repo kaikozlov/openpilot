@@ -179,10 +179,7 @@ class Car:
     CS = self.CI.update(can_list)
     if self.tss3_08a_proxy is not None:
       self.tss3_08a_proxy.update(can_list, CS)
-      # Surface request-plane authority failures through a warning-only steering
-      # event. Do not reuse steerFaultTemporary: that event can soft-disable
-      # lateral control and turn a brief authority drop into a ~1-second limp gap.
-      CS.steerFaultTemporarySilent = self.tss3_08a_proxy.authority_unavailable()
+      CS.steerFaultTemporary = CS.steerFaultTemporary or self.tss3_08a_proxy.authority_unavailable()
       if self.CP.openpilotLongitudinalControl:
         CS.accFaulted = CS.accFaulted or self.tss3_08a_proxy.longitudinal_authority_unavailable()
 
@@ -253,13 +250,16 @@ class Car:
 
     if self.sm.all_alive(['carControl']):
       if self.tss3_08a_proxy is not None and self.tss3_08a_proxy.consume_handoff_completed():
+        # The signer handoff is asynchronous. Align the normal CarController
+        # rate-limit baseline once with Panda's measured-angle baseline before
+        # the first modified source generation is transmitted.
         self.CI.CC.reset_tss3_lateral_target(CS.steeringAngleDeg + CS.steeringAngleOffsetDeg)
 
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
       if self.tss3_08a_proxy is not None:
-        self.tss3_08a_proxy.set_control(CC.latActive, self.last_actuators_output.steeringAngleDeg,
+        self.tss3_08a_proxy.set_control(CC.enabled, CC.latActive, self.last_actuators_output.steeringAngleDeg,
                                        long_enabled=self.CP.openpilotLongitudinalControl and CC.enabled,
                                        long_active=self.CP.openpilotLongitudinalControl and CC.longActive,
                                        accel=self.last_actuators_output.accel)
@@ -268,7 +268,7 @@ class Car:
       self.CC_prev = CC
     elif self.tss3_08a_proxy is not None:
       # Never let the asynchronous signer outlive the normal CarControl stream.
-      self.tss3_08a_proxy.set_control(False, 0.0)
+      self.tss3_08a_proxy.set_control(False, False, 0.0)
 
   def step(self):
     CS, RD = self.state_update()

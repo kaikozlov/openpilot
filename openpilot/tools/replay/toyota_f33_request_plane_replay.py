@@ -221,7 +221,8 @@ def host_tx(msgs):
       if address == NATIVE_08A_ADDR and not safety.get_controls_allowed():
         stats['expected_controls_disallowed_08a_reject'] += 1
       else:
-        failures.append(('safety_tx_reject', sim[0], hex(address), data.hex()))
+        failures.append(('safety_tx_reject', sim[0], hex(address), safety.get_desired_angle_last(),
+                         safety.get_angle_meas_min(), safety.get_angle_meas_max(), data.hex()))
     if address == NATIVE_08A_ADDR and proxy.active and proxy.control_lat_active:
       d = data
       if (d[21] & 0x3F) != 11:
@@ -287,7 +288,9 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
     set_clock(target_ns); deliver_due(); run_oracle_step(); deliver_due(); drain_echo()
 
   was_lat_active = False
+  was_enabled = False
   active_windows = 0
+  enabled_windows = 0
   for idx, (t, _prio, _ord, kind, payload) in enumerate(events):
     advance_to(t)
     if kind == 'can':
@@ -323,18 +326,21 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
         out, can_sends = ci.apply(CC, t)
         if can_sends:
           host_tx(can_sends); drain_echo()
-        proxy.set_control(CC.latActive, out.steeringAngleDeg); drain_echo()
+        proxy.set_control(CC.enabled, CC.latActive, out.steeringAngleDeg); drain_echo()
         if bool(CC.latActive) and not was_lat_active: active_windows += 1
+        if bool(CC.enabled) and not was_enabled: enabled_windows += 1
         was_lat_active = bool(CC.latActive)
+        was_enabled = bool(CC.enabled)
 
   advance_to(end_ns + 200_000_000)
   if proxy.active or proxy.arm_pending:
-    proxy.set_control(False, 0.0); drain_echo()
+    proxy.set_control(False, False, 0.0); drain_echo()
 
   print('RESULT active', proxy.active, 'freshness_ready', proxy.freshness_ready,
         'arms', stats['arm'], 'releases', stats['release'],
         'host_08a_accepted', stats['host_08a_accepted'], 'last_failure', proxy.last_failure_reason)
-  print('active_windows', active_windows, 'active_native', strict_active_native, 'host_id11', strict_host_id11,
+  print('enabled_windows', enabled_windows, 'active_windows', active_windows,
+        'active_native', strict_active_native, 'host_id11', strict_host_id11,
         'blocked', native_blocked, 'leaked', native_leaked, 'safety_invalid', safety_invalid)
   print('stats', stats)
   for f in failures[:100]: print('FAIL', f)
@@ -342,7 +348,7 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
   if args.drop_sign_response is not None:
     assert drop_exercised, f'did not reach sign generation {args.drop_sign_response}'
   assert proxy.last_failure_reason == '', proxy.last_failure_reason
-  assert stats['arm'] == stats['release'] == active_windows, (stats['arm'], stats['release'], active_windows)
+  assert stats['arm'] == stats['release'] == enabled_windows, (stats['arm'], stats['release'], enabled_windows)
   assert stats['arm'] > 0
   assert strict_host_id11 > 100
   assert native_leaked == 0
