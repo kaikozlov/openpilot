@@ -6,6 +6,7 @@ from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
 from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
   ORACLE_BUS,
   ORACLE_RESPONSE_ADDR,
+  OracleJob,
   NativeEvent,
   NativeFreshnessTracker,
   ToyotaTss3RequestProxy,
@@ -412,6 +413,45 @@ def test_output_order_waits_for_earlier_signed_id11():
   worker.update(batch(response(seq, cmac)), state)
   expected_first = build_signed_frame(sign.application, 1109, 10, cmac)
   assert collector.batches[-1] == [CanData(NATIVE_08A_ADDR, expected_first, 0), CanData(NATIVE_08A_ADDR, second, 0)]
+
+
+def test_sign_timeout_retries_once_with_fresh_sequence_before_fail_open():
+  collector = Collector()
+  worker = ToyotaTss3RequestProxy(collector, start_thread=False)
+  worker.active = True
+  worker.qualified = True
+  worker.state_generation = 7
+
+  job = OracleJob(
+    kind="sign", generation=7, domain=KNOWN_DOMAIN, native_index=1,
+    application=KNOWN_APP, trip_counter=620, reset_counter=1109, message_counter=8,
+    sent_at=1.0,
+  )
+  worker.inflight[10] = job
+  worker.next_oracle_send_at = 99.0
+
+  with worker._cv:
+    worker._expire_inflight_locked(1.041)
+  assert worker.active
+  assert worker.qualified
+  assert not worker.inflight
+  assert worker.jobs[0] is job
+  assert job.retry_count == 1
+  assert job.sent_at is None
+  assert worker.next_oracle_send_at == 1.041
+  assert worker.oracle_timeout_count == 0
+
+  # A second lost response for the same source generation is a real failure and
+  # still releases ownership through the normal fail-open path.
+  worker.jobs.clear()
+  job.sent_at = 2.0
+  worker.inflight[11] = job
+  with worker._cv:
+    worker._expire_inflight_locked(2.041)
+  assert not worker.active
+  assert not worker.qualified
+  assert worker.oracle_timeout_count == 1
+  assert collector.flat[-1] == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)
 
 
 def test_sign_failure_flushes_native_frames_then_releases_ownership():

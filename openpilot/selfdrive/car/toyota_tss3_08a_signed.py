@@ -49,6 +49,7 @@ ORACLE_NSDU_LEN = 40
 ORACLE_PRE_CF_DELAY_S = 0.005
 ORACLE_PERIOD_S = 0.025
 ORACLE_TIMEOUT_S = 0.12
+ORACLE_SIGN_TIMEOUT_S = 0.040
 ORACLE_MAX_INFLIGHT = 4
 ORACLE_FAILURE_COOLDOWN_S = 2.0
 MAX_NATIVE_HISTORY = 256
@@ -225,6 +226,7 @@ class OracleJob:
   reset_counter: int | None = None
   message_counter: int | None = None
   sent_at: float | None = None
+  retry_count: int = 0
 
 
 @dataclass
@@ -631,10 +633,24 @@ class ToyotaTss3RequestProxy:
     raise RuntimeError("oracle sequence space exhausted")
 
   def _expire_inflight_locked(self, now: float) -> None:
-    expired = [seq for seq, job in self.inflight.items()
-               if job.sent_at is not None and now - job.sent_at > ORACLE_TIMEOUT_S]
+    expired = []
+    for seq, job in self.inflight.items():
+      timeout = ORACLE_SIGN_TIMEOUT_S if job.kind == "sign" else ORACLE_TIMEOUT_S
+      if job.sent_at is not None and now - job.sent_at > timeout:
+        expired.append(seq)
+
     for seq in expired:
       job = self.inflight.pop(seq)
+      if job.kind == "sign" and job.retry_count == 0:
+        # A single lost private 0x7A9 response must not collapse the whole
+        # request plane. Re-submit the exact same native-generation domain under
+        # a fresh transaction sequence immediately; the EPS helper ignores only
+        # duplicate sequence numbers, not duplicate domains.
+        job.retry_count = 1
+        job.sent_at = None
+        self.jobs.appendleft(job)
+        self.next_oracle_send_at = min(self.next_oracle_send_at, now)
+        continue
       self._job_failure_locked(job)
 
   def _next_job_locked(self, now: float) -> tuple[int, OracleJob] | None:
