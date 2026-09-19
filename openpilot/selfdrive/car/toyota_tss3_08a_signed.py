@@ -53,6 +53,7 @@ ORACLE_PERIOD_S = 0.025
 ORACLE_TIMEOUT_S = 0.12
 ORACLE_SIGN_TIMEOUT_S = 0.045
 ORACLE_SIGN_MAX_RETRIES = 2
+ORACLE_VERIFY_MAX_RETRIES = 2
 ORACLE_MAX_INFLIGHT = 4
 ORACLE_FAILURE_COOLDOWN_S = 2.0
 AUTHORITY_FAILURE_ALERT_S = 1.0
@@ -347,7 +348,11 @@ class ToyotaTss3RequestProxy:
 
   def authority_failure_alert_active(self) -> bool:
     with self._cv:
-      return self._monotonic() < self.authority_failure_alert_until
+      # A transient failure gets a short warning pulse. More importantly, never
+      # let openpilot claim lateral activity silently while the request plane has
+      # neither active authority nor an atomic handoff in progress.
+      unavailable = self.control_lat_active and not (self.active or self.arm_pending)
+      return self._monotonic() < self.authority_failure_alert_until or unavailable
 
   def _record_failure_locked(self, reason: str, *, full_recovery: bool) -> None:
     self.authority_failure_count += 1
@@ -533,7 +538,7 @@ class ToyotaTss3RequestProxy:
       self._queue_verify_locked(tracker.event, tracker.message_counter)
     return True
 
-  def _queue_verify_locked(self, event: NativeEvent, message_counter: int) -> None:
+  def _queue_verify_locked(self, event: NativeEvent, message_counter: int, *, retry_count: int = 0) -> None:
     self.verification_count += 1
     self._queue_job_locked(OracleJob(
       kind="verify",
@@ -542,6 +547,7 @@ class ToyotaTss3RequestProxy:
       expected_mac28=event.mac28_hex,
       native_index=event.index,
       candidate_message=message_counter,
+      retry_count=retry_count,
     ), front=True)
 
   def _maybe_arm_locked(self) -> None:
@@ -744,6 +750,21 @@ class ToyotaTss3RequestProxy:
       self.oracle_timeout_count += 1
       self._authority_failure_locked("oracle_sign_failure")
       return
+
+    if job.kind == "verify":
+      # Verification is the final qualification step. A single missing private
+      # C9 response must never strand the proxy forever with a valid tracker but
+      # qualified=False. Retry against the *current* tracker event because native
+      # freshness may have advanced while the prior verify was in flight.
+      if (job.retry_count < ORACLE_VERIFY_MAX_RETRIES and self.tracker.event is not None and
+          self.tracker.message_counter is not None):
+        self._queue_verify_locked(self.tracker.event, self.tracker.message_counter, retry_count=job.retry_count + 1)
+        return
+
+      self.oracle_timeout_count += 1
+      self._fail_open_locked("oracle_verify_failure")
+      return
+
     if job.kind == "recover" and self.recovery_remaining > 0:
       self.recovery_remaining -= 1
     self.oracle_failures += 1

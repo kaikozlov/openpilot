@@ -24,6 +24,7 @@ parser = argparse.ArgumentParser(description="Replay a local F33 route through c
 parser.add_argument("route", type=Path, help="local route directory containing segment subdirectories with rlog.zst")
 parser.add_argument("--drop-sign-response", type=int, metavar="N", help="drop the Nth first-attempt sign response to exercise retry behavior")
 parser.add_argument("--drop-sign-attempts", type=int, default=1, choices=(1, 2), help="number of attempts to drop for the selected source generation")
+parser.add_argument("--drop-verify-response", action="store_true", help="drop the first qualification verify response")
 parser.add_argument("--oracle-response-delay-ms", type=float, default=20.0, help="synthetic successful oracle response latency (default: 20 ms)")
 args = parser.parse_args()
 ROOT = args.route
@@ -240,6 +241,7 @@ dropped_native_index = None
 dropped_attempts = 0
 drop_retry_exercised = False
 superseded_before_drop = 0
+verify_drop_done = False
 
 
 # Helper to package CAN for C safety.
@@ -266,12 +268,15 @@ def host_tx(msgs):
       failures.append(('safety_tx_reject', sim[0], hex(int(m.address)), int(m.src), bytes(m.dat).hex()))
     if int(m.address) == NATIVE_08A_ADDR and proxy.active and proxy.control_lat_active:
       ident = bytes(m.dat)[21] & 0x3F
-      if ident != 11:
-        failures.append(('owned_non_id11_tx', sim[0], ident, bytes(m.dat).hex()))
-      elif bytes(m.dat)[24] != 100:
-        failures.append(('owned_id11_wrong_assist_gain', sim[0], bytes(m.dat)[24], bytes(m.dat).hex()))
-      else:
-        strict_host_id11 += 1
+      if ident == 0:
+        failures.append(('owned_idle_id0_tx', sim[0], bytes(m.dat).hex()))
+      elif ident == 11:
+        if bytes(m.dat)[24] != 100:
+          failures.append(('owned_id11_wrong_assist_gain', sim[0], bytes(m.dat)[24], bytes(m.dat).hex()))
+        else:
+          strict_host_id11 += 1
+      # Native non-lateral application IDs (LDA/PDA/etc.) remain Toyota-owned
+      # and are allowed only as exact clones; Panda safety enforces that shape.
     echo_queue.append((int(m.address), bytes(m.dat), int(m.src) + (0x80 if ok else 0xC0)))
 
 
@@ -325,7 +330,8 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
         drain_echo()
 
   def run_oracle_step():
-    global response_serial, first_drop_done, sign_generation_count, dropped_native_index, dropped_attempts, drop_retry_exercised, superseded_before_drop
+    global response_serial, first_drop_done, sign_generation_count, dropped_native_index, dropped_attempts
+    global drop_retry_exercised, superseded_before_drop, verify_drop_done
     with proxy._cv:
       item = proxy._next_job_locked(sim[0])
     if item is None:
@@ -336,6 +342,10 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
     host_tx(cfs)
     drain_echo()
     stats[('oracle_job', job.kind)] += 1
+    if job.kind == 'verify' and args.drop_verify_response and not verify_drop_done:
+      verify_drop_done = True
+      stats['injected_verify_drop'] += 1
+      return
     if job.kind == 'sign':
       if getattr(job, 'retry_count', 0) == 0:
         sign_generation_count += 1
@@ -487,6 +497,8 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
     assert drop_handled, (
       f'dropped sign generation {args.drop_sign_response} was neither retried nor superseded under authority'
     )
+  if args.drop_verify_response:
+    assert verify_drop_done, 'verify response injection was not exercised'
   assert proxy.arm_count > 0, 'never armed'
   assert proxy.arm_count == proxy.release_count == active_windows, (proxy.arm_count, proxy.release_count, active_windows)
   assert strict_host_id11 > 100, f'not enough sustained host ID11: {strict_host_id11}'
