@@ -52,6 +52,7 @@ ORACLE_PRE_CF_DELAY_S = 0.005
 ORACLE_PERIOD_S = 0.025
 ORACLE_TIMEOUT_S = 0.12
 ORACLE_SIGN_TIMEOUT_S = 0.045
+ORACLE_SIGN_MAX_RETRIES = 2
 ORACLE_MAX_INFLIGHT = 4
 ORACLE_FAILURE_COOLDOWN_S = 2.0
 AUTHORITY_FAILURE_ALERT_S = 1.0
@@ -742,12 +743,12 @@ class ToyotaTss3RequestProxy:
 
     for seq in expired:
       job = self.inflight.pop(seq)
-      if job.kind == "sign" and job.retry_count == 0:
-        # A single lost private 0x7A9 response must not collapse the whole
-        # request plane. Re-submit the exact same native-generation domain under
-        # a fresh transaction sequence immediately; the EPS helper ignores only
-        # duplicate sequence numbers, not duplicate domains.
-        job.retry_count = 1
+      if job.kind == "sign" and job.retry_count < ORACLE_SIGN_MAX_RETRIES:
+        # Private 0x7A9 responses can disappear even after ISO-TP FC. Preserve
+        # the exact source generation and retry under a fresh transaction
+        # sequence before giving up authority. Active signing is serialized, so
+        # retries cannot overlap a newer source generation.
+        job.retry_count += 1
         job.sent_at = None
         self.jobs.appendleft(job)
         self.next_oracle_send_at = min(self.next_oracle_send_at, now)

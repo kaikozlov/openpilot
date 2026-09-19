@@ -513,7 +513,7 @@ def test_active_sign_jobs_are_serialized_and_response_driven():
     assert item2 is not None and item2[1] is second
 
 
-def test_sign_timeout_retries_once_with_fresh_sequence_before_fail_open():
+def test_sign_timeout_retries_twice_before_authority_release():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
   worker.active = True
@@ -539,13 +539,29 @@ def test_sign_timeout_retries_once_with_fresh_sequence_before_fail_open():
   assert worker.next_oracle_send_at == 1.046
   assert worker.oracle_timeout_count == 0
 
-  # A second lost response drops only this authority interval. Freshness
-  # qualification remains valid so the next native generation can re-arm.
+  # A second lost response gets one more serialized retry and still preserves
+  # the current authority interval.
   worker.jobs.clear()
   job.sent_at = 2.0
   worker.inflight[11] = job
   with worker._cv:
     worker._expire_inflight_locked(2.046)
+  assert worker.active
+  assert worker.qualified
+  assert not worker.inflight
+  assert worker.jobs[0] is job
+  assert job.retry_count == 2
+  assert job.sent_at is None
+  assert worker.oracle_timeout_count == 0
+  assert worker.authority_failure_count == 0
+
+  # Only a third consecutive miss releases this authority interval. Freshness
+  # qualification remains valid so the next native generation can re-arm.
+  worker.jobs.clear()
+  job.sent_at = 3.0
+  worker.inflight[12] = job
+  with worker._cv:
+    worker._expire_inflight_locked(3.046)
   assert not worker.active
   assert worker.qualified
   assert worker.oracle_timeout_count == 1
