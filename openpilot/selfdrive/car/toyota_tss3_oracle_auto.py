@@ -105,6 +105,7 @@ def _record_trigger_timing(run_dir: Path, trigger_fallback: Path, *, native_catc
   if isinstance(ignition_ns, int) and ignition_ns > 0:
     for key, out_key in (
       ("first_extended_tx_monotonic_ns", "ignition_to_first_10_03_ms"),
+      ("power_wake_complete_monotonic_ns", "ignition_to_power_wake_complete_ms"),
       ("positive_extended_monotonic_ns", "ignition_to_50_03_ms"),
       ("programming_tx_monotonic_ns", "ignition_to_10_02_ms"),
     ):

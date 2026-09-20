@@ -98,7 +98,10 @@ public:
   }
 
   bool active() const {
-    return state_ == State::CATCHING || state_ == State::CAUGHT;
+    // ARMED deliberately counts as active so the ordinary offroad safety
+    // configuration does not replace the preloaded ELM327 policy. Panda power
+    // saving remains enabled and no CAN is transmitted until ignition.
+    return state_ == State::ARMED || state_ == State::CATCHING || state_ == State::CAUGHT;
   }
 
 private:
@@ -127,7 +130,7 @@ private:
         state_ = State::WAIT_OFF;
         return;
       }
-      state_ = enabled_ ? State::ARMED : State::DISARMED;
+      if (enabled_) arm(panda);
       return;
     }
 
@@ -135,10 +138,9 @@ private:
       start(panda, now);
     } else if (!ignition && last_ignition_) {
       reset_for_off();
-      state_ = enabled_ ? State::ARMED : State::DISARMED;
+      if (enabled_) arm(panda);
     } else if (!ignition && enabled_ && state_ == State::DISARMED) {
-      state_ = State::ARMED;
-      LOGW("TSS3 oracle startup catcher armed; waiting for ignition");
+      arm(panda);
     } else if (ignition && enabled_ && state_ == State::DISARMED) {
       state_ = State::WAIT_OFF;
     }
@@ -152,16 +154,32 @@ private:
     positive_extended_ns_ = 0;
     programming_tx_ns_ = 0;
     next_extended_tx_ns_ = 0;
+    first_extended_before_power_wake_ = false;
+    power_wake_complete_ns_ = 0;
     std::remove(TSS3_NATIVE_CATCH_PATH);
+  }
+
+  void arm(Panda *panda) {
+    std::remove(TSS3_NATIVE_CATCH_PATH);
+    // Safety policy is a firmware-side filter and does not wake CAN hardware.
+    // Preload it while OFF so the ignition hot path has no safety control
+    // transfer ahead of the first diagnostic request.
+    panda->set_safety_model(cereal::CarParams::SafetyModel::ELM327, 1U);
+    state_ = State::ARMED;
+    LOGW("TSS3 oracle startup catcher armed in Panda power-save; waiting for ignition");
   }
 
   void start(Panda *panda, uint64_t now) {
     std::remove(TSS3_NATIVE_CATCH_PATH);
     ignition_ns_ = now;
-    panda->set_power_saving(false);
-    panda->set_safety_model(cereal::CarParams::SafetyModel::ELM327, 1U);
     state_ = State::CATCHING;
+    // Logical bus 0 is the harness main bus and its transceiver remains enabled
+    // in Panda power-save for CAN ignition detection. Queue 10 03 before the
+    // control transfer that wakes the remaining transceivers.
     send_extended(panda, nanos_since_boot());
+    first_extended_before_power_wake_ = true;
+    panda->set_power_saving(false);
+    power_wake_complete_ns_ = nanos_since_boot();
     LOGW("TSS3 oracle startup catcher started on native ignition edge");
   }
 
@@ -186,6 +204,8 @@ private:
         << "  \"first_extended_tx_monotonic_ns\": " << first_extended_tx_ns_ << ",\n"
         << "  \"positive_extended_monotonic_ns\": " << positive_extended_ns_ << ",\n"
         << "  \"programming_tx_monotonic_ns\": " << programming_tx_ns_ << ",\n"
+        << "  \"first_extended_before_power_wake\": " << (first_extended_before_power_wake_ ? "true" : "false") << ",\n"
+        << "  \"power_wake_complete_monotonic_ns\": " << power_wake_complete_ns_ << ",\n"
         << "  \"programming_after_50_03_ms\": " << ((programming_tx_ns_ - positive_extended_ns_) / 1e6) << ",\n"
         << "  \"verdict\": \"programming_request_sent_after_exact_50_03\"\n"
         << "}\n";
@@ -225,6 +245,8 @@ private:
   uint64_t positive_extended_ns_ = 0;
   uint64_t programming_tx_ns_ = 0;
   uint64_t next_extended_tx_ns_ = 0;
+  bool first_extended_before_power_wake_ = false;
+  uint64_t power_wake_complete_ns_ = 0;
 };
 }  // namespace
 
