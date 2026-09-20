@@ -85,6 +85,12 @@ class DeveloperLayoutMici(NavScroller):
                                         toggle_callback=self._on_alpha_long_enabled,
                                         description="Use alpha openpilot longitudinal control instead of stock ACC. This may disable Automatic Emergency " +
                                                     "Braking (AEB).")
+    self._tss3_oracle_auto_toggle = BigParamControl(
+      "auto-arm TSS3 oracle", "Tss3OracleAutoArm",
+      description="Exact 2026 Camry F33 only. Automatically starts the volatile RAM-oracle bringup when Panda detects the ignition rising edge. " +
+                  "No EPS flash writes and no automatic Brake/FRC resets on a healthy run."
+    )
+
     self._tss3_oracle_button = BigButton(
       "TSS3 oracle bringup", "ARM",
       description="Exact 2026 Camry F33 only. Arm while fully OFF and in Park, then press the brake and POWER normally. " +
@@ -104,6 +110,7 @@ class DeveloperLayoutMici(NavScroller):
       self._long_maneuver_toggle,
       self._lat_maneuver_toggle,
       self._alpha_long_toggle,
+      self._tss3_oracle_auto_toggle,
       self._tss3_oracle_button,
       self._debug_mode_toggle,
     ])
@@ -116,10 +123,12 @@ class DeveloperLayoutMici(NavScroller):
       ("LongitudinalManeuverMode", self._long_maneuver_toggle),
       ("LateralManeuverMode", self._lat_maneuver_toggle),
       ("AlphaLongitudinalEnabled", self._alpha_long_toggle),
+      ("Tss3OracleAutoArm", self._tss3_oracle_auto_toggle),
       ("ShowDebugInfo", self._debug_mode_toggle),
     )
-    onroad_blocked_toggles = (self._adb_toggle, self._joystick_toggle)
-    release_blocked_toggles = (self._joystick_toggle, self._long_maneuver_toggle, self._lat_maneuver_toggle, self._alpha_long_toggle)
+    onroad_blocked_toggles = (self._adb_toggle, self._joystick_toggle, self._tss3_oracle_auto_toggle)
+    release_blocked_toggles = (self._joystick_toggle, self._long_maneuver_toggle, self._lat_maneuver_toggle,
+                               self._alpha_long_toggle, self._tss3_oracle_auto_toggle)
     engaged_blocked_toggles = (self._long_maneuver_toggle, self._lat_maneuver_toggle, self._alpha_long_toggle)
 
     # Hide non-release toggles on release builds
@@ -170,7 +179,10 @@ class DeveloperLayoutMici(NavScroller):
       self._alpha_long_toggle.set_visible(False)
 
     exact_f33 = ui_state.CP is not None and ui_state.CP.carFingerprint == CAR.TOYOTA_CAMRY_TSS3
-    self._tss3_oracle_button.set_visible(not ui_state.is_release and exact_f33 and tool_available())
+    oracle_available = not ui_state.is_release and exact_f33 and tool_available()
+    self._tss3_oracle_auto_toggle.set_visible(oracle_available)
+    self._tss3_oracle_auto_toggle.set_enabled(lambda: ui_state.is_offroad() and not ui_state.engaged)
+    self._tss3_oracle_button.set_visible(oracle_available)
     self._tss3_oracle_button.set_enabled(lambda: ui_state.is_offroad() and not ui_state.engaged)
 
     # Refresh toggles from params to mirror external changes
