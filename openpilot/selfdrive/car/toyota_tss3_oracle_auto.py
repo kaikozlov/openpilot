@@ -72,7 +72,7 @@ def _signal_handler(signum, _frame) -> None:
   _terminate_child()
 
 
-def _record_trigger_timing(run_dir: Path, *, ignition_log_mono_ns: int, ignition_received_ns: int,
+def _record_trigger_timing(run_dir: Path, trigger_fallback: Path, *, ignition_log_mono_ns: int, ignition_received_ns: int,
                            backend_launch_ns: int, returncode: int) -> dict[str, Any]:
   record: dict[str, Any] = {
     "schema": "tss3-oracle-auto-arm-trigger-v1",
@@ -100,10 +100,25 @@ def _record_trigger_timing(run_dir: Path, *, ignition_log_mono_ns: int, ignition
     except (OSError, json.JSONDecodeError):
       cloudlog.exception("tss3oracled.trigger_timing_parse_failed")
 
-  with atomic_write(str(run_dir / "auto-trigger.json"), "w", overwrite=True) as f:
+  trigger_path = (run_dir / "auto-trigger.json") if run_dir.is_dir() else trigger_fallback
+  with atomic_write(str(trigger_path), "w", overwrite=True) as f:
     json.dump(record, f, indent=2, sort_keys=True)
     f.write("\n")
   return record
+
+
+def _allocate_run_path(*, stamp: str, ignition_received_ns: int) -> tuple[Path, Path, Path]:
+  """Choose fresh paths without creating the backend-owned output directory."""
+  base = f"auto-{stamp}-{ignition_received_ns}"
+  suffix = 0
+  while True:
+    name = base if suffix == 0 else f"{base}-{suffix}"
+    run_dir = RUN_ROOT / name
+    log_path = RUN_ROOT / f"{name}.auto-daemon.log"
+    trigger_fallback = RUN_ROOT / f"{name}.auto-trigger.json"
+    if not run_dir.exists() and not log_path.exists() and not trigger_fallback.exists():
+      return run_dir, log_path, trigger_fallback
+    suffix += 1
 
 
 def _run_bringup(*, ignition_log_mono_ns: int, ignition_received_ns: int) -> bool:
@@ -113,9 +128,8 @@ def _run_bringup(*, ignition_log_mono_ns: int, ignition_received_ns: int) -> boo
     return False
 
   stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime())
-  run_dir = RUN_ROOT / f"auto-{stamp}-{ignition_received_ns}"
-  run_dir.mkdir(parents=True, exist_ok=True)
-  log_path = run_dir / "auto-daemon.log"
+  RUN_ROOT.mkdir(parents=True, exist_ok=True)
+  run_dir, log_path, trigger_fallback = _allocate_run_path(stamp=stamp, ignition_received_ns=ignition_received_ns)
   cmd = [str(TOOL_PATH), "--topology", "camry-post-repin", "oracle-ui-bringup", str(run_dir)]
   launch_ns = time.monotonic_ns()
 
@@ -123,6 +137,7 @@ def _run_bringup(*, ignition_log_mono_ns: int, ignition_received_ns: int) -> boo
     "triggered",
     "Panda ignition rising edge detected; starting exact-F33 oracle bringup.",
     run_dir=str(run_dir),
+    auto_daemon_log=str(log_path),
     ignition_panda_states_log_mono_ns=ignition_log_mono_ns,
     ignition_daemon_received_monotonic_ns=ignition_received_ns,
     backend_launch_monotonic_ns=launch_ns,
@@ -179,7 +194,7 @@ def _run_bringup(*, ignition_log_mono_ns: int, ignition_received_ns: int) -> boo
       _child = None
 
   timing = _record_trigger_timing(
-    run_dir,
+    run_dir, trigger_fallback,
     ignition_log_mono_ns=ignition_log_mono_ns,
     ignition_received_ns=ignition_received_ns,
     backend_launch_ns=launch_ns,
