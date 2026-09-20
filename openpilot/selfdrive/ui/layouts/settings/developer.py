@@ -2,14 +2,12 @@ from openpilot.common.params import Params
 from openpilot.selfdrive.ui.widgets.ssh_key import ssh_key_item
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.system.ui.widgets import Widget
-from openpilot.system.ui.widgets.list_view import button_item, toggle_item
+from openpilot.system.ui.widgets.list_view import toggle_item
 from openpilot.system.ui.widgets.scroller_tici import Scroller
 from openpilot.system.ui.widgets.confirm_dialog import ConfirmDialog
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.system.ui.lib.multilang import tr, tr_noop
 from openpilot.system.ui.widgets import DialogResult
-from openpilot.selfdrive.ui.widgets.tss3_oracle_bringup import Tss3OracleBringupDialog, tool_available
-from opendbc.car.toyota.values import CAR
 
 # Description constants
 DESCRIPTIONS = {
@@ -26,10 +24,6 @@ DESCRIPTIONS = {
     "On this car, openpilot defaults to the car's built-in ACC instead of openpilot's longitudinal control. " +
     "Enable this to switch to openpilot longitudinal control. Enabling Experimental mode is recommended when enabling openpilot longitudinal control alpha. " +
     "Changing this setting will restart openpilot if the car is powered on."
-  ),
-  'tss3_oracle': tr_noop(
-    "Exact 2026 Camry F33 only. With the vehicle fully OFF and in Park, arm the startup catcher here, then press the brake and POWER normally. " +
-    "The on-device guide stays visible through RAM-oracle installation and the Brake/FRC recovery checkpoints."
   ),
 }
 
@@ -88,14 +82,6 @@ class DeveloperLayout(Widget):
       enabled=lambda: not ui_state.engaged,
     )
 
-    self._tss3_oracle_button = button_item(
-      lambda: tr("TSS3 Oracle Bringup"),
-      lambda: tr("ARM"),
-      description=lambda: tr(DESCRIPTIONS["tss3_oracle"]),
-      callback=self._on_tss3_oracle_bringup,
-      enabled=lambda: ui_state.is_offroad() and not ui_state.engaged,
-    )
-
     self._ui_debug_toggle = toggle_item(
       lambda: tr("UI Debug Mode"),
       description="",
@@ -112,7 +98,6 @@ class DeveloperLayout(Widget):
       self._long_maneuver_toggle,
       self._lat_maneuver_toggle,
       self._alpha_long_toggle,
-      self._tss3_oracle_button,
       self._ui_debug_toggle,
     ], line_separator=True, spacing=0)
 
@@ -152,9 +137,6 @@ class DeveloperLayout(Widget):
       self._lat_maneuver_toggle.action_item.set_enabled(False)
       self._alpha_long_toggle.set_visible(False)
 
-    exact_f33 = ui_state.CP is not None and ui_state.CP.carFingerprint == CAR.TOYOTA_CAMRY_TSS3
-    self._tss3_oracle_button.set_visible(not self._is_release and exact_f33 and tool_available())
-
     # TODO: make a param control list item so we don't need to manage internal state as much here
     # refresh toggles from params to mirror external changes
     for key, item in (
@@ -167,10 +149,6 @@ class DeveloperLayout(Widget):
       ("ShowDebugInfo", self._ui_debug_toggle),
     ):
       item.action_item.set_state(self._params.get_bool(key))
-
-  def _on_tss3_oracle_bringup(self):
-    if ui_state.is_offroad() and tool_available():
-      gui_app.push_widget(Tss3OracleBringupDialog())
 
   def _on_enable_ui_debug(self, state: bool):
     self._params.put_bool("ShowDebugInfo", state, block=True)

@@ -7,7 +7,7 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.settings.common import restart_needed_callback
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.widgets.ssh_key import SshKeyFetcher
-from openpilot.selfdrive.ui.widgets.tss3_oracle_bringup import Tss3OracleBringupDialog, tool_available
+from openpilot.selfdrive.ui.mici.layouts.settings.tss3_oracle import Tss3OracleBringupPage, tool_available
 from opendbc.car.toyota.values import CAR
 
 
@@ -88,7 +88,7 @@ class DeveloperLayoutMici(NavScroller):
     self._tss3_oracle_button = BigButton(
       "TSS3 oracle bringup", "ARM",
       description="Exact 2026 Camry F33 only. Arm while fully OFF and in Park, then press the brake and POWER normally. " +
-                  "The guided screen stays open through RAM-oracle installation and Brake/FRC recovery."
+                  "The native comma page stays open through RAM-oracle installation and no-reset verification."
     )
     self._tss3_oracle_button.set_click_callback(self._on_tss3_oracle_bringup)
 
@@ -179,7 +179,7 @@ class DeveloperLayoutMici(NavScroller):
 
   def _on_tss3_oracle_bringup(self):
     if ui_state.is_offroad() and tool_available():
-      gui_app.push_widget(Tss3OracleBringupDialog())
+      gui_app.push_widget(Tss3OracleBringupPage())
 
   def _on_joystick_debug_mode(self, state: bool):
     ui_state.params.put_bool("JoystickDebugMode", state, block=True)
