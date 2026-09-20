@@ -172,7 +172,7 @@ def test_id11_builder_has_only_bounded_lateral_edits():
         assert out[i] == app[i]
 
 
-def test_request_builder_replaces_only_normal_drcc_acceleration_bounds():
+def test_request_builder_replaces_known_ordinary_longitudinal_states():
   app = bytearray(native_frame(4, 5, target_id=0)[:28])
   app[6:8] = bytes((0x2D, 0x47))
   out = build_request_application(bytes(app), lat_active=False, target_angle_raw=0,
@@ -193,6 +193,16 @@ def test_request_builder_replaces_only_normal_drcc_acceleration_bounds():
   for i in range(28):
     if i not in (6, 7, 8, 9, 11, 12):
       assert promoted[i] == idle[i]
+
+  driver_override = bytearray(app)
+  driver_override[6:8] = bytes((0x2C, 0x46))
+  driver_override[8:10] = (714).to_bytes(2, "big", signed=True)
+  driver_override[11:13] = (714).to_bytes(2, "big", signed=True)
+  inactive = build_request_application(bytes(driver_override), lat_active=False, target_angle_raw=0,
+                                       long_control=True, accel=0.0)
+  assert inactive[6:8] == bytes((0x2D, 0x47))
+  assert inactive[8:10] == bytes(2)
+  assert inactive[11:13] == bytes(2)
 
 
 def test_request_builder_preserves_alternate_toyota_longitudinal_tuple_and_disables_lateral():
@@ -338,7 +348,9 @@ def test_long_only_control_owns_request_plane_and_replaces_bounds():
   assert worker.active and not worker.longitudinal_authority_unavailable()
   inactive_source = native_frame(14, 4, reset=1110, target_id=18, angle_raw=10)
   inactive_app = bytearray(inactive_source[:28])
-  inactive_app[6:8] = bytes((0x2D, 0x47))
+  inactive_app[6:8] = bytes((0x2C, 0x46))
+  inactive_app[8:10] = (714).to_bytes(2, "big", signed=True)
+  inactive_app[11:13] = (714).to_bytes(2, "big", signed=True)
   inactive_source = bytes(inactive_app) + inactive_source[28:]
   worker.update(batch((NATIVE_08A_ADDR, inactive_source, 2)), cs(gas_pressed=True))
   with worker._cv:
@@ -461,52 +473,12 @@ def test_brake_or_native_cruise_bits_are_not_proxy_permission_inputs():
   assert collector.flat[-1] == CanData(ADMIN_ADDR, bytes.fromhex("07c9a80000000000"), ADMIN_BUS)
 
 
-def test_host_tx_reject_releases_but_does_not_invent_timed_fault_state():
+def test_host_tx_reject_is_an_ordinary_safety_drop_not_authority_loss():
   worker, _, _ = start_active_worker()
   worker.update(batch((NATIVE_08A_ADDR, b"x" * 32, DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET)), cs())
-  assert not worker.active
+  assert worker.active
   assert worker.last_failure_reason == ""
-  assert worker.authority_unavailable()
-
-
-def test_gas_override_tx_reject_does_not_release_request_plane():
-  worker, _, _ = start_active_worker()
-  worker.set_control(True, True, 0.0, long_enabled=True, long_active=True, accel=-0.5)
-  worker.update(batch((NATIVE_08A_ADDR, b"x" * 32, DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET)),
-                cs(gas_pressed=True))
-  assert worker.active
   assert not worker.authority_unavailable()
-  assert not worker.longitudinal_authority_unavailable()
-
-
-def test_brake_disengage_tx_reject_does_not_report_lost_authority():
-  worker, _, _ = start_active_worker()
-  worker.set_control(True, True, 0.0, long_enabled=True, long_active=True, accel=-0.5)
-  worker.update(batch((NATIVE_08A_ADDR, b"x" * 32, DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET)),
-                cs(brake_pressed=True))
-  assert worker.active
-  assert not worker.authority_unavailable()
-  assert not worker.longitudinal_authority_unavailable()
-
-
-def test_cancel_tx_reject_does_not_report_lost_authority():
-  worker, _, _ = start_active_worker()
-  worker.set_control(True, True, 0.0, long_enabled=True, long_active=True, accel=-0.5)
-  worker.update(batch((NATIVE_08A_ADDR, b"x" * 32, DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET)),
-                cs(cancel_pressed=True))
-  assert worker.active
-  assert not worker.authority_unavailable()
-  assert not worker.longitudinal_authority_unavailable()
-
-
-def test_native_cruise_disengage_tx_reject_does_not_report_lost_authority():
-  worker, _, _ = start_active_worker()
-  worker.set_control(True, True, 0.0, long_enabled=True, long_active=True, accel=-0.5)
-  worker.update(batch((NATIVE_08A_ADDR, b"x" * 32, DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET)),
-                cs(cruise_enabled=False))
-  assert worker.active
-  assert not worker.authority_unavailable()
-  assert not worker.longitudinal_authority_unavailable()
 
 
 def test_invalid_can_releases_and_forgets_freshness():
