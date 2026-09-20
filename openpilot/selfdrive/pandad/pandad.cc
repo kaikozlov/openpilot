@@ -4,6 +4,8 @@
 #include <bitset>
 #include <cassert>
 #include <cerrno>
+#include <cstdio>
+#include <fstream>
 #include <memory>
 #include <thread>
 #include <utility>
@@ -22,6 +24,185 @@
 #define SATURATE_IL 1000
 
 ExitHandler do_exit;
+
+namespace {
+constexpr uint32_t TSS3_EPS_TX = 0x7A1U;
+constexpr uint32_t TSS3_EPS_RX = 0x7A9U;
+constexpr uint8_t TSS3_DIAG_BUS = 0U;
+constexpr uint64_t TSS3_EXTENDED_PERIOD_NS = 20ULL * 1000ULL * 1000ULL;
+constexpr uint64_t TSS3_CATCH_TIMEOUT_NS = 2ULL * 1000ULL * 1000ULL * 1000ULL;
+constexpr uint64_t TSS3_STATE_POLL_NS = 100ULL * 1000ULL * 1000ULL;
+constexpr uint64_t TSS3_PARAM_POLL_NS = 250ULL * 1000ULL * 1000ULL;
+constexpr char TSS3_NATIVE_CATCH_PATH[] = "/tmp/tss3-oracle-native-catch.json";
+constexpr char TSS3_F33_FINGERPRINT[] = "TOYOTA_CAMRY_TSS3";
+const std::string TSS3_EXTENDED_FRAME("\x02\x10\x03\x00\x00\x00\x00\x00", 8);
+const std::string TSS3_PROGRAMMING_FRAME("\x02\x10\x02\x00\x00\x00\x00\x00", 8);
+const std::string TSS3_POSITIVE_EXTENDED_FRAME("\x06\x50\x03\x00\x32\x01\xF4\x00", 8);
+
+class Tss3OracleStartupCatcher {
+public:
+  void update(Panda *panda) {
+    const uint64_t now = nanos_since_boot();
+    if ((now - last_param_check_ns_) >= TSS3_PARAM_POLL_NS || !param_initialized_) {
+      enabled_ = exact_f33_auto_enabled();
+      last_param_check_ns_ = now;
+      param_initialized_ = true;
+      if (!enabled_ && state_ == State::ARMED) {
+        LOGW("TSS3 oracle startup catcher disarmed");
+        state_ = State::DISARMED;
+      }
+    }
+
+    if ((now - last_state_check_ns_) >= TSS3_STATE_POLL_NS || !ignition_initialized_) {
+      last_state_check_ns_ = now;
+      auto health = panda->get_state();
+      if (health) {
+        const bool ignition = (health->flags_pkt & (HEALTH_FLAG_IGNITION_LINE | HEALTH_FLAG_IGNITION_CAN)) != 0U;
+        update_ignition(panda, ignition, now);
+      }
+    }
+
+    if (state_ == State::ARMED) {
+      if (ignition_observed_ns_ != 0 && (now - ignition_observed_ns_) > TSS3_CATCH_TIMEOUT_NS) {
+        LOGW("TSS3 oracle startup catcher timed out without exact 50 03");
+        state_ = State::WAIT_OFF;
+        return;
+      }
+      if (now >= next_extended_tx_ns_) {
+        send_extended(panda, now);
+      }
+    }
+  }
+
+  void process_rx(Panda *panda, const std::vector<can_frame> &frames) {
+    if (state_ != State::ARMED) return;
+    for (const auto &frame : frames) {
+      if (frame.address == TSS3_EPS_RX && frame.src == TSS3_DIAG_BUS && frame.dat == TSS3_POSITIVE_EXTENDED_FRAME) {
+        const uint64_t positive_ns = nanos_since_boot();
+        panda->can_send(TSS3_EPS_TX, TSS3_PROGRAMMING_FRAME, TSS3_DIAG_BUS);
+        const uint64_t programming_ns = nanos_since_boot();
+        positive_extended_ns_ = positive_ns;
+        programming_tx_ns_ = programming_ns;
+        write_marker();
+        state_ = State::CAUGHT;
+        LOGW("TSS3 oracle startup catcher sent 10 02 %.3f ms after exact 50 03",
+             (programming_ns - positive_ns) / 1e6);
+        return;
+      }
+    }
+  }
+
+  bool active() const {
+    return state_ == State::ARMED || state_ == State::CAUGHT;
+  }
+
+private:
+  enum class State { DISARMED, ARMED, CAUGHT, WAIT_OFF };
+
+  bool exact_f33_auto_enabled() {
+    if (!params_.getBool("Tss3OracleAutoArm")) return false;
+    const std::string cp_bytes = params_.get("CarParamsPersistent");
+    if (cp_bytes.empty()) return false;
+    try {
+      AlignedBuffer aligned_buf;
+      capnp::FlatArrayMessageReader cmsg(aligned_buf.align(cp_bytes.data(), cp_bytes.size()));
+      const auto CP = cmsg.getRoot<cereal::CarParams>();
+      return CP.getCarFingerprint() == TSS3_F33_FINGERPRINT;
+    } catch (const kj::Exception &e) {
+      LOGE("TSS3 oracle startup catcher could not parse CarParamsPersistent: %s", e.getDescription().cStr());
+      return false;
+    }
+  }
+
+  void update_ignition(Panda *panda, bool ignition, uint64_t now) {
+    if (!ignition_initialized_) {
+      ignition_initialized_ = true;
+      last_ignition_ = ignition;
+      if (ignition) {
+        state_ = State::WAIT_OFF;
+        return;
+      }
+      if (enabled_) arm(panda, now);
+      return;
+    }
+
+    if (ignition && !last_ignition_ && state_ == State::ARMED) {
+      ignition_observed_ns_ = now;
+      LOGW("TSS3 oracle startup catcher observed ignition while pre-armed");
+    } else if (!ignition && last_ignition_) {
+      reset_for_off();
+      if (enabled_) arm(panda, now);
+    } else if (!ignition && enabled_ && state_ == State::DISARMED) {
+      arm(panda, now);
+    }
+    last_ignition_ = ignition;
+  }
+
+  void reset_for_off() {
+    state_ = State::DISARMED;
+    armed_ns_ = 0;
+    ignition_observed_ns_ = 0;
+    first_extended_tx_ns_ = 0;
+    positive_extended_ns_ = 0;
+    programming_tx_ns_ = 0;
+    next_extended_tx_ns_ = 0;
+    std::remove(TSS3_NATIVE_CATCH_PATH);
+  }
+
+  void arm(Panda *panda, uint64_t now) {
+    std::remove(TSS3_NATIVE_CATCH_PATH);
+    armed_ns_ = now;
+    ignition_observed_ns_ = 0;
+    panda->set_power_saving(false);
+    panda->set_safety_model(cereal::CarParams::SafetyModel::ELM327, 1U);
+    state_ = State::ARMED;
+    send_extended(panda, nanos_since_boot());
+    LOGW("TSS3 oracle startup catcher pre-armed while ignition is off");
+  }
+
+  void send_extended(Panda *panda, uint64_t now) {
+    panda->can_send(TSS3_EPS_TX, TSS3_EXTENDED_FRAME, TSS3_DIAG_BUS);
+    const uint64_t sent_ns = nanos_since_boot();
+    if (first_extended_tx_ns_ == 0) first_extended_tx_ns_ = sent_ns;
+    next_extended_tx_ns_ = now + TSS3_EXTENDED_PERIOD_NS;
+  }
+
+  void write_marker() const {
+    const std::string tmp = std::string(TSS3_NATIVE_CATCH_PATH) + ".tmp";
+    std::ofstream out(tmp, std::ios::trunc);
+    out << "{\n"
+        << "  \"schema\": \"tss3-oracle-native-catch-v1\",\n"
+        << "  \"target\": \"TOYOTA_CAMRY_TSS3\",\n"
+        << "  \"armed_monotonic_ns\": " << armed_ns_ << ",\n"
+        << "  \"ignition_observed_monotonic_ns\": " << ignition_observed_ns_ << ",\n"
+        << "  \"first_extended_tx_monotonic_ns\": " << first_extended_tx_ns_ << ",\n"
+        << "  \"positive_extended_monotonic_ns\": " << positive_extended_ns_ << ",\n"
+        << "  \"programming_tx_monotonic_ns\": " << programming_tx_ns_ << ",\n"
+        << "  \"programming_after_50_03_ms\": " << ((programming_tx_ns_ - positive_extended_ns_) / 1e6) << ",\n"
+        << "  \"verdict\": \"programming_request_sent_after_exact_50_03\"\n"
+        << "}\n";
+    out.close();
+    if (std::rename(tmp.c_str(), TSS3_NATIVE_CATCH_PATH) != 0) {
+      LOGE("failed to publish TSS3 native catch marker: errno=%d", errno);
+    }
+  }
+
+  Params params_;
+  State state_ = State::DISARMED;
+  bool enabled_ = false;
+  bool param_initialized_ = false;
+  bool ignition_initialized_ = false;
+  bool last_ignition_ = false;
+  uint64_t last_param_check_ns_ = 0;
+  uint64_t last_state_check_ns_ = 0;
+  uint64_t armed_ns_ = 0;
+  uint64_t ignition_observed_ns_ = 0;
+  uint64_t first_extended_tx_ns_ = 0;
+  uint64_t positive_extended_ns_ = 0;
+  uint64_t programming_tx_ns_ = 0;
+  uint64_t next_extended_tx_ns_ = 0;
+};
+}  // namespace
 
 bool check_connected(Panda *panda) {
   if (!panda->connected()) {
@@ -86,11 +267,12 @@ void can_send_thread(Panda *panda, bool fake_send) {
   }
 }
 
-void can_recv(Panda *panda, PubMaster *pm) {
+void can_recv(Panda *panda, PubMaster *pm, Tss3OracleStartupCatcher *startup_catcher) {
   static std::vector<can_frame> raw_can_data;
   {
     raw_can_data.clear();
     bool comms_healthy = panda->can_receive(raw_can_data);
+    if (startup_catcher != nullptr) startup_catcher->process_rx(panda, raw_can_data);
 
     MessageBuilder msg;
     auto evt = msg.initEvent();
@@ -161,7 +343,7 @@ void fill_panda_can_state(cereal::PandaState::PandaCanState::Builder &cs, const 
   cs.setCanCoreResetCnt(can_health.can_core_reset_cnt);
 }
 
-std::optional<bool> send_panda_states(PubMaster *pm, Panda *panda, bool is_onroad, bool spoofing_started) {
+std::optional<bool> send_panda_states(PubMaster *pm, Panda *panda, bool is_onroad, bool spoofing_started, bool startup_catcher_active) {
   // build msg
   MessageBuilder msg;
   auto evt = msg.initEvent();
@@ -201,7 +383,7 @@ std::optional<bool> send_panda_states(PubMaster *pm, Panda *panda, bool is_onroa
 
   // set safety mode to NO_OUTPUT when car is off or we're not onroad. ELM327 is an alternative if we want to leverage athenad/connect
   bool should_close_relay = !ignition_local || !is_onroad;
-  if (should_close_relay && (health.safety_mode_pkt != (uint8_t)(cereal::CarParams::SafetyModel::NO_OUTPUT))) {
+  if (!startup_catcher_active && should_close_relay && (health.safety_mode_pkt != (uint8_t)(cereal::CarParams::SafetyModel::NO_OUTPUT))) {
     panda->set_safety_model(cereal::CarParams::SafetyModel::NO_OUTPUT);
   }
 
@@ -258,8 +440,8 @@ void send_peripheral_state(Panda *panda, PubMaster *pm) {
   pm->send("peripheralState", msg);
 }
 
-void process_panda_state(Panda *panda, PubMaster *pm, bool engaged, bool is_onroad, bool spoofing_started) {
-  auto ignition_opt = send_panda_states(pm, panda, is_onroad, spoofing_started);
+void process_panda_state(Panda *panda, PubMaster *pm, bool engaged, bool is_onroad, bool spoofing_started, bool startup_catcher_active) {
+  auto ignition_opt = send_panda_states(pm, panda, is_onroad, spoofing_started, startup_catcher_active);
   if (!ignition_opt) {
     LOGE("Failed to get ignition_opt");
     return;
@@ -369,12 +551,14 @@ void pandad_run(Panda *panda) {
   SubMaster sm({"selfdriveState", "deviceState"});
   PubMaster pm({"can", "pandaStates", "peripheralState"});
   PandaSafety panda_safety(panda);
+  Tss3OracleStartupCatcher tss3_startup_catcher;
   bool engaged = false;
   bool is_onroad = false;
 
   // Main loop: receive CAN first, then process lower priority panda and peripheral state.
   while (!do_exit && check_connected(panda)) {
-    can_recv(panda, &pm);
+    tss3_startup_catcher.update(panda);
+    can_recv(panda, &pm, &tss3_startup_catcher);
 
     // Process peripheral state at 20 Hz
     if (rk.frame() % 5 == 0) {
@@ -388,8 +572,8 @@ void pandad_run(Panda *panda) {
       if (sm.updated("deviceState")) {
         is_onroad = sm["deviceState"].getDeviceState().getStarted();
       }
-      process_panda_state(panda, &pm, engaged, is_onroad, spoofing_started);
-      panda_safety.configureSafetyMode(is_onroad);
+      process_panda_state(panda, &pm, engaged, is_onroad, spoofing_started, tss3_startup_catcher.active());
+      if (!tss3_startup_catcher.active()) panda_safety.configureSafetyMode(is_onroad);
     }
 
     // Send out peripheralState at 2Hz

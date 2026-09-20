@@ -87,7 +87,8 @@ class DeveloperLayoutMici(NavScroller):
                                                     "Braking (AEB).")
     self._tss3_oracle_auto_toggle = BigParamControl(
       "auto-arm TSS3 oracle", "Tss3OracleAutoArm",
-      description="Exact 2026 Camry F33 only. Automatically starts the volatile RAM-oracle bringup when Panda detects the ignition rising edge. " +
+      description="Exact 2026 Camry F33 only. Pre-arms the native startup catcher while the vehicle is OFF, then automatically starts the " +
+                  "volatile RAM-oracle bringup. " +
                   "No EPS flash writes and no automatic Brake/FRC resets on a healthy run."
     )
 
