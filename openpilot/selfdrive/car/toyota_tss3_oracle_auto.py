@@ -4,13 +4,13 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from openpilot.cereal import messaging
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.utils import atomic_write
 
@@ -20,10 +20,12 @@ STATUS_PATH = Path(os.getenv("TSS3_ORACLE_AUTO_STATUS", "/data/tss3-oracle-auto-
 STATUS_SCHEMA = "tss3-oracle-auto-arm-status-v1"
 BACKEND_STATUS_SCHEMA = "camry-f33-oracle-ui-status-v1"
 NATIVE_CATCH_PATH = Path(os.getenv("TSS3_ORACLE_NATIVE_CATCH", "/tmp/tss3-oracle-native-catch.json"))
+NATIVE_NOTIFY_PATH = Path(os.getenv("TSS3_ORACLE_NATIVE_NOTIFY", "/tmp/tss3-oracle-native-catch.sock"))
 
 _exit_requested = False
 _child: subprocess.Popen[str] | None = None
 _child_lock = threading.Lock()
+_listener: socket.socket | None = None
 
 
 def _write_status(state: str, detail: str, **extra: Any) -> None:
@@ -57,6 +59,8 @@ def _signal_handler(signum, _frame) -> None:
   cloudlog.info(f"tss3oracled caught signal {signum}")
   _exit_requested = True
   _terminate_child()
+  if _listener is not None:
+    _listener.close()
 
 
 def _claim_native_catch(path: Path = NATIVE_CATCH_PATH) -> tuple[Path, dict[str, Any]] | None:
@@ -83,8 +87,7 @@ def _claim_native_catch(path: Path = NATIVE_CATCH_PATH) -> tuple[Path, dict[str,
 
 
 def _record_trigger_timing(run_dir: Path, trigger_fallback: Path, *, native_catch: dict[str, Any], catch_received_ns: int,
-                           ignition_log_mono_ns: int, ignition_received_ns: int, backend_launch_ns: int,
-                           returncode: int) -> dict[str, Any]:
+                           backend_launch_ns: int, returncode: int) -> dict[str, Any]:
   record: dict[str, Any] = {
     "schema": "tss3-oracle-auto-arm-trigger-v1",
     "native_catch": native_catch,
@@ -98,32 +101,16 @@ def _record_trigger_timing(run_dir: Path, trigger_fallback: Path, *, native_catc
   if isinstance(programming_ns, int):
     record["programming_to_daemon_ms"] = (catch_received_ns - programming_ns) / 1e6
 
-  armed_ns = native_catch.get("armed_monotonic_ns")
-  if isinstance(armed_ns, int) and armed_ns > 0:
+  ignition_ns = native_catch.get("ignition_monotonic_ns")
+  if isinstance(ignition_ns, int) and ignition_ns > 0:
     for key, out_key in (
-      ("first_extended_tx_monotonic_ns", "arm_to_first_10_03_ms"),
-      ("positive_extended_monotonic_ns", "arm_to_50_03_ms"),
-      ("programming_tx_monotonic_ns", "arm_to_10_02_ms"),
+      ("first_extended_tx_monotonic_ns", "ignition_to_first_10_03_ms"),
+      ("positive_extended_monotonic_ns", "ignition_to_50_03_ms"),
+      ("programming_tx_monotonic_ns", "ignition_to_10_02_ms"),
     ):
       value = native_catch.get(key)
       if isinstance(value, int):
-        record[out_key] = (value - armed_ns) / 1e6
-
-  native_ignition_ns = native_catch.get("ignition_observed_monotonic_ns")
-  if isinstance(native_ignition_ns, int) and native_ignition_ns > 0:
-    record["ignition_observed_monotonic_ns"] = native_ignition_ns
-    for key, out_key in (
-      ("positive_extended_monotonic_ns", "ignition_observed_to_50_03_ms"),
-      ("programming_tx_monotonic_ns", "ignition_observed_to_10_02_ms"),
-    ):
-      value = native_catch.get(key)
-      if isinstance(value, int):
-        record[out_key] = (value - native_ignition_ns) / 1e6
-
-  if ignition_log_mono_ns > 0 and ignition_received_ns > 0:
-    record["latest_panda_states_log_mono_ns"] = ignition_log_mono_ns
-    record["latest_panda_states_received_monotonic_ns"] = ignition_received_ns
-    record["latest_panda_states_delivery_ms"] = (ignition_received_ns - ignition_log_mono_ns) / 1e6
+        record[out_key] = (value - ignition_ns) / 1e6
 
   trigger_path = (run_dir / "auto-trigger.json") if run_dir.is_dir() else trigger_fallback
   with atomic_write(str(trigger_path), "w", overwrite=True) as f:
@@ -146,8 +133,7 @@ def _allocate_run_path(*, stamp: str, catch_received_ns: int) -> tuple[Path, Pat
     suffix += 1
 
 
-def _run_bringup(native_catch_path: Path, native_catch: dict[str, Any], *, catch_received_ns: int,
-                 ignition_log_mono_ns: int, ignition_received_ns: int) -> bool:
+def _run_bringup(native_catch_path: Path, native_catch: dict[str, Any], *, catch_received_ns: int) -> bool:
   global _child
   if not TOOL_PATH.is_file() or not os.access(TOOL_PATH, os.X_OK):
     _write_status("error", f"oracle tool unavailable: {TOOL_PATH}")
@@ -222,8 +208,6 @@ def _run_bringup(native_catch_path: Path, native_catch: dict[str, Any], *, catch
     run_dir, trigger_fallback,
     native_catch=native_catch,
     catch_received_ns=catch_received_ns,
-    ignition_log_mono_ns=ignition_log_mono_ns,
-    ignition_received_ns=ignition_received_ns,
     backend_launch_ns=launch_ns,
     returncode=returncode,
   )
@@ -259,43 +243,27 @@ def _run_bringup(native_catch_path: Path, native_catch: dict[str, Any], *, catch
 
 
 def main() -> None:
-  global _exit_requested
+  global _exit_requested, _listener
   signal.signal(signal.SIGINT, _signal_handler)
   signal.signal(signal.SIGTERM, _signal_handler)
 
-  sm = messaging.SubMaster(["pandaStates"], poll="pandaStates")
-  initialized = False
-  last_ignition = False
-  latest_panda_log_mono_ns = 0
-  latest_panda_received_ns = 0
+  listener = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+  _listener = listener
+  NATIVE_NOTIFY_PATH.unlink(missing_ok=True)
+  listener.bind(str(NATIVE_NOTIFY_PATH))
 
-  _write_status("starting", "Automatic TSS3 oracle watcher starting.")
+  _write_status("armed", "Automatic TSS3 oracle is waiting for native Panda ignition detection.")
 
   try:
     while not _exit_requested:
-      sm.update(10)
-      if sm.updated["pandaStates"]:
-        panda_states = list(sm["pandaStates"])
-        if panda_states:
-          ignition = any(p.ignitionLine or p.ignitionCan for p in panda_states)
-          latest_panda_received_ns = time.monotonic_ns()
-          latest_panda_log_mono_ns = int(sm.logMonoTime["pandaStates"])
-
-          if not initialized:
-            initialized = True
-            last_ignition = ignition
-            state = "waiting_off" if ignition else "armed"
-            detail = ("Watcher started while ignition was already on; waiting for the next OFF cycle."
-                      if ignition else "Automatic TSS3 oracle is pre-armed while the vehicle is off.")
-            _write_status(state, detail)
-          elif not ignition and last_ignition:
-            _write_status("armed", "Automatic TSS3 oracle is pre-armed while the vehicle is off.")
-          elif ignition and not last_ignition:
-            _write_status("native_catching", "Ignition detected; native pandad is catching EPS PROGRAMMING.")
-          last_ignition = ignition
-
       claimed = _claim_native_catch()
       if claimed is None:
+        try:
+          listener.recv(1)
+        except OSError:
+          if _exit_requested:
+            break
+          raise
         continue
       claimed_path, marker = claimed
       catch_received_ns = time.monotonic_ns()
@@ -303,13 +271,14 @@ def main() -> None:
         _run_bringup(
           claimed_path, marker,
           catch_received_ns=catch_received_ns,
-          ignition_log_mono_ns=latest_panda_log_mono_ns,
-          ignition_received_ns=latest_panda_received_ns,
         )
       finally:
         claimed_path.unlink(missing_ok=True)
   finally:
     _terminate_child()
+    listener.close()
+    _listener = None
+    NATIVE_NOTIFY_PATH.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

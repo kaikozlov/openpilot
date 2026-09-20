@@ -5,9 +5,13 @@
 #include <cassert>
 #include <cerrno>
 #include <cstdio>
+#include <fcntl.h>
 #include <fstream>
 #include <memory>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 
 #include "openpilot/cereal/gen/cpp/car.capnp.h"
@@ -31,9 +35,10 @@ constexpr uint32_t TSS3_EPS_RX = 0x7A9U;
 constexpr uint8_t TSS3_DIAG_BUS = 0U;
 constexpr uint64_t TSS3_EXTENDED_PERIOD_NS = 20ULL * 1000ULL * 1000ULL;
 constexpr uint64_t TSS3_CATCH_TIMEOUT_NS = 2ULL * 1000ULL * 1000ULL * 1000ULL;
-constexpr uint64_t TSS3_STATE_POLL_NS = 100ULL * 1000ULL * 1000ULL;
+constexpr uint64_t TSS3_STATE_POLL_NS = 10ULL * 1000ULL * 1000ULL;
 constexpr uint64_t TSS3_PARAM_POLL_NS = 250ULL * 1000ULL * 1000ULL;
 constexpr char TSS3_NATIVE_CATCH_PATH[] = "/tmp/tss3-oracle-native-catch.json";
+constexpr char TSS3_NATIVE_NOTIFY_PATH[] = "/tmp/tss3-oracle-native-catch.sock";
 constexpr char TSS3_F33_FINGERPRINT[] = "TOYOTA_CAMRY_TSS3";
 const std::string TSS3_EXTENDED_FRAME("\x02\x10\x03\x00\x00\x00\x00\x00", 8);
 const std::string TSS3_PROGRAMMING_FRAME("\x02\x10\x02\x00\x00\x00\x00\x00", 8);
@@ -47,9 +52,9 @@ public:
       enabled_ = exact_f33_auto_enabled();
       last_param_check_ns_ = now;
       param_initialized_ = true;
-      if (!enabled_ && state_ == State::ARMED) {
+      if (!enabled_ && (state_ == State::ARMED || state_ == State::CATCHING)) {
         LOGW("TSS3 oracle startup catcher disarmed");
-        state_ = State::DISARMED;
+        state_ = ignition_initialized_ && last_ignition_ ? State::WAIT_OFF : State::DISARMED;
       }
     }
 
@@ -62,8 +67,8 @@ public:
       }
     }
 
-    if (state_ == State::ARMED) {
-      if (ignition_observed_ns_ != 0 && (now - ignition_observed_ns_) > TSS3_CATCH_TIMEOUT_NS) {
+    if (state_ == State::CATCHING) {
+      if ((now - ignition_ns_) > TSS3_CATCH_TIMEOUT_NS) {
         LOGW("TSS3 oracle startup catcher timed out without exact 50 03");
         state_ = State::WAIT_OFF;
         return;
@@ -75,7 +80,7 @@ public:
   }
 
   void process_rx(Panda *panda, const std::vector<can_frame> &frames) {
-    if (state_ != State::ARMED) return;
+    if (state_ != State::CATCHING) return;
     for (const auto &frame : frames) {
       if (frame.address == TSS3_EPS_RX && frame.src == TSS3_DIAG_BUS && frame.dat == TSS3_POSITIVE_EXTENDED_FRAME) {
         const uint64_t positive_ns = nanos_since_boot();
@@ -83,7 +88,7 @@ public:
         const uint64_t programming_ns = nanos_since_boot();
         positive_extended_ns_ = positive_ns;
         programming_tx_ns_ = programming_ns;
-        write_marker();
+        if (write_marker()) notify_watcher();
         state_ = State::CAUGHT;
         LOGW("TSS3 oracle startup catcher sent 10 02 %.3f ms after exact 50 03",
              (programming_ns - positive_ns) / 1e6);
@@ -93,11 +98,11 @@ public:
   }
 
   bool active() const {
-    return state_ == State::ARMED || state_ == State::CAUGHT;
+    return state_ == State::CATCHING || state_ == State::CAUGHT;
   }
 
 private:
-  enum class State { DISARMED, ARMED, CAUGHT, WAIT_OFF };
+  enum class State { DISARMED, ARMED, CATCHING, CAUGHT, WAIT_OFF };
 
   bool exact_f33_auto_enabled() {
     if (!params_.getBool("Tss3OracleAutoArm")) return false;
@@ -122,26 +127,27 @@ private:
         state_ = State::WAIT_OFF;
         return;
       }
-      if (enabled_) arm(panda, now);
+      state_ = enabled_ ? State::ARMED : State::DISARMED;
       return;
     }
 
     if (ignition && !last_ignition_ && state_ == State::ARMED) {
-      ignition_observed_ns_ = now;
-      LOGW("TSS3 oracle startup catcher observed ignition while pre-armed");
+      start(panda, now);
     } else if (!ignition && last_ignition_) {
       reset_for_off();
-      if (enabled_) arm(panda, now);
+      state_ = enabled_ ? State::ARMED : State::DISARMED;
     } else if (!ignition && enabled_ && state_ == State::DISARMED) {
-      arm(panda, now);
+      state_ = State::ARMED;
+      LOGW("TSS3 oracle startup catcher armed; waiting for ignition");
+    } else if (ignition && enabled_ && state_ == State::DISARMED) {
+      state_ = State::WAIT_OFF;
     }
     last_ignition_ = ignition;
   }
 
   void reset_for_off() {
     state_ = State::DISARMED;
-    armed_ns_ = 0;
-    ignition_observed_ns_ = 0;
+    ignition_ns_ = 0;
     first_extended_tx_ns_ = 0;
     positive_extended_ns_ = 0;
     programming_tx_ns_ = 0;
@@ -149,15 +155,14 @@ private:
     std::remove(TSS3_NATIVE_CATCH_PATH);
   }
 
-  void arm(Panda *panda, uint64_t now) {
+  void start(Panda *panda, uint64_t now) {
     std::remove(TSS3_NATIVE_CATCH_PATH);
-    armed_ns_ = now;
-    ignition_observed_ns_ = 0;
+    ignition_ns_ = now;
     panda->set_power_saving(false);
     panda->set_safety_model(cereal::CarParams::SafetyModel::ELM327, 1U);
-    state_ = State::ARMED;
+    state_ = State::CATCHING;
     send_extended(panda, nanos_since_boot());
-    LOGW("TSS3 oracle startup catcher pre-armed while ignition is off");
+    LOGW("TSS3 oracle startup catcher started on native ignition edge");
   }
 
   void send_extended(Panda *panda, uint64_t now) {
@@ -167,14 +172,17 @@ private:
     next_extended_tx_ns_ = now + TSS3_EXTENDED_PERIOD_NS;
   }
 
-  void write_marker() const {
+  bool write_marker() const {
     const std::string tmp = std::string(TSS3_NATIVE_CATCH_PATH) + ".tmp";
     std::ofstream out(tmp, std::ios::trunc);
+    if (!out) {
+      LOGE("failed to open TSS3 native catch marker: errno=%d", errno);
+      return false;
+    }
     out << "{\n"
         << "  \"schema\": \"tss3-oracle-native-catch-v1\",\n"
         << "  \"target\": \"TOYOTA_CAMRY_TSS3\",\n"
-        << "  \"armed_monotonic_ns\": " << armed_ns_ << ",\n"
-        << "  \"ignition_observed_monotonic_ns\": " << ignition_observed_ns_ << ",\n"
+        << "  \"ignition_monotonic_ns\": " << ignition_ns_ << ",\n"
         << "  \"first_extended_tx_monotonic_ns\": " << first_extended_tx_ns_ << ",\n"
         << "  \"positive_extended_monotonic_ns\": " << positive_extended_ns_ << ",\n"
         << "  \"programming_tx_monotonic_ns\": " << programming_tx_ns_ << ",\n"
@@ -184,7 +192,24 @@ private:
     out.close();
     if (std::rename(tmp.c_str(), TSS3_NATIVE_CATCH_PATH) != 0) {
       LOGE("failed to publish TSS3 native catch marker: errno=%d", errno);
+      return false;
     }
+    return true;
+  }
+
+  void notify_watcher() const {
+    const int fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) return;
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    fcntl(fd, F_SETFL, O_NONBLOCK);
+    sockaddr_un addr = {};
+    addr.sun_family = AF_UNIX;
+    std::snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", TSS3_NATIVE_NOTIFY_PATH);
+    const char notification = 1;
+    if (sendto(fd, &notification, sizeof(notification), 0, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0) {
+      LOGW("TSS3 oracle native catch notification unavailable: errno=%d", errno);
+    }
+    close(fd);
   }
 
   Params params_;
@@ -195,8 +220,7 @@ private:
   bool last_ignition_ = false;
   uint64_t last_param_check_ns_ = 0;
   uint64_t last_state_check_ns_ = 0;
-  uint64_t armed_ns_ = 0;
-  uint64_t ignition_observed_ns_ = 0;
+  uint64_t ignition_ns_ = 0;
   uint64_t first_extended_tx_ns_ = 0;
   uint64_t positive_extended_ns_ = 0;
   uint64_t programming_tx_ns_ = 0;
