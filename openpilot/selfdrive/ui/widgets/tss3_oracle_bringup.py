@@ -196,24 +196,37 @@ class Tss3OracleBringupDialog(Widget):
     progress = max(0, min(100, int(status.get("progress", 0))))
 
     rl.draw_rectangle_rec(rect, BACKGROUND)
-    card = rl.Rectangle(rect.x + 110, rect.y + 70, rect.width - 220, rect.height - 140)
+    margin_x = max(60, rect.width * 0.05)
+    margin_y = max(45, rect.height * 0.06)
+    card = rl.Rectangle(rect.x + margin_x, rect.y + margin_y,
+                        rect.width - 2 * margin_x, rect.height - 2 * margin_y)
     rl.draw_rectangle_rounded(card, 0.04, 24, CARD)
 
-    self._title.render(rl.Rectangle(card.x + 70, card.y + 35, card.width - 140, 100))
-    self._stage_title.render(rl.Rectangle(card.x + 70, card.y + 155, card.width - 140, 90))
-    self._detail.render(rl.Rectangle(card.x + 100, card.y + 245, card.width - 200, 145))
+    self._title.render(rl.Rectangle(card.x + 60, card.y + 25, card.width - 120, 90))
 
-    bar = rl.Rectangle(card.x + 100, card.y + 405, card.width - 200, 20)
+    body_y = card.y + 135
+    body_h = card.height - 185
+    left_w = card.width * 0.45
+    split_x = card.x + left_w
+
+    # Progress ladder on the left.
+    steps_rect = rl.Rectangle(card.x + 80, body_y + 15, left_w - 130, body_h - 95)
+    self._render_steps(steps_rect, stage)
+
+    # Current stage and controls on the right.
+    right_x = split_x + 35
+    right_w = card.x + card.width - 70 - right_x
+    self._stage_title.render(rl.Rectangle(right_x, body_y + 5, right_w, 90))
+    self._detail.render(rl.Rectangle(right_x + 10, body_y + 105, right_w - 20, 190))
+
+    bar = rl.Rectangle(right_x + 25, body_y + 325, right_w - 50, 22)
     rl.draw_rectangle_rounded(bar, 1.0, 10, rl.Color(63, 63, 63, 255))
     if progress:
       fill = rl.Rectangle(bar.x, bar.y, bar.width * progress / 100.0, bar.height)
       rl.draw_rectangle_rounded(fill, 1.0, 10, ERROR if status.get("error") else ACTIVE)
 
-    steps_rect = rl.Rectangle(card.x + 150, card.y + 465, card.width - 300, 500)
-    self._render_steps(steps_rect, stage)
-
     if self._run_dir is not None:
-      self._run_path.render(rl.Rectangle(card.x + 100, card.y + card.height - 230, card.width - 200, 50))
+      self._run_path.render(rl.Rectangle(right_x + 15, body_y + 385, right_w - 30, 70))
 
     awaiting = bool(status.get("awaiting_continue"))
     terminal = bool(status.get("done") or status.get("error"))
@@ -230,4 +243,5 @@ class Tss3OracleBringupDialog(Widget):
       self._action.set_button_style(ButtonStyle.NO_EFFECT)
       self._action.set_enabled(False)
 
-    self._action.render(rl.Rectangle(card.x + 180, card.y + card.height - 160, card.width - 360, 110))
+    self._action.render(rl.Rectangle(right_x + 70, card.y + card.height - 145, right_w - 140, 100))
+

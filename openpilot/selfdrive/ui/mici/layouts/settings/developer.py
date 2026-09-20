@@ -7,6 +7,8 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.settings.common import restart_needed_callback
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.widgets.ssh_key import SshKeyFetcher
+from openpilot.selfdrive.ui.widgets.tss3_oracle_bringup import Tss3OracleBringupDialog, tool_available
+from opendbc.car.toyota.values import CAR
 
 
 class AlphaLongConfirmPage(NavScroller):
@@ -83,6 +85,13 @@ class DeveloperLayoutMici(NavScroller):
                                         toggle_callback=self._on_alpha_long_enabled,
                                         description="Use alpha openpilot longitudinal control instead of stock ACC. This may disable Automatic Emergency " +
                                                     "Braking (AEB).")
+    self._tss3_oracle_button = BigButton(
+      "TSS3 oracle bringup", "ARM",
+      description="Exact 2026 Camry F33 only. Arm while fully OFF and in Park, then press the brake and POWER normally. " +
+                  "The guided screen stays open through RAM-oracle installation and Brake/FRC recovery."
+    )
+    self._tss3_oracle_button.set_click_callback(self._on_tss3_oracle_bringup)
+
     self._debug_mode_toggle = BigParamControl("ui debug mode", "ShowDebugInfo",
                                               toggle_callback=lambda checked: (gui_app.set_show_touches(checked), gui_app.set_show_fps(checked)),
                                               description="Show touch locations and the UI frame rate.")
@@ -95,6 +104,7 @@ class DeveloperLayoutMici(NavScroller):
       self._long_maneuver_toggle,
       self._lat_maneuver_toggle,
       self._alpha_long_toggle,
+      self._tss3_oracle_button,
       self._debug_mode_toggle,
     ])
 
@@ -159,9 +169,17 @@ class DeveloperLayoutMici(NavScroller):
       self._lat_maneuver_toggle.set_enabled(False)
       self._alpha_long_toggle.set_visible(False)
 
+    exact_f33 = ui_state.CP is not None and ui_state.CP.carFingerprint == CAR.TOYOTA_CAMRY_TSS3
+    self._tss3_oracle_button.set_visible(not ui_state.is_release and exact_f33 and tool_available())
+    self._tss3_oracle_button.set_enabled(lambda: ui_state.is_offroad() and not ui_state.engaged)
+
     # Refresh toggles from params to mirror external changes
     for key, item in self._refresh_toggles:
       item.set_checked(ui_state.params.get_bool(key))
+
+  def _on_tss3_oracle_bringup(self):
+    if ui_state.is_offroad() and tool_available():
+      gui_app.push_widget(Tss3OracleBringupDialog())
 
   def _on_joystick_debug_mode(self, state: bool):
     ui_state.params.put_bool("JoystickDebugMode", state, block=True)
