@@ -90,15 +90,9 @@ function launch {
 
   # start manager
   cd openpilot/system/manager
-  # This development branch carries source-level Panda safety changes. Release
-  # overlays can include ignored build outputs, so invalidate the Panda app and
-  # its safety-bearing object before building from the checked-out sources.
-  rm -f "$DIR/prebuilt"
-  rm -f "$DIR/panda/board/board/obj/panda_h7main.o"
-  rm -f "$DIR/panda/board/obj/panda_h7/main.elf"
-  rm -f "$DIR/panda/board/obj/panda_h7/main.bin"
-  rm -f "$DIR/panda/board/obj/panda_h7.bin.signed"
-  SCONSFLAGS="--cache-disable ${SCONSFLAGS:-}" ./build.py
+  if [ ! -f "$DIR/prebuilt" ]; then
+    ./build.py
+  fi
   ./manager.py
 
   # if broken, keep on screen error
