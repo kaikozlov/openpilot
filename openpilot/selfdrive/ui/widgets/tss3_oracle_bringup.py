@@ -19,6 +19,13 @@ TOOL_PATH = Path(os.getenv("TSS3_ORACLE_TOOL", "/data/tss3-oracle/tss3-unified-s
 RUN_ROOT = Path(os.getenv("TSS3_ORACLE_RUN_ROOT", "/data/tss3-oracle-runs"))
 STATUS_SCHEMA = "camry-f33-oracle-ui-status-v1"
 
+_oracle_bringup_visible = False
+
+
+def oracle_bringup_visible() -> bool:
+  return _oracle_bringup_visible
+
+
 BACKGROUND = rl.Color(20, 20, 20, 255)
 CARD = rl.Color(36, 36, 36, 255)
 TEXT = rl.Color(238, 238, 238, 255)
@@ -81,6 +88,20 @@ class Tss3OracleBringupDialog(Widget):
     self._action = self._child(Button("WORKING", self._on_action, font_size=48, button_style=ButtonStyle.PRIMARY))
 
     self._start_worker()
+
+  def show_event(self):
+    global _oracle_bringup_visible
+    super().show_event()
+    _oracle_bringup_visible = True
+
+  def hide_event(self):
+    global _oracle_bringup_visible
+    _oracle_bringup_visible = False
+    status = self._snapshot()
+    proc = self._proc
+    if proc is not None and proc.poll() is None and not status.get("done") and not status.get("error"):
+      proc.terminate()
+    super().hide_event()
 
   def _snapshot(self) -> dict[str, Any]:
     with self._lock:
