@@ -21,11 +21,13 @@ STATUS_SCHEMA = "tss3-oracle-auto-arm-status-v1"
 BACKEND_STATUS_SCHEMA = "camry-f33-oracle-ui-status-v1"
 NATIVE_CATCH_PATH = Path(os.getenv("TSS3_ORACLE_NATIVE_CATCH", "/tmp/tss3-oracle-native-catch.json"))
 NATIVE_NOTIFY_PATH = Path(os.getenv("TSS3_ORACLE_NATIVE_NOTIFY", "/tmp/tss3-oracle-native-catch.sock"))
+WARM_WORKER_PATH = Path(os.getenv("TSS3_ORACLE_WARM_WORKER", "/tmp/tss3-oracle-warm-worker.sock"))
 
 _exit_requested = False
 _child: subprocess.Popen[str] | None = None
 _child_lock = threading.Lock()
 _listener: socket.socket | None = None
+_warm_worker: subprocess.Popen[str] | None = None
 
 
 def _write_status(state: str, detail: str, **extra: Any) -> None:
@@ -54,11 +56,73 @@ def _terminate_child() -> None:
     pass
 
 
+def _stop_warm_worker() -> None:
+  global _warm_worker
+  proc = _warm_worker
+  _warm_worker = None
+  if proc is not None and proc.poll() is None:
+    try:
+      os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+      pass
+    try:
+      proc.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+      try:
+        os.killpg(proc.pid, signal.SIGKILL)
+      except ProcessLookupError:
+        pass
+  WARM_WORKER_PATH.unlink(missing_ok=True)
+
+
+def _start_warm_worker() -> bool:
+  global _warm_worker
+  _stop_warm_worker()
+  if not TOOL_PATH.is_file() or not os.access(TOOL_PATH, os.X_OK):
+    _write_status("error", f"oracle tool unavailable: {TOOL_PATH}")
+    return False
+
+  cmd = [
+    str(TOOL_PATH), "--topology", "camry-post-repin", "oracle-ui-worker",
+    str(WARM_WORKER_PATH), str(os.getpid()),
+  ]
+  try:
+    proc = subprocess.Popen(
+      cmd,
+      cwd=str(TOOL_PATH.parent),
+      stdin=subprocess.DEVNULL,
+      stdout=subprocess.DEVNULL,
+      stderr=subprocess.DEVNULL,
+      text=True,
+      start_new_session=True,
+    )
+  except OSError as exc:
+    _write_status("error", f"failed to start warm oracle worker: {type(exc).__name__}: {exc}")
+    return False
+  _warm_worker = proc
+
+  deadline = time.monotonic() + 15.0
+  while time.monotonic() < deadline and not _exit_requested:
+    if proc.poll() is not None:
+      _write_status("error", f"warm oracle worker exited during startup: {proc.returncode}")
+      _warm_worker = None
+      return False
+    if WARM_WORKER_PATH.is_socket():
+      _write_status("armed", "Automatic TSS3 oracle uploader is warm and waiting for native Panda ignition detection.")
+      return True
+    time.sleep(0.02)
+
+  _stop_warm_worker()
+  _write_status("error", "warm oracle worker did not become ready")
+  return False
+
+
 def _signal_handler(signum, _frame) -> None:
   global _exit_requested
   cloudlog.info(f"tss3oracled caught signal {signum}")
   _exit_requested = True
   _terminate_child()
+  _stop_warm_worker()
   if _listener is not None:
     _listener.close()
 
@@ -143,7 +207,13 @@ def _run_bringup(native_catch_path: Path, native_catch: dict[str, Any], *, catch
   stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime())
   RUN_ROOT.mkdir(parents=True, exist_ok=True)
   run_dir, log_path, trigger_fallback = _allocate_run_path(stamp=stamp, catch_received_ns=catch_received_ns)
-  cmd = [str(TOOL_PATH), "--topology", "camry-post-repin", "oracle-ui-resume", str(native_catch_path), str(run_dir)]
+  if _warm_worker is None or _warm_worker.poll() is not None or not WARM_WORKER_PATH.is_socket():
+    _write_status("error", "native PROGRAMMING was caught but the warm oracle uploader is unavailable")
+    return False
+  cmd = [
+    str(TOOL_PATH), "--topology", "camry-post-repin", "oracle-ui-resume-warm",
+    str(WARM_WORKER_PATH), str(native_catch_path), str(run_dir),
+  ]
   launch_ns = time.monotonic_ns()
 
   _write_status(
@@ -253,9 +323,9 @@ def main() -> None:
   NATIVE_NOTIFY_PATH.unlink(missing_ok=True)
   listener.bind(str(NATIVE_NOTIFY_PATH))
 
-  _write_status("armed", "Automatic TSS3 oracle is waiting for native Panda ignition detection.")
-
   try:
+    if not _start_warm_worker():
+      return
     while not _exit_requested:
       claimed = _claim_native_catch()
       if claimed is None:
@@ -275,8 +345,11 @@ def main() -> None:
         )
       finally:
         claimed_path.unlink(missing_ok=True)
+      if not _exit_requested and not _start_warm_worker():
+        break
   finally:
     _terminate_child()
+    _stop_warm_worker()
     listener.close()
     _listener = None
     NATIVE_NOTIFY_PATH.unlink(missing_ok=True)
