@@ -38,12 +38,13 @@ ORACLE_RESPONSE_ADDR = 0x1FE00002
 ORACLE_BUS = 0
 ORACLE_PRIVATE_SID = 0xC9
 ORACLE_SEQUENCE_MAX = 0x1F
-# Parked raw-classic qualification: 100/100 at 25 ms cadence, p99 25.49 ms,
-# max 36.27 ms. A missing response is not authority loss: retry the same source
-# generation after 50 ms, and only declare the signer dead after Panda's existing
-# 100 ms replacement watchdog has already had time to fail open.
+ORACLE_MAX_PENDING_GENERATIONS = 8
+# Recorded driving qualification: 39,071 raw-oracle attempts, p99 below 30 ms,
+# max 34.03 ms. A missing response is not authority loss: retry the same source
+# generation after 50 ms. Every generation still has to publish within 90 ms of
+# its native arrival, before Panda's 100 ms replacement watchdog fails open.
 ORACLE_RETRY_TIMEOUT_S = 0.050
-ORACLE_DEAD_TIMEOUT_S = 0.120
+ORACLE_PUBLICATION_DEADLINE_S = 0.090
 
 def decode_sync(data: bytes) -> tuple[int, int]:
   if len(data) != 8:
@@ -190,7 +191,7 @@ class SignJob:
   application: bytes
   reset_counter: int
   message_counter: int
-  first_sent_at: float | None = None
+  queued_at: float
   sent_at: float | None = None
   attempts: int = 0
 
@@ -218,14 +219,12 @@ class ToyotaTss3RequestProxy:
     self.tracker = NativeFreshnessTracker()
 
     self.jobs: deque[SignJob] = deque()
-    self.inflight: dict[int, SignJob] = {}
+    self.inflight: tuple[int, SignJob] | None = None
     self.next_oracle_seq = 1
 
     self.active = False
     self.arm_pending = False
     self.arm_host_frame: bytes | None = None
-    self.pending_outputs: dict[int, bytes | None] = {}
-    self.next_output_index: int | None = None
 
     self.last_failure_reason = ""
 
@@ -272,9 +271,7 @@ class ToyotaTss3RequestProxy:
 
   def _invalidate_signing_locked(self) -> None:
     self.jobs.clear()
-    self.inflight.clear()
-    self.pending_outputs.clear()
-    self.next_output_index = None
+    self.inflight = None
     self._cv.notify_all()
 
   def _release_locked(self) -> None:
@@ -315,11 +312,14 @@ class ToyotaTss3RequestProxy:
     except ValueError:
       pass
 
-  def _queue_sign_locked(self, event: NativeEvent) -> None:
+  def _queue_sign_locked(self, event: NativeEvent) -> bool:
     message_counter = self.tracker.message_counter
     if message_counter is None:
       self._authority_failure_locked("freshness_not_ready")
-      return
+      return False
+    if len(self.jobs) + int(self.inflight is not None) >= ORACLE_MAX_PENDING_GENERATIONS:
+      self._authority_failure_locked("oracle_backlog")
+      return False
     application = build_host_application(
       lat_active=self.control_lat_active,
       target_angle_raw=self.control_target_angle_raw,
@@ -328,11 +328,9 @@ class ToyotaTss3RequestProxy:
       set_speed_kph=self.control_set_speed_kph,
       request_sequence=event.b26,
     )
-    if self.next_output_index is None:
-      self.next_output_index = event.index
-    self.pending_outputs[event.index] = None
-    self.jobs.append(SignJob(event.index, application, event.reset_counter, message_counter))
+    self.jobs.append(SignJob(event.index, application, event.reset_counter, message_counter, self._monotonic()))
     self._cv.notify_all()
+    return True
 
   def _observe_native_locked(self, frame: bytes) -> None:
     event = self._make_native_event_locked(frame)
@@ -353,7 +351,8 @@ class ToyotaTss3RequestProxy:
       return
 
     if self.arm_pending or self.active:
-      self._queue_sign_locked(event)
+      if not self._queue_sign_locked(event):
+        return
 
     self._maybe_arm_locked()
 
@@ -376,25 +375,12 @@ class ToyotaTss3RequestProxy:
       # recovers from the safety baseline; it is not an authority fault.
       cloudlog.event("toyota_f33_request_plane_tx_reject", native_index=self.native_index)
 
-  def _flush_outputs_locked(self) -> None:
-    if self.next_output_index is None:
+  def _retry_inflight_locked(self, now: float, reason: str) -> None:
+    if self.inflight is None:
       return
-    out = []
-    while self.next_output_index in self.pending_outputs and self.pending_outputs[self.next_output_index] is not None:
-      data = self.pending_outputs.pop(self.next_output_index)
-      assert data is not None
-      if self.arm_pending and self.arm_host_frame is None:
-        self.arm_host_frame = data
-      out.append(CanData(NATIVE_08A_ADDR, data, DOWNSTREAM_BUS))
-      self.next_output_index += 1
-    if out:
-      self._send_can(out)
-
-  def _retry_job_locked(self, seq: int, job: SignJob, now: float, reason: str) -> None:
-    self.inflight.pop(seq, None)
-    if job.native_index not in self.pending_outputs:
-      return
-    if job.first_sent_at is not None and now - job.first_sent_at > ORACLE_DEAD_TIMEOUT_S:
+    _, job = self.inflight
+    self.inflight = None
+    if now - job.queued_at > ORACLE_PUBLICATION_DEADLINE_S:
       self._authority_failure_locked("oracle_dead")
       return
     job.sent_at = None
@@ -403,78 +389,51 @@ class ToyotaTss3RequestProxy:
                    attempts=job.attempts)
     self._cv.notify_all()
 
-  def _retry_blocking_job_locked(self, now: float, reason: str, *, force: bool = False) -> None:
-    if self.next_output_index is None:
-      return
-
-    # Only the oldest unsigned freshness generation can stall downstream output.
-    # Newer responses may remain buffered without affecting authority.
-    for seq, job in tuple(self.inflight.items()):
-      if job.native_index != self.next_output_index:
-        continue
-      if job.first_sent_at is not None and now - job.first_sent_at > ORACLE_DEAD_TIMEOUT_S:
-        self._authority_failure_locked("oracle_dead")
-      elif force or (job.sent_at is not None and now - job.sent_at > ORACLE_RETRY_TIMEOUT_S):
-        self._retry_job_locked(seq, job, now, reason)
-      return
-
-    # A blocking generation may already be queued for retry. It is still the
-    # same authority generation; only declare it dead after the hard deadline.
-    for job in self.jobs:
-      if job.native_index == self.next_output_index:
-        if job.first_sent_at is not None and now - job.first_sent_at > ORACLE_DEAD_TIMEOUT_S:
-          self._authority_failure_locked("oracle_dead")
-        return
-
   def _observe_oracle_response_locked(self, data: bytes) -> None:
     if len(data) != 8 or data[0] != ORACLE_PRIVATE_SID:
       return
     seq, status = data[1], data[2]
     if not 1 <= seq <= ORACLE_SEQUENCE_MAX or data[3] != (seq ^ 0xFF):
       return
-    job = self.inflight.get(seq)
-    if job is None:
+    if self.inflight is None or seq != self.inflight[0]:
       return
+    _, job = self.inflight
     now = self._monotonic()
+    if now - job.queued_at > ORACLE_PUBLICATION_DEADLINE_S:
+      self._authority_failure_locked("oracle_dead")
+      return
     if status != 0:
-      self._retry_job_locked(seq, job, now, "oracle_sign_status")
+      self._retry_inflight_locked(now, "oracle_sign_status")
       return
-    self.inflight.pop(seq, None)
-    if job.native_index not in self.pending_outputs:
-      return
-    self.pending_outputs[job.native_index] = build_signed_frame(job.application, job.reset_counter, job.message_counter, data[4:8])
-
-    # On one CAN bus, observing a later generation's reply while the oldest
-    # generation is still unanswered is direct evidence that the older reply was
-    # lost. Retry that same freshness generation immediately instead of releasing.
-    if self.next_output_index is not None and job.native_index > self.next_output_index:
-      self._retry_blocking_job_locked(now, "later_oracle_response", force=True)
-    self._flush_outputs_locked()
+    self.inflight = None
+    frame = build_signed_frame(job.application, job.reset_counter, job.message_counter, data[4:8])
+    if self.arm_pending and self.arm_host_frame is None:
+      self.arm_host_frame = frame
+    self._send_can([CanData(NATIVE_08A_ADDR, frame, DOWNSTREAM_BUS)])
     self._cv.notify_all()
 
-  def _alloc_seq_locked(self) -> int:
-    used = set(self.inflight)
-    for _ in range(ORACLE_SEQUENCE_MAX):
-      seq = self.next_oracle_seq
-      self.next_oracle_seq = (seq % ORACLE_SEQUENCE_MAX) + 1
-      if seq not in used:
-        return seq
-    raise RuntimeError("oracle sequence space exhausted")
-
   def _expire_locked(self, now: float) -> None:
-    self._retry_blocking_job_locked(now, "oracle_response_timeout")
+    if self.inflight is None:
+      return
+    _, job = self.inflight
+    if now - job.queued_at > ORACLE_PUBLICATION_DEADLINE_S:
+      self._authority_failure_locked("oracle_dead")
+    elif job.sent_at is not None and now - job.sent_at > ORACLE_RETRY_TIMEOUT_S:
+      self._retry_inflight_locked(now, "oracle_response_timeout")
 
   def _next_job_locked(self, now: float) -> tuple[int, SignJob] | None:
     self._expire_locked(now)
-    if not self.jobs:
+    if self.inflight is not None or not self.jobs:
+      return None
+    if now - self.jobs[0].queued_at > ORACLE_PUBLICATION_DEADLINE_S:
+      self._authority_failure_locked("oracle_dead")
       return None
     job = self.jobs.popleft()
-    seq = self._alloc_seq_locked()
-    if job.first_sent_at is None:
-      job.first_sent_at = now
+    seq = self.next_oracle_seq
+    self.next_oracle_seq = (seq % ORACLE_SEQUENCE_MAX) + 1
     job.sent_at = now
     job.attempts += 1
-    self.inflight[seq] = job
+    self.inflight = (seq, job)
     return seq, job
 
   def _oracle_sender_loop(self) -> None:

@@ -10,6 +10,7 @@ from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
   ADMIN_ADDR, ADMIN_BUS, DOWNSTREAM_BUS, NATIVE_08A_ADDR, PANDA_REJECTED_OFFSET,
   SECOC_SYNC_ADDR,
   ORACLE_BUS,
+  ORACLE_MAX_PENDING_GENERATIONS,
   ORACLE_RESPONSE_ADDR,
   NativeEvent,
   NativeFreshnessTracker,
@@ -231,7 +232,7 @@ def test_sign_transport_is_one_stateless_classic_batch():
   frames = build_oracle_transport(seq, job.application, job.message_counter, job.reset_counter)
   collector(frames)
   assert collector.batches[-1] == frames
-  assert len(frames) == 5 and seq in worker.inflight
+  assert len(frames) == 5 and worker.inflight == (seq, job)
   assert [m.dat[0] >> 5 for m in frames] == [0, 1, 2, 3, 4]
   assert all(m.address == 0x1FDC0002 and m.src == ORACLE_BUS for m in frames)
 
@@ -323,34 +324,34 @@ def test_lat_active_changes_do_not_drop_engagement_owned_authority():
   assert sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat) == releases_before + 1
 
 
-def test_later_oracle_reply_retries_missing_generation_without_releasing_or_reordering():
+def test_single_flight_queues_new_generations_and_ignores_unmatched_replies():
   worker, collector, clock = start_active_worker()
   worker.set_control(True, True, 1.0)
-  for b26, msg in ((13, 3), (14, 4)):
-    worker.update(batch((NATIVE_08A_ADDR, native_frame(b26, msg, reset=1110), 2)), cs())
-    with worker._cv:
-      seq, job = worker._next_job_locked(clock.now)
-    if b26 == 13:
-      first = (seq, job)
-    else:
-      second = (seq, job)
+  worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110), 2)), cs())
+  with worker._cv:
+    first_seq, first_job = worker._next_job_locked(clock.now)
+  worker.update(batch((NATIVE_08A_ADDR, native_frame(14, 4, reset=1110), 2)), cs())
+  with worker._cv:
+    assert worker._next_job_locked(clock.now) is None
 
   releases_before = sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat)
   before = len(collector.batches)
   clock.now = 0.030
-  worker.update(batch(private_response(second[0], bytes.fromhex("12345678"))), cs())
+  unmatched_seq = (first_seq % 0x1F) + 1
+  worker.update(batch(private_response(unmatched_seq, bytes.fromhex("12345678"))), cs())
   assert len(collector.batches) == before
-  assert worker.active and first[0] not in worker.inflight
-  assert worker.jobs and worker.jobs[0].native_index == first[1].native_index
+  assert worker.active and worker.inflight == (first_seq, first_job)
   assert sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat) == releases_before
 
+  worker.update(batch(private_response(first_seq, bytes.fromhex("23456789"))), cs())
+  assert collector.batches[-1][0].dat[26] & 0x3F == 13
   with worker._cv:
-    retry_seq, retry_job = worker._next_job_locked(clock.now)
-  assert retry_job.native_index == first[1].native_index and retry_job.attempts == 2
-  worker.update(batch(private_response(retry_seq, bytes.fromhex("23456789"))), cs())
+    second_seq, second_job = worker._next_job_locked(clock.now)
+  assert second_job.native_index == first_job.native_index + 1
+  worker.update(batch(private_response(second_seq, bytes.fromhex("3456789a"))), cs())
   assert worker.active
-  assert len(collector.batches[-1]) == 2
-  assert [m.dat[26] & 0x3F for m in collector.batches[-1]] == [13, 14]
+  host_b26 = [m.dat[26] & 0x3F for m in collector.flat if m.address == NATIVE_08A_ADDR]
+  assert host_b26[-2:] == [13, 14]
   assert sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat) == releases_before
 
 
@@ -361,10 +362,10 @@ def test_response_timeout_retries_same_generation_without_releasing():
     seq, job = worker._next_job_locked(clock.now)
     clock.now = 0.040
     worker._expire_locked(clock.now)
-    assert worker.active and seq in worker.inflight
+    assert worker.active and worker.inflight == (seq, job)
     clock.now = 0.051
     worker._expire_locked(clock.now)
-  assert worker.active and seq not in worker.inflight
+  assert worker.active and worker.inflight is None
   assert worker.jobs and worker.jobs[0] is job
   assert worker.last_failure_reason == ""
   assert not any(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat)
@@ -378,16 +379,107 @@ def test_response_timeout_retries_same_generation_without_releasing():
   assert collector.batches[-1][0].address == NATIVE_08A_ADDR
 
 
-def test_oracle_only_releases_after_hard_deadline():
+def test_late_response_after_retry_cannot_sign_the_current_generation():
+  worker, collector, clock = start_active_worker()
+  worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110), 2)), cs())
+  with worker._cv:
+    old_seq, job = worker._next_job_locked(clock.now)
+    clock.now = 0.051
+    worker._expire_locked(clock.now)
+    retry_seq, retry_job = worker._next_job_locked(clock.now)
+  assert retry_job is job and retry_seq != old_seq
+
+  before = len(collector.batches)
+  worker.update(batch(private_response(old_seq, bytes.fromhex("11111111"))), cs())
+  assert len(collector.batches) == before and worker.inflight == (retry_seq, job)
+  worker.update(batch(private_response(retry_seq, bytes.fromhex("22222222"))), cs())
+  assert collector.batches[-1][0].address == NATIVE_08A_ADDR
+  assert collector.batches[-1][0].dat[28:32].hex()[1:] == "2222222"
+
+
+def test_pending_generation_bound_releases_authority_before_unbounded_growth():
   worker, _, clock = start_active_worker()
   worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110), 2)), cs())
   with worker._cv:
-    seq, _ = worker._next_job_locked(clock.now)
-    clock.now = 0.121
+    assert worker._next_job_locked(clock.now) is not None
+  for offset in range(1, ORACLE_MAX_PENDING_GENERATIONS):
+    worker.update(batch((NATIVE_08A_ADDR, native_frame(13 + offset, 3 + offset, reset=1110), 2)), cs())
+  assert worker.inflight is not None and len(worker.jobs) == ORACLE_MAX_PENDING_GENERATIONS - 1
+
+  worker.update(batch((NATIVE_08A_ADDR,
+                       native_frame(13 + ORACLE_MAX_PENDING_GENERATIONS,
+                                    3 + ORACLE_MAX_PENDING_GENERATIONS, reset=1110), 2)), cs())
+  assert not worker.active and not worker.arm_pending
+  assert worker.last_failure_reason == "oracle_backlog"
+  assert worker.inflight is None and not worker.jobs
+
+
+def test_recorded_latency_shape_and_one_drop_stay_within_four_generations():
+  worker, collector, clock = start_active_worker()
+  first_output = len([m for m in collector.flat if m.address == NATIVE_08A_ADDR])
+  delays = (0.017, 0.024, 0.014, 0.029, 0.018, 0.020, 0.016, 0.030)
+  response_queue = []
+  next_native = 0.025
+  generation = 0
+  max_pending = 0
+  dropped = False
+
+  while generation < 200 or worker.jobs or worker.inflight is not None or response_queue:
+    clock.now += 0.001
+    while response_queue and response_queue[0][0] <= clock.now + 1e-12:
+      _, seq = response_queue.pop(0)
+      worker.update(batch(private_response(seq)), cs())
+
+    if generation < 200 and clock.now >= next_native - 1e-12:
+      message = 3 + generation
+      worker.update(batch((NATIVE_08A_ADDR,
+                           native_frame((13 + generation) & 0x3F, message, reset=1110), 2)), cs())
+      generation += 1
+      next_native += 0.025
+
+    with worker._cv:
+      item = worker._next_job_locked(clock.now)
+    if item is not None:
+      seq, job = item
+      if job.native_index == 67 and job.attempts == 1:
+        dropped = True
+      else:
+        response_queue.append((clock.now + delays[job.native_index % len(delays)], seq))
+        response_queue.sort()
+
+    max_pending = max(max_pending, len(worker.jobs) + int(worker.inflight is not None))
+    assert clock.now < 7.0
+
+  outputs = [m for m in collector.flat if m.address == NATIVE_08A_ADDR][first_output:]
+  assert dropped and worker.active and worker.last_failure_reason == ""
+  assert max_pending <= 4
+  assert len(outputs) == 200
+  assert [m.dat[26] & 0x3F for m in outputs] == [(13 + i) & 0x3F for i in range(200)]
+
+
+def test_oracle_releases_before_panda_watchdog_deadline():
+  worker, _, clock = start_active_worker()
+  worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110), 2)), cs())
+  with worker._cv:
+    worker._next_job_locked(clock.now)
+    clock.now = 0.091
     worker._expire_locked(clock.now)
   assert not worker.active
   assert worker.last_failure_reason == "oracle_dead"
-  assert seq not in worker.inflight
+  assert worker.inflight is None
+
+
+def test_queued_generation_cannot_be_published_after_deadline():
+  worker, collector, clock = start_active_worker()
+  initial_outputs = sum(m.address == NATIVE_08A_ADDR for m in collector.flat)
+  worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110), 2)), cs())
+  with worker._cv:
+    seq, _ = worker._next_job_locked(clock.now)
+  clock.now = 0.091
+  worker.update(batch(private_response(seq)), cs())
+  assert not worker.active
+  assert worker.last_failure_reason == "oracle_dead"
+  assert sum(m.address == NATIVE_08A_ADDR for m in collector.flat) == initial_outputs
 
 
 def test_oracle_error_status_retries_instead_of_releasing():
