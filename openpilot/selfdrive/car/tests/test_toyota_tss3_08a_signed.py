@@ -4,6 +4,7 @@ import pytest
 
 from opendbc.car import structs
 from opendbc.car.can_definitions import CanData
+from opendbc.car.secoc import attach_authenticator, build_authentication_data
 from opendbc.car.toyota.tss3 import build_host_application
 from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
 from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
@@ -16,8 +17,6 @@ from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
   NativeFreshnessTracker,
   ToyotaTss3RequestProxy,
   build_oracle_transport,
-  build_secoc_domain,
-  build_signed_frame,
   request_plane_enabled,
   resolve_epoch,
 )
@@ -120,8 +119,8 @@ def start_active_worker():
 
 
 def test_known_live_domain_and_transport_geometry():
-  assert build_secoc_domain(KNOWN_APP, 620, 1109, 8) == KNOWN_DOMAIN
-  assert build_signed_frame(KNOWN_APP, 1109, 8, KNOWN_CMAC4).hex() == KNOWN_APP.hex() + "1d64e2a5"
+  assert build_authentication_data(0x08A, KNOWN_APP, 620, 1109, 8) == KNOWN_DOMAIN
+  assert attach_authenticator(KNOWN_APP, 1109, 8, KNOWN_CMAC4).hex() == KNOWN_APP.hex() + "1d64e2a5"
   frames = build_oracle_transport(1, KNOWN_APP, 8, 1109)
   assert len(frames) == 5
   assert all(m.address == 0x1FDC0002 and m.src == ORACLE_BUS and len(m.dat) == 8 for m in frames)

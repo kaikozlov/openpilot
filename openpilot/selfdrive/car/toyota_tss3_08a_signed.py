@@ -6,7 +6,6 @@ and Panda replaces the corresponding native publication downstream.
 """
 from __future__ import annotations
 
-import struct
 import threading
 import time
 from collections import deque
@@ -15,6 +14,7 @@ from dataclasses import dataclass
 
 from opendbc.car import structs
 from opendbc.car.can_definitions import CanData
+from opendbc.car.secoc import attach_authenticator
 from opendbc.car.toyota.tss3 import (
   build_host_application,
   target_angle_deg_to_raw,
@@ -78,14 +78,6 @@ def resolve_epoch(sync_trip: int, sync_reset: int, reset_low2: int) -> tuple[int
   return None
 
 
-def build_secoc_domain(application: bytes, trip_counter: int, reset_counter: int, message_counter: int) -> bytes:
-  if len(application) != 28:
-    raise ValueError("0x08A application must be 28 bytes")
-  freshness = struct.pack(">HI", trip_counter,
-                          (reset_counter << 12) | (message_counter << 4) | ((reset_counter & 0x3) << 2))
-  return b"\x00\x8A" + application + freshness
-
-
 def build_oracle_transport(seq: int, application: bytes, message_counter: int, reset_counter: int) -> list[CanData]:
   """Build one stateless raw-classic signer transaction.
 
@@ -112,14 +104,6 @@ def build_oracle_transport(seq: int, application: bytes, message_counter: int, r
                                ORACLE_PRIVATE_SID, 0xA8, seq ^ 0xFF, 0x5A, 0xA5)),
                         ORACLE_BUS))
   return frames
-
-
-def build_signed_frame(application: bytes, reset_counter: int, message_counter: int, cmac4: bytes) -> bytes:
-  if len(application) != 28 or len(cmac4) != 4:
-    raise ValueError("invalid signed-frame geometry")
-  fv4 = ((message_counter & 0x3) << 2) | (reset_counter & 0x3)
-  mac28 = int.from_bytes(cmac4, "big") >> 4
-  return application + ((fv4 << 28) | mac28).to_bytes(4, "big")
 
 
 @dataclass(frozen=True)
@@ -406,7 +390,7 @@ class ToyotaTss3RequestProxy:
       self._retry_inflight_locked(now, "oracle_sign_status")
       return
     self.inflight = None
-    frame = build_signed_frame(job.application, job.reset_counter, job.message_counter, data[4:8])
+    frame = attach_authenticator(job.application, job.reset_counter, job.message_counter, data[4:8])
     if self.arm_pending and self.arm_host_frame is None:
       self.arm_host_frame = frame
     self._send_can([CanData(NATIVE_08A_ADDR, frame, DOWNSTREAM_BUS)])
