@@ -44,6 +44,7 @@ control_events: list[tuple[int, bool, bool, bool, float]] = []
 valid_events: list[tuple[int, bool]] = []
 request_events: list[tuple[int, int, int]] = []
 response_events: list[tuple[int, int, int]] = []
+request_reject_events: list[tuple[int, int]] = []
 first_ns: int | None = None
 last_ns: int | None = None
 
@@ -72,6 +73,8 @@ for path in files:
         address, data, bus = int(frame.address), bytes(frame.dat), int(frame.src)
         if bus == ORACLE_BUS and len(data) == 8 and data[0] == 0xC9 and address in (ORACLE_RESPONSE_ADDR, LEGACY_RESPONSE_ADDR):
           response_events.append((t, data[1], address))
+        elif bus == ORACLE_BUS + 0xC0 and address == ORACLE_REQUEST_ADDR and len(data) == 8 and data[0] == 0xC8:
+          request_reject_events.append((t, data[1] & 0x1F))
 
 if first_ns is None or last_ns is None:
   raise RuntimeError("route contains no timed events")
@@ -96,6 +99,20 @@ def recorded_latencies_ms() -> list[float]:
 
 
 recorded_latencies = recorded_latencies_ms()
+current_requests = [(t, seq) for t, seq, address in request_events if address == ORACLE_REQUEST_ADDR]
+current_responses = [(t, seq) for t, seq, address in response_events if address == ORACLE_RESPONSE_ADDR]
+if args.oracle_response_delay_ms is None and current_requests:
+  if request_reject_events:
+    raise RuntimeError(
+      f"recorded current oracle transport was rejected by Panda: "
+      f"{len(request_reject_events)} rejected C8 fragments across {len(current_requests)} requests"
+    )
+  if not current_responses:
+    raise RuntimeError(
+      f"recorded current oracle transport has {len(current_requests)} requests but zero EPS signer responses; "
+      "refusing to replace a live failure with synthetic latency"
+    )
+
 if args.oracle_response_delay_ms is not None:
   latency_samples = [args.oracle_response_delay_ms]
   latency_source = "fixed"
