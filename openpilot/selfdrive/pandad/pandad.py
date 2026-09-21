@@ -20,6 +20,8 @@ from openpilot.common.swaglog import cloudlog
 DIRECT_PANDA_LEASE_SIGNAL = signal.SIGWINCH
 DIRECT_PANDA_LEASE_PATH = Path("/tmp/openpilot-pandad-direct-lease")
 DIRECT_PANDA_LEASE_READY_PATH = Path("/tmp/openpilot-pandad-direct-ready")
+TSS3_ORACLE_HANDOFF_EXIT_CODE = 42
+TSS3_ORACLE_LEASE_WAIT_SECONDS = 1.0
 
 
 def _active_direct_panda_lease() -> str | None:
@@ -40,6 +42,16 @@ def _publish_direct_panda_lease_ready(lease: str) -> None:
   tmp = DIRECT_PANDA_LEASE_READY_PATH.with_name(f".{DIRECT_PANDA_LEASE_READY_PATH.name}.{os.getpid()}")
   tmp.write_text(lease + "\n", encoding="utf-8")
   os.replace(tmp, DIRECT_PANDA_LEASE_READY_PATH)
+
+
+def _wait_for_direct_panda_lease(timeout: float) -> str | None:
+  deadline = time.monotonic() + timeout
+  while time.monotonic() < deadline:
+    lease = _active_direct_panda_lease()
+    if lease is not None:
+      return lease
+    time.sleep(0.005)
+  return _active_direct_panda_lease()
 
 
 def get_expected_signature() -> bytes:
@@ -174,18 +186,29 @@ def main() -> None:
       # run real pandad
       os.environ['MANAGER_DAEMON'] = 'pandad'
       process = subprocess.Popen(["./pandad"], cwd=os.path.join(BASEDIR, "openpilot/selfdrive/pandad"))
-      process.wait()
+      returncode = process.wait()
       process = None
       if do_exit:
         break
 
       lease = _active_direct_panda_lease()
+      if returncode == TSS3_ORACLE_HANDOFF_EXIT_CODE and lease is None:
+        # Native pandad has already sent 10 02, published the exact catch
+        # marker, and closed its SPI handle. The daemon notification precedes
+        # creation of the cooperative lease by a few milliseconds, so bridge
+        # that bounded race without entering Panda reset/recovery.
+        lease = _wait_for_direct_panda_lease(TSS3_ORACLE_LEASE_WAIT_SECONDS)
       if direct_lease_requested or lease is not None:
         direct_lease_requested = False
         if lease is not None:
           hold_direct_panda_lease(lease)
         if do_exit:
           break
+        restart_without_recovery = True
+        continue
+
+      if returncode == TSS3_ORACLE_HANDOFF_EXIT_CODE:
+        cloudlog.error("TSS3 oracle catcher exited for handoff, but no cooperative Panda lease arrived")
         restart_without_recovery = True
         continue
 

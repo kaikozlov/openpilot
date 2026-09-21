@@ -133,6 +133,65 @@ def test_intentional_direct_panda_lease_skips_recovery():
     assert not ready.exists()
 
 
+def test_native_oracle_handoff_waits_for_lease_without_recovery():
+  with tempfile.TemporaryDirectory() as td:
+    lease = Path(td) / "lease"
+    ready = Path(td) / "ready"
+    launches = []
+    ready_observed = []
+
+    def factory(handlers):
+      class Process:
+        def __init__(self, index):
+          self.index = index
+          self.exited = False
+
+        def poll(self):
+          return 0 if self.exited else None
+
+        def send_signal(self, sig):
+          self.exited = True
+
+        def wait(self):
+          if self.index == 0:
+            ident = f"{os.getpid()} oracle-handoff-test"
+
+            def request_and_release_lease():
+              time.sleep(0.02)
+              lease.write_text(ident + "\n", encoding="utf-8")
+              deadline = time.monotonic() + 2.0
+              while time.monotonic() < deadline:
+                if ready.exists():
+                  ready_observed.append(True)
+                  break
+                time.sleep(0.005)
+              else:
+                ready_observed.append(False)
+              lease.unlink(missing_ok=True)
+
+            threading.Thread(target=request_and_release_lease, daemon=True).start()
+            self.exited = True
+            return pandad.TSS3_ORACLE_HANDOFF_EXIT_CODE
+
+          handlers[signal.SIGTERM](signal.SIGTERM, None)
+          self.exited = True
+          return 0
+
+      def popen(*args, **kwargs):
+        process = Process(len(launches))
+        launches.append(process)
+        return process
+
+      return popen
+
+    hardware = _run_main_with_processes(factory, lease, ready)
+    assert hardware.reset_count == 1
+    assert hardware.recover_count == 0
+    assert len(launches) == 2
+    assert ready_observed == [True]
+    assert not ready.exists()
+
+
 def test_unrequested_native_pandad_exit_keeps_recovery_path():
   with tempfile.TemporaryDirectory() as td:
     lease = Path(td) / "lease"

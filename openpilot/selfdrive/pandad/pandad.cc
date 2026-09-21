@@ -104,6 +104,10 @@ public:
     return state_ == State::ARMED || state_ == State::CATCHING || state_ == State::CAUGHT;
   }
 
+  bool caught() const {
+    return state_ == State::CAUGHT;
+  }
+
 private:
   enum class State { DISARMED, ARMED, CATCHING, CAUGHT, WAIT_OFF };
 
@@ -585,7 +589,7 @@ void process_peripheral_state(Panda *panda, PubMaster *pm, bool no_fan_control, 
   }
 }
 
-void pandad_run(Panda *panda) {
+bool pandad_run(Panda *panda) {
   const bool no_fan_control = getenv("NO_FAN_CONTROL") != nullptr;
   const bool spoofing_started = getenv("STARTED") != nullptr;
   const bool fake_send = getenv("FAKESEND") != nullptr;
@@ -600,11 +604,21 @@ void pandad_run(Panda *panda) {
   Tss3OracleStartupCatcher tss3_startup_catcher;
   bool engaged = false;
   bool is_onroad = false;
+  bool oracle_handoff = false;
 
   // Main loop: receive CAN first, then process lower priority panda and peripheral state.
   while (!do_exit && check_connected(panda)) {
     tss3_startup_catcher.update(panda);
     can_recv(panda, &pm, &tss3_startup_catcher);
+    if (tss3_startup_catcher.caught()) {
+      // The warm uploader is already connected passively and the catch marker
+      // has been published. Stop all native Panda traffic immediately so the
+      // managed wrapper can grant its cooperative lease without waiting for a
+      // second signal-driven shutdown round trip.
+      oracle_handoff = true;
+      do_exit = true;
+      break;
+    }
 
     // Process peripheral state at 20 Hz
     if (rk.frame() % 5 == 0) {
@@ -642,22 +656,23 @@ void pandad_run(Panda *panda) {
   }
 
   // Close relay on exit to prevent a fault
-  if (is_onroad && !engaged) {
+  if (!oracle_handoff && is_onroad && !engaged) {
     if (panda->connected()) {
       panda->set_safety_model(cereal::CarParams::SafetyModel::NO_OUTPUT);
     }
   }
 
   send_thread.join();
+  return oracle_handoff;
 }
 
-void pandad_main_thread(std::string serial) {
+int pandad_main_thread(std::string serial) {
   if (serial.empty()) {
     auto serials = Panda::list();
 
     if (serials.empty()) {
       LOGW("no pandas found, exiting");
-      return;
+      return 0;
     }
     serial = serials[0];
   }
@@ -671,10 +686,12 @@ void pandad_main_thread(std::string serial) {
     util::sleep_for(100);
   }
 
+  bool oracle_handoff = false;
   if (!do_exit) {
     LOGW("connected to panda");
-    pandad_run(panda);
+    oracle_handoff = pandad_run(panda);
   }
 
   delete panda;
+  return oracle_handoff ? TSS3_ORACLE_HANDOFF_EXIT_CODE : 0;
 }
