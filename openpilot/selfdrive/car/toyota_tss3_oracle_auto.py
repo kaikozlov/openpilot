@@ -141,6 +141,9 @@ def _claim_native_catch(path: Path = NATIVE_CATCH_PATH) -> tuple[Path, dict[str,
   programming_ns = marker.get("programming_tx_monotonic_ns")
   if not isinstance(programming_ns, int) or programming_ns <= 0:
     return None
+  wrapper_pid = marker.get("pandad_wrapper_pid")
+  if not isinstance(wrapper_pid, int) or wrapper_pid <= 1:
+    return None
 
   claimed = path.with_name(f"{path.name}.claimed-{os.getpid()}-{programming_ns}")
   try:
@@ -212,7 +215,7 @@ def _run_bringup(native_catch_path: Path, native_catch: dict[str, Any], *, catch
     return False
   cmd = [
     str(TOOL_PATH), "--topology", "camry-post-repin", "oracle-ui-resume-warm",
-    str(WARM_WORKER_PATH), str(native_catch_path), str(run_dir),
+    str(WARM_WORKER_PATH), str(native_catch_path), str(run_dir), str(native_catch["pandad_wrapper_pid"]),
   ]
   launch_ns = time.monotonic_ns()
 

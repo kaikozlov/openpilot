@@ -204,6 +204,7 @@ private:
     out << "{\n"
         << "  \"schema\": \"tss3-oracle-native-catch-v1\",\n"
         << "  \"target\": \"TOYOTA_CAMRY_TSS3\",\n"
+        << "  \"pandad_wrapper_pid\": " << getppid() << ",\n"
         << "  \"ignition_monotonic_ns\": " << ignition_ns_ << ",\n"
         << "  \"first_extended_tx_monotonic_ns\": " << first_extended_tx_ns_ << ",\n"
         << "  \"positive_extended_monotonic_ns\": " << positive_extended_ns_ << ",\n"
