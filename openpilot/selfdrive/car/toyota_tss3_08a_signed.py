@@ -1,9 +1,8 @@
-"""Exact-F33 authenticated 0x08A request-plane replacement.
+"""Exact-F33 authenticated comma-owned 0x08A request plane.
 
-The FRC supplies each source generation and all Toyota-owned request fields.
-Openpilot selectively replaces its lateral and/or ordinary DRCC acceleration
-fields on that same source generation, and the EPS RAM resident signs the
-modified application. No future-generation prediction or host SecOC key is used.
+The FRC supplies only publication cadence and SecOC freshness generations.
+Openpilot constructs the complete application, the EPS RAM resident signs it,
+and Panda replaces the corresponding native publication downstream.
 """
 from __future__ import annotations
 
@@ -17,8 +16,7 @@ from dataclasses import dataclass
 from opendbc.car import structs
 from opendbc.car.can_definitions import CanData
 from opendbc.car.toyota.tss3 import (
-  TSS3_LATERAL_SOURCE_IDS,
-  build_request_application,
+  build_host_application,
   target_angle_deg_to_raw,
 )
 from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
@@ -123,25 +121,13 @@ def build_signed_frame(application: bytes, reset_counter: int, message_counter: 
   return application + ((fv4 << 28) | mac28).to_bytes(4, "big")
 
 
-def build_id11_application(native_application: bytes, target_angle_raw: int) -> bytes:
-  """Compatibility wrapper for lateral-only analysis and tests."""
-  return build_request_application(native_application, lat_active=True, target_angle_raw=target_angle_raw,
-                                   long_control=False, accel=0.0)
-
-
 @dataclass(frozen=True)
 class NativeEvent:
   index: int
-  frame: bytes
-  application: bytes
   b26: int
   trip_counter: int
   reset_counter: int
   message_low2: int
-
-  @property
-  def target_id(self) -> int:
-    return self.application[21] & 0x3F
 
 
 class NativeFreshnessTracker:
@@ -223,9 +209,9 @@ class ToyotaTss3RequestProxy:
     self.control_enabled = False
     self.control_lat_active = False
     self.control_target_angle_raw = 0
-    self.control_long_enabled = False
     self.control_long_active = False
     self.control_accel = 0.0
+    self.control_set_speed_kph = 0.0
     self.sync_trip: int | None = None
     self.sync_reset: int | None = None
     self.native_index = 0
@@ -237,8 +223,7 @@ class ToyotaTss3RequestProxy:
 
     self.active = False
     self.arm_pending = False
-    self.arm_clone_frame: bytes | None = None
-    self.handoff_completed = False
+    self.arm_host_frame: bytes | None = None
     self.pending_outputs: dict[int, bytes | None] = {}
     self.next_output_index: int | None = None
 
@@ -253,36 +238,31 @@ class ToyotaTss3RequestProxy:
     return self.tracker.ready
 
   def set_control(self, enabled: bool, lat_active: bool, target_angle_deg: float,
-                  long_enabled: bool = False, long_active: bool = False, accel: float = 0.0) -> None:
+                  long_active: bool = False, accel: float = 0.0,
+                  set_speed_kph: float = 0.0) -> None:
     with self._cv:
       was_enabled = self.control_enabled
       self.control_enabled = bool(enabled)
       self.control_lat_active = self.control_enabled and bool(lat_active)
       self.control_target_angle_raw = target_angle_deg_to_raw(float(target_angle_deg))
-      self.control_long_enabled = self.control_enabled and bool(long_enabled)
-      self.control_long_active = self.control_long_enabled and bool(long_active)
+      self.control_long_active = self.control_enabled and bool(long_active)
       self.control_accel = float(accel) if self.control_long_active else 0.0
+      self.control_set_speed_kph = float(set_speed_kph)
       if was_enabled and not self.control_enabled:
         self._release_control_locked()
       elif not was_enabled and self.control_enabled:
         self._maybe_arm_locked()
 
-  def consume_handoff_completed(self) -> bool:
-    with self._cv:
-      completed = self.handoff_completed
-      self.handoff_completed = False
-      return completed
-
   def authority_unavailable(self) -> bool:
     with self._cv:
-      # The one-generation atomic handoff is expected and should not surface as
-      # a steering-unavailable warning. A failed handoff clears arm_pending and
-      # is reported normally on the next state update.
+      # Signing the first host generation is expected and should not surface as
+      # a steering-unavailable warning. A rejected first frame clears
+      # arm_pending and is reported normally on the next state update.
       return self.control_enabled and not self.active and not self.arm_pending
 
   def longitudinal_authority_unavailable(self) -> bool:
     with self._cv:
-      return self.control_long_enabled and not self.active and not self.arm_pending
+      return self.control_enabled and not self.active and not self.arm_pending
 
   def _record_failure_locked(self, reason: str) -> None:
     self.last_failure_reason = reason
@@ -302,8 +282,7 @@ class ToyotaTss3RequestProxy:
       self._send_can([make_admin(False)])
     self.active = False
     self.arm_pending = False
-    self.arm_clone_frame = None
-    self.handoff_completed = False
+    self.arm_host_frame = None
 
   def _release_control_locked(self) -> None:
     self._release_locked()
@@ -318,7 +297,7 @@ class ToyotaTss3RequestProxy:
       return
     self._send_can([make_admin(True)])
     self.arm_pending = True
-    self.arm_clone_frame = None
+    self.arm_host_frame = None
 
   def _make_native_event_locked(self, frame: bytes) -> NativeEvent | None:
     if len(frame) != 32 or self.sync_trip is None or self.sync_reset is None:
@@ -328,8 +307,7 @@ class ToyotaTss3RequestProxy:
     if epoch is None:
       return None
     self.native_index += 1
-    return NativeEvent(self.native_index, frame, frame[:28], frame[26] & 0x3F,
-                       epoch[0], epoch[1], (fv4 >> 2) & 0x3)
+    return NativeEvent(self.native_index, frame[26] & 0x3F, epoch[0], epoch[1], (fv4 >> 2) & 0x3)
 
   def _observe_sync_locked(self, data: bytes) -> None:
     try:
@@ -338,19 +316,17 @@ class ToyotaTss3RequestProxy:
       pass
 
   def _queue_sign_locked(self, event: NativeEvent) -> None:
-    if self.control_lat_active and event.target_id not in TSS3_LATERAL_SOURCE_IDS:
-      self._authority_failure_locked("unsupported_native_lateral_id")
-      return
     message_counter = self.tracker.message_counter
     if message_counter is None:
       self._authority_failure_locked("freshness_not_ready")
       return
-    application = build_request_application(
-      event.application,
+    application = build_host_application(
       lat_active=self.control_lat_active,
       target_angle_raw=self.control_target_angle_raw,
-      long_control=self.control_long_enabled,
+      long_active=self.control_long_active,
       accel=self.control_accel,
+      set_speed_kph=self.control_set_speed_kph,
+      request_sequence=event.b26,
     )
     if self.next_output_index is None:
       self.next_output_index = event.index
@@ -376,14 +352,7 @@ class ToyotaTss3RequestProxy:
     if not ready:
       return
 
-    if self.arm_pending:
-      if self.arm_clone_frame is not None:
-        self._authority_failure_locked("handoff_source_overrun")
-        return
-      self.arm_clone_frame = event.frame
-      self.next_output_index = event.index + 1
-      self._send_can([CanData(NATIVE_08A_ADDR, event.frame, DOWNSTREAM_BUS)])
-    elif self.active:
+    if self.arm_pending or self.active:
       self._queue_sign_locked(event)
 
     self._maybe_arm_locked()
@@ -395,16 +364,15 @@ class ToyotaTss3RequestProxy:
       return
     if address != NATIVE_08A_ADDR:
       return
-    if src == DOWNSTREAM_BUS + PANDA_RETURNED_OFFSET and self.arm_pending and data == self.arm_clone_frame:
+    if src == DOWNSTREAM_BUS + PANDA_RETURNED_OFFSET and self.arm_pending and data == self.arm_host_frame:
       self.active = True
       self.arm_pending = False
-      self.handoff_completed = True
-      self.arm_clone_frame = None
-    elif src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET and self.arm_pending and data == self.arm_clone_frame:
-      self._authority_failure_locked("handoff_clone_rejected")
+      self.arm_host_frame = None
+    elif src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET and self.arm_pending and data == self.arm_host_frame:
+      self._authority_failure_locked("handoff_host_frame_rejected")
     elif src == DOWNSTREAM_BUS + PANDA_REJECTED_OFFSET and self.active:
       # A rejected actuation sample is an ordinary Panda safety outcome. Panda
-      # keeps the authenticated request plane and the next source generation
+      # keeps the authenticated request plane and the next freshness generation
       # recovers from the safety baseline; it is not an authority fault.
       cloudlog.event("toyota_f33_request_plane_tx_reject", native_index=self.native_index)
 
@@ -413,7 +381,11 @@ class ToyotaTss3RequestProxy:
       return
     out = []
     while self.next_output_index in self.pending_outputs and self.pending_outputs[self.next_output_index] is not None:
-      out.append(CanData(NATIVE_08A_ADDR, self.pending_outputs.pop(self.next_output_index), DOWNSTREAM_BUS))
+      data = self.pending_outputs.pop(self.next_output_index)
+      assert data is not None
+      if self.arm_pending and self.arm_host_frame is None:
+        self.arm_host_frame = data
+      out.append(CanData(NATIVE_08A_ADDR, data, DOWNSTREAM_BUS))
       self.next_output_index += 1
     if out:
       self._send_can(out)
@@ -435,7 +407,7 @@ class ToyotaTss3RequestProxy:
     if self.next_output_index is None:
       return
 
-    # Only the oldest unsigned source generation can stall downstream output.
+    # Only the oldest unsigned freshness generation can stall downstream output.
     # Newer responses may remain buffered without affecting authority.
     for seq, job in tuple(self.inflight.items()):
       if job.native_index != self.next_output_index:
@@ -474,7 +446,7 @@ class ToyotaTss3RequestProxy:
 
     # On one CAN bus, observing a later generation's reply while the oldest
     # generation is still unanswered is direct evidence that the older reply was
-    # lost. Retry that same source generation immediately instead of releasing.
+    # lost. Retry that same freshness generation immediately instead of releasing.
     if self.next_output_index is not None and job.native_index > self.next_output_index:
       self._retry_blocking_job_locked(now, "later_oracle_response", force=True)
     self._flush_outputs_locked()

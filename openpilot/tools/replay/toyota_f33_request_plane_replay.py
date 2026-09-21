@@ -321,12 +321,16 @@ with structs.CarParams.from_bytes(cp_bytes) as cp:
         safety_invalid |= not safety.safety_config_valid()
     else:
       with structs.CarControl.from_bytes(payload) as CC:
-        if proxy.consume_handoff_completed() and current_cs[0] is not None:
+        if bool(CC.enabled) and not was_enabled and current_cs[0] is not None:
           ci.CC.reset_tss3_lateral_target(current_cs[0].steeringAngleDeg + current_cs[0].steeringAngleOffsetDeg)
         out, can_sends = ci.apply(CC, t)
         if can_sends:
           host_tx(can_sends); drain_echo()
-        proxy.set_control(CC.enabled, CC.latActive, out.steeringAngleDeg); drain_echo()
+        proxy.set_control(CC.enabled, CC.latActive, out.steeringAngleDeg,
+                          long_active=cp.openpilotLongitudinalControl and CC.longActive,
+                          accel=out.accel,
+                          set_speed_kph=current_cs[0].vCruise if current_cs[0] is not None else 0.0)
+        drain_echo()
         if bool(CC.latActive) and not was_lat_active: active_windows += 1
         if bool(CC.enabled) and not was_enabled: enabled_windows += 1
         was_lat_active = bool(CC.latActive)

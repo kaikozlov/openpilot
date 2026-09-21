@@ -249,10 +249,9 @@ class Car:
       self.params.put_bool("ControlsReady", True)
 
     if self.sm.all_alive(['carControl']):
-      if self.tss3_08a_proxy is not None and self.tss3_08a_proxy.consume_handoff_completed():
-        # The signer handoff is asynchronous. Align the normal CarController
-        # rate-limit baseline once with Panda's measured-angle baseline before
-        # the first modified source generation is transmitted.
+      if self.tss3_08a_proxy is not None and CC.enabled and not self.CC_prev.enabled:
+        # The first host-owned application is already an ordinary bounded
+        # command, so seed CarController from measured steering before apply.
         self.CI.CC.reset_tss3_lateral_target(CS.steeringAngleDeg + CS.steeringAngleOffsetDeg)
 
       # send car controls over can
@@ -260,9 +259,9 @@ class Car:
       self.last_actuators_output, can_sends = self.CI.apply(CC, now_nanos)
       if self.tss3_08a_proxy is not None:
         self.tss3_08a_proxy.set_control(CC.enabled, CC.latActive, self.last_actuators_output.steeringAngleDeg,
-                                       long_enabled=self.CP.openpilotLongitudinalControl and CC.enabled,
                                        long_active=self.CP.openpilotLongitudinalControl and CC.longActive,
-                                       accel=self.last_actuators_output.accel)
+                                       accel=self.last_actuators_output.accel,
+                                       set_speed_kph=CS.vCruise)
       self._send_can(can_sends, valid=CS.canValid)
 
       self.CC_prev = CC

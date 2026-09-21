@@ -4,7 +4,7 @@ import pytest
 
 from opendbc.car import structs
 from opendbc.car.can_definitions import CanData
-from opendbc.car.toyota.tss3 import build_request_application
+from opendbc.car.toyota.tss3 import build_host_application
 from opendbc.car.toyota.values import CAR, ToyotaSafetyFlags
 from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
   ADMIN_ADDR, ADMIN_BUS, DOWNSTREAM_BUS, NATIVE_08A_ADDR, PANDA_REJECTED_OFFSET,
@@ -14,7 +14,6 @@ from openpilot.selfdrive.car.toyota_tss3_08a_signed import (
   NativeEvent,
   NativeFreshnessTracker,
   ToyotaTss3RequestProxy,
-  build_id11_application,
   build_oracle_transport,
   build_secoc_domain,
   build_signed_frame,
@@ -55,8 +54,7 @@ def native_frame(b26: int, message: int, *, reset: int = 1109, target_id: int = 
 
 
 def event(index: int, b26: int, message: int, *, reset: int = 1109, target_id: int = 0) -> NativeEvent:
-  frame = native_frame(b26, message, reset=reset, target_id=target_id)
-  return NativeEvent(index, frame, frame[:28], b26, 620, reset, message & 0x3)
+  return NativeEvent(index, b26, 620, reset, message & 0x3)
 
 
 def batch(*frames: tuple[int, bytes, int]):
@@ -98,12 +96,16 @@ def seed_at_next_epoch(worker: ToyotaTss3RequestProxy, *, reset: int = 1109, b26
 
 def complete_handoff(worker: ToyotaTss3RequestProxy, collector: Collector, *, reset: int = 1110, b26: int = 12):
   state = cs()
-  worker.set_control(True, True, 0.0)
+  worker.set_control(True, True, 0.0, long_active=True, set_speed_kph=70.0)
   assert worker.arm_pending
   source = native_frame(b26, 2, reset=reset)
   worker.update(batch((NATIVE_08A_ADDR, source, 2)), state)
-  assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, source, DOWNSTREAM_BUS)
-  worker.update(batch((NATIVE_08A_ADDR, source, DOWNSTREAM_BUS + 0x80)), state)
+  with worker._cv:
+    seq, _ = worker._next_job_locked(worker._monotonic())
+  worker.update(batch(private_response(seq)), state)
+  host = collector.flat[-1]
+  assert host.address == NATIVE_08A_ADDR and host.dat[:28] != source[:28]
+  worker.update(batch((NATIVE_08A_ADDR, host.dat, DOWNSTREAM_BUS + 0x80)), state)
   assert worker.active and not worker.arm_pending
 
 
@@ -159,95 +161,24 @@ def test_freshness_gap_drops_ready_state_until_next_reset_boundary():
   assert ready and not lost and tracker.message_counter == 1
 
 
-def test_id11_builder_has_only_bounded_lateral_edits():
-  for native_id, gain in ((0, 0), (4, 100), (11, 100), (18, 50)):
-    app = bytearray(native_frame(4, 5, target_id=native_id)[:28])
-    app[24] = gain
-    out = build_id11_application(bytes(app), -123)
-    assert (out[21] & 0x3F) == 11
-    assert out[18:20] == (-123).to_bytes(2, "big", signed=True)
-    assert out[24] == 100
-    for i in range(28):
-      if i not in (18, 19, 21, 24):
-        assert out[i] == app[i]
+def test_host_builder_owns_complete_active_application():
+  out = build_host_application(lat_active=True, target_angle_raw=-123,
+                               long_active=True, accel=-0.5,
+                               set_speed_kph=70.0, request_sequence=12)
+  assert out.hex() == "0000000880002d47fe0c46fe0c7fff007fffff85c00b100064000c00"
 
-
-def test_request_builder_replaces_known_ordinary_longitudinal_states():
-  app = bytearray(native_frame(4, 5, target_id=0)[:28])
-  app[6:8] = bytes((0x2D, 0x47))
-  out = build_request_application(bytes(app), lat_active=False, target_angle_raw=0,
-                                  long_control=True, accel=-0.5)
-  assert out[8:10] == (-500).to_bytes(2, "big", signed=True)
-  assert out[11:13] == (-500).to_bytes(2, "big", signed=True)
-  for i in range(28):
-    if i not in (8, 9, 11, 12):
-      assert out[i] == app[i]
-
-  idle = bytearray(app)
-  idle[6:8] = bytes((0x00, 0x12))
-  promoted = build_request_application(bytes(idle), lat_active=False, target_angle_raw=0,
-                                       long_control=True, accel=0.3)
-  assert promoted[6:8] == bytes((0x2D, 0x47))
-  assert promoted[8:10] == (300).to_bytes(2, "big", signed=True)
-  assert promoted[11:13] == (300).to_bytes(2, "big", signed=True)
-  for i in range(28):
-    if i not in (6, 7, 8, 9, 11, 12):
-      assert promoted[i] == idle[i]
-
-  driver_override = bytearray(app)
-  driver_override[6:8] = bytes((0x2C, 0x46))
-  driver_override[8:10] = (714).to_bytes(2, "big", signed=True)
-  driver_override[11:13] = (714).to_bytes(2, "big", signed=True)
-  inactive = build_request_application(bytes(driver_override), lat_active=False, target_angle_raw=0,
-                                       long_control=True, accel=0.0)
+  inactive = build_host_application(lat_active=False, target_angle_raw=42,
+                                    long_active=False, accel=1.0,
+                                    set_speed_kph=70.0, request_sequence=13)
   assert inactive[6:8] == bytes((0x2D, 0x47))
-  assert inactive[8:10] == bytes(2)
-  assert inactive[11:13] == bytes(2)
+  assert inactive[8:10] == inactive[11:13] == bytes(2)
+  assert inactive[18:20] == (42).to_bytes(2, "big", signed=True)
+  assert inactive[21] == 0 and inactive[24] == 50
 
-
-def test_request_builder_preserves_alternate_toyota_longitudinal_tuple_and_disables_lateral():
-  app = bytearray(native_frame(4, 5, target_id=18)[:28])
-  app[5:13] = bytes.fromhex("043553ff51000000")
-  out = build_request_application(bytes(app), lat_active=False, target_angle_raw=0,
-                                  long_control=True, accel=-0.5)
-  assert out[5:13] == app[5:13]
-  assert out[18:20] == bytes(2)
-  assert (out[21] & 0x3F) == 0
-  assert out[24] == app[24]
-  for i in range(28):
-    if i not in (18, 19, 21, 24):
-      assert out[i] == app[i]
-
-  combined = build_request_application(bytes(app), lat_active=True, target_angle_raw=-123,
-                                       long_control=True, accel=-0.5)
-  assert combined[5:13] == app[5:13]
-  assert combined[18:20] == (-123).to_bytes(2, "big", signed=True)
-  assert (combined[21] & 0x3F) == 11
-
-  delayed_hold = bytearray(app)
-  delayed_hold[4] |= 0x20
-  delayed_hold[6:8] = bytes((0x2D, 0x67))
-  resumed = build_request_application(bytes(delayed_hold), lat_active=False, target_angle_raw=0,
-                                      long_control=True, accel=0.5)
-  assert resumed[4] == (delayed_hold[4] & ~0x20)
-  assert resumed[6:8] == bytes((0x2D, 0x47))
-  assert resumed[8:10] == (500).to_bytes(2, "big", signed=True)
-  assert resumed[11:13] == (500).to_bytes(2, "big", signed=True)
-  for i in range(28):
-    if i not in (4, 6, 7, 8, 9, 11, 12, 18, 19, 21, 24):
-      assert resumed[i] == delayed_hold[i]
-
-
-def test_request_builder_preserves_unknown_toyota_lateral_interventions():
-  app = bytearray(native_frame(4, 5, target_id=1, angle_raw=123)[:28])
-  app[24] = 50
-  inactive = build_request_application(bytes(app), lat_active=False, target_angle_raw=0,
-                                       long_control=False, accel=0.0)
-  assert inactive == app
-
-  with pytest.raises(ValueError, match="unsupported native lateral request ID 1"):
-    build_request_application(bytes(app), lat_active=True, target_angle_raw=0,
-                              long_control=False, accel=0.0)
+  with pytest.raises(ValueError, match="request sequence"):
+    build_host_application(lat_active=True, target_angle_raw=0,
+                           long_active=True, accel=0.0,
+                           set_speed_kph=0.0, request_sequence=64)
 
 
 def test_request_plane_enable_is_topology_flag_only():
@@ -268,20 +199,25 @@ def test_proxy_seeds_passively_without_any_oracle_recovery_jobs():
   assert not any(m.address == 0x1FDC0002 for m in collector.flat)
 
 
-def test_handoff_is_one_exact_source_clone_without_transient_unavailable_warning():
+def test_handoff_waits_for_first_signed_host_frame_without_cloning_source():
   collector = Collector()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False)
   seed_at_next_epoch(worker)
-  worker.set_control(True, True, 0.0)
+  worker.set_control(True, True, 0.0, long_active=True)
   assert worker.arm_pending and not worker.authority_unavailable()
   first = native_frame(12, 2, reset=1110)
   worker.update(batch((NATIVE_08A_ADDR, first, 2)), cs())
-  assert collector.flat[-1] == CanData(NATIVE_08A_ADDR, first, DOWNSTREAM_BUS)
-  # A second source before the clone echo aborts; no second Toyota clone is emitted.
-  count = sum(m.address == NATIVE_08A_ADDR for m in collector.flat)
+  assert not any(m.address == NATIVE_08A_ADDR for m in collector.flat)
+  # Oracle latency may span more than one source tick without aborting handoff.
   worker.update(batch((NATIVE_08A_ADDR, native_frame(13, 3, reset=1110), 2)), cs())
-  assert not worker.active and not worker.arm_pending and worker.authority_unavailable()
-  assert sum(m.address == NATIVE_08A_ADDR for m in collector.flat) == count
+  assert worker.arm_pending and len(worker.jobs) == 2
+  with worker._cv:
+    seq, _ = worker._next_job_locked(worker._monotonic())
+  worker.update(batch(private_response(seq)), cs())
+  host = collector.flat[-1]
+  assert host.dat[:28] != first[:28]
+  worker.update(batch((NATIVE_08A_ADDR, host.dat, DOWNSTREAM_BUS + 0x80)), cs())
+  assert worker.active and not worker.arm_pending
 
 
 def test_sign_transport_is_one_stateless_classic_batch():
@@ -300,7 +236,7 @@ def test_sign_transport_is_one_stateless_classic_batch():
   assert all(m.address == 0x1FDC0002 and m.src == ORACLE_BUS for m in frames)
 
 
-def test_sign_response_publishes_same_source_generation():
+def test_sign_response_publishes_host_application_on_same_freshness_generation():
   worker, collector, clock = start_active_worker()
   worker.set_control(True, True, 1.0)
   source = native_frame(13, 3, reset=1110, target_id=18, angle_raw=10)
@@ -313,6 +249,7 @@ def test_sign_response_publishes_same_source_generation():
   assert (out.dat[21] & 0x3F) == 11 and out.dat[24] == 100
   assert out.dat[26] == source[26]
   assert (out.dat[28] >> 4) == (source[28] >> 4)
+  assert out.dat[:18] != source[:18]
 
 
 def test_long_only_control_owns_request_plane_and_replaces_bounds():
@@ -320,11 +257,15 @@ def test_long_only_control_owns_request_plane_and_replaces_bounds():
   clock = Clock()
   worker = ToyotaTss3RequestProxy(collector, start_thread=False, monotonic=clock)
   seed_at_next_epoch(worker)
-  worker.set_control(True, False, 0.0, long_enabled=True, long_active=True, accel=-0.5)
+  worker.set_control(True, False, 0.0, long_active=True, accel=-0.5)
   assert worker.arm_pending
   handoff = native_frame(12, 2, reset=1110)
   worker.update(batch((NATIVE_08A_ADDR, handoff, 2)), cs())
-  worker.update(batch((NATIVE_08A_ADDR, handoff, DOWNSTREAM_BUS + 0x80)), cs())
+  with worker._cv:
+    handoff_seq, _ = worker._next_job_locked(clock.now)
+  worker.update(batch(private_response(handoff_seq)), cs())
+  handoff_host = collector.flat[-1].dat
+  worker.update(batch((NATIVE_08A_ADDR, handoff_host, DOWNSTREAM_BUS + 0x80)), cs())
   assert worker.active
 
   source = native_frame(13, 3, reset=1110, target_id=18, angle_raw=10)
@@ -338,13 +279,13 @@ def test_long_only_control_owns_request_plane_and_replaces_bounds():
   assert job.application[11:13] == (-500).to_bytes(2, "big", signed=True)
   assert job.application[18:20] == bytes(2)
   assert (job.application[21] & 0x3F) == 0
-  assert job.application[24] == source[24]
+  assert job.application[24] == 50
   worker.update(batch(private_response(seq)), cs())
   assert collector.batches[-1][0].dat[8:10] == (-500).to_bytes(2, "big", signed=True)
 
   # Gas override keeps the longitudinal session and request-plane handoff, but
   # publishes openpilot's normal inactive acceleration instead of stock DRCC.
-  worker.set_control(True, False, 0.0, long_enabled=True, long_active=False, accel=-0.5)
+  worker.set_control(True, False, 0.0, long_active=False, accel=-0.5)
   assert worker.active and not worker.longitudinal_authority_unavailable()
   inactive_source = native_frame(14, 4, reset=1110, target_id=18, angle_raw=10)
   inactive_app = bytearray(inactive_source[:28])
@@ -359,7 +300,7 @@ def test_long_only_control_owns_request_plane_and_replaces_bounds():
   assert inactive_job.application[8:10] == bytes(2)
   assert inactive_job.application[11:13] == bytes(2)
 
-  worker.set_control(False, False, 0.0, long_enabled=False)
+  worker.set_control(False, False, 0.0)
   assert not worker.active
 
 
@@ -375,9 +316,9 @@ def test_lat_active_changes_do_not_drop_engagement_owned_authority():
     _, job = worker._next_job_locked(clock.now)
   assert job.application[18:20] == bytes(2)
   assert (job.application[21] & 0x3F) == 0
-  assert job.application[24] == source[24]
+  assert job.application[24] == 50
 
-  worker.set_control(False, False, 0.0, long_enabled=False)
+  worker.set_control(False, False, 0.0)
   assert not worker.active
   assert sum(m.address == ADMIN_ADDR and m.dat[3] == 0 for m in collector.flat) == releases_before + 1
 
