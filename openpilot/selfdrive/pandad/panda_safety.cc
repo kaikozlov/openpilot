@@ -69,6 +69,8 @@ void PandaSafety::setSafetyMode(const std::string &params_string) {
   // On the stock Toyota-B harness, the TSS3 EPS/Brake network is unsplit Panda
   // bus 1. The resident-signer sideband is Classical CAN, so do not promote it
   // from sticky bus-wide FD state learned from native traffic.
+  // These mirror ToyotaSafetyFlags.TSS3_SIGNER / TSS3_08A_HOST defined in
+  // opendbc (opendbc/car/toyota/values.py); keep in sync with that source.
   constexpr uint16_t TOYOTA_PARAM_TSS3_SIGNER = 16U << 8;
   constexpr uint16_t TOYOTA_PARAM_TSS3_08A_HOST = 64U << 8;
   const bool toyota_tss3_signer = (safety_model == cereal::CarParams::SafetyModel::TOYOTA) &&
