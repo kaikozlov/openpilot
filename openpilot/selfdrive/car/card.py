@@ -40,7 +40,6 @@ def obd_callback(params: Params) -> ObdCallback:
   return set_obd_multiplexing
 
 
-
 def can_comm_callbacks(logcan: messaging.SubSocket, sendcan: messaging.PubSocket) -> tuple[CanRecvCallable, CanSendCallable]:
   def can_recv(wait_for_one: bool = False) -> list[list[CanData]]:
     """
@@ -68,6 +67,7 @@ class Car:
     self.can_sock = messaging.sub_sock('can', timeout=20)
     self.sm = messaging.SubMaster(['pandaStates', 'carControl', 'onroadEvents'])
     self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'radarTracks'])
+
     self.can_rcv_cum_timeout_counter = 0
 
     self.CC_prev = car.CarControl.new_message()

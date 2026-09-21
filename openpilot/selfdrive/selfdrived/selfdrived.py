@@ -45,6 +45,7 @@ MonitoringPolicy = log.DriverMonitoringState.MonitoringPolicy
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
+
 class SelfdriveD:
   def __init__(self, CP=None):
     self.params = Params()
