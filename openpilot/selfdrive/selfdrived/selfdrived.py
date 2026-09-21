@@ -45,15 +45,6 @@ MonitoringPolicy = log.DriverMonitoringState.MonitoringPolicy
 
 IGNORED_SAFETY_MODES = (SafetyModel.silent, SafetyModel.noOutput)
 
-
-def personality_for_follow_distance_bars(follow_distance_bars: int):
-  if follow_distance_bars <= 1:
-    return log.LongitudinalPersonality.aggressive
-  if follow_distance_bars >= 4:
-    return log.LongitudinalPersonality.relaxed
-  return log.LongitudinalPersonality.standard
-
-
 class SelfdriveD:
   def __init__(self, CP=None):
     self.params = Params()
@@ -135,7 +126,6 @@ class SelfdriveD:
     self.not_running_prev = None
     self.experimental_mode = False
     self.personality = self.params.get("LongitudinalPersonality", return_default=True)
-    self.follow_distance_bars = 0
     self.recalibrating_seen = False
     self.dm_lockout_set = False
     self.dm_uncertain_alerted = False
@@ -465,21 +455,9 @@ class SelfdriveD:
       if self.sm['modelV2'].frameDropPerc > 1:
         self.events.add(EventName.modeldLagging)
 
-    # Prefer an absolute stock following-distance selection when the car
-    # exposes one. Cars with only a momentary button retain the normal
-    # personality-cycle behavior.
+    # Decrement personality on distance button press
     if self.CP.openpilotLongitudinalControl:
-      follow_distance_bars = CS.cruiseState.followDistanceBars
-      if follow_distance_bars > 0:
-        bars_changed = self.follow_distance_bars > 0 and follow_distance_bars != self.follow_distance_bars
-        self.follow_distance_bars = follow_distance_bars
-        personality = personality_for_follow_distance_bars(follow_distance_bars)
-        if personality != self.personality:
-          self.personality = personality
-          self.params.put('LongitudinalPersonality', self.personality)
-          if bars_changed:
-            self.events.add(EventName.personalityChanged)
-      elif any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
+      if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
         self.personality = (self.personality - 1) % 3
         self.params.put('LongitudinalPersonality', self.personality)
         self.events.add(EventName.personalityChanged)
@@ -591,8 +569,7 @@ class SelfdriveD:
       self.is_ldw_enabled = self.params.get_bool("IsLdwEnabled")
       self.disengage_on_accelerator = self.params.get_bool("DisengageOnAccelerator")
       self.experimental_mode = self.params.get_bool("ExperimentalMode") and self.CP.openpilotLongitudinalControl
-      if self.follow_distance_bars <= 0:
-        self.personality = self.params.get("LongitudinalPersonality", return_default=True)
+      self.personality = self.params.get("LongitudinalPersonality", return_default=True)
       time.sleep(0.1)
 
   def run(self):
