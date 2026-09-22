@@ -108,7 +108,7 @@ def _start_warm_worker() -> bool:
       _warm_worker = None
       return False
     if WARM_WORKER_PATH.is_socket():
-      _write_status("armed", "Automatic TSS3 oracle uploader is warm and waiting for native Panda ignition detection.")
+      _write_status("armed", "Automatic TSS3 oracle uploader is warm and waiting for native vehicle wake/start detection.")
       return True
     time.sleep(0.02)
 
@@ -168,7 +168,19 @@ def _record_trigger_timing(run_dir: Path, trigger_fallback: Path, *, native_catc
   if isinstance(programming_ns, int):
     record["programming_to_daemon_ms"] = (catch_received_ns - programming_ns) / 1e6
 
+  wake_ns = native_catch.get("wake_trigger_monotonic_ns")
   ignition_ns = native_catch.get("ignition_monotonic_ns")
+  if isinstance(wake_ns, int) and wake_ns > 0:
+    for key, out_key in (
+      ("first_extended_tx_monotonic_ns", "wake_to_first_10_03_ms"),
+      ("ignition_monotonic_ns", "wake_to_ignition_ms"),
+      ("positive_extended_monotonic_ns", "wake_to_50_03_ms"),
+      ("programming_tx_monotonic_ns", "wake_to_10_02_ms"),
+    ):
+      value = native_catch.get(key)
+      if isinstance(value, int) and value > 0:
+        record[out_key] = (value - wake_ns) / 1e6
+
   if isinstance(ignition_ns, int) and ignition_ns > 0:
     for key, out_key in (
       ("first_extended_tx_monotonic_ns", "ignition_to_first_10_03_ms"),

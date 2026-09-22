@@ -32,8 +32,12 @@ ExitHandler do_exit;
 namespace {
 constexpr uint32_t TSS3_EPS_TX = 0x7A1U;
 constexpr uint32_t TSS3_EPS_RX = 0x7A9U;
+constexpr uint32_t TSS3_WAKE_TRIGGER_ADDR = 0x45AU;
 constexpr uint8_t TSS3_DIAG_BUS = 0U;
 constexpr uint64_t TSS3_EXTENDED_PERIOD_NS = 20ULL * 1000ULL * 1000ULL;
+constexpr uint64_t TSS3_PREWARM_PERIOD_NS = 100ULL * 1000ULL * 1000ULL;
+constexpr uint64_t TSS3_PREWARM_MAX_NS = 60ULL * 1000ULL * 1000ULL * 1000ULL;
+constexpr uint64_t TSS3_WAKE_IDLE_NS = 3ULL * 1000ULL * 1000ULL * 1000ULL;
 constexpr uint64_t TSS3_CATCH_TIMEOUT_NS = 2ULL * 1000ULL * 1000ULL * 1000ULL;
 constexpr uint64_t TSS3_STATE_POLL_NS = 10ULL * 1000ULL * 1000ULL;
 constexpr uint64_t TSS3_PARAM_POLL_NS = 250ULL * 1000ULL * 1000ULL;
@@ -52,7 +56,7 @@ public:
       enabled_ = exact_f33_auto_enabled();
       last_param_check_ns_ = now;
       param_initialized_ = true;
-      if (!enabled_ && (state_ == State::ARMED || state_ == State::CATCHING)) {
+      if (!enabled_ && active()) {
         LOGW("TSS3 oracle startup catcher disarmed");
         state_ = ignition_initialized_ && last_ignition_ ? State::WAIT_OFF : State::DISARMED;
       }
@@ -67,22 +71,47 @@ public:
       }
     }
 
-    if (state_ == State::CATCHING) {
+    if (state_ == State::PREWARM) {
+      if ((now - wake_ns_) > TSS3_PREWARM_MAX_NS) {
+        LOGW("TSS3 oracle startup prewarm reached 60 s; waiting for sleep or ignition");
+        state_ = State::WAIT_SLEEP;
+      } else if ((now - last_native_rx_ns_) > TSS3_WAKE_IDLE_NS) {
+        LOGW("TSS3 oracle startup prewarm saw vehicle bus return quiet; re-arming");
+        reset_wake_attempt();
+        state_ = State::ARMED;
+      } else if (now >= next_extended_tx_ns_) {
+        send_extended(panda, now, TSS3_PREWARM_PERIOD_NS);
+      }
+    } else if (state_ == State::WAIT_SLEEP) {
+      if ((now - last_native_rx_ns_) > TSS3_WAKE_IDLE_NS) {
+        LOGW("TSS3 oracle startup wake interval ended; re-arming");
+        reset_wake_attempt();
+        state_ = State::ARMED;
+      }
+    } else if (state_ == State::CATCHING) {
       if ((now - ignition_ns_) > TSS3_CATCH_TIMEOUT_NS) {
         LOGW("TSS3 oracle startup catcher timed out without exact 50 03");
         state_ = State::WAIT_OFF;
         return;
       }
       if (now >= next_extended_tx_ns_) {
-        send_extended(panda, now);
+        send_extended(panda, now, TSS3_EXTENDED_PERIOD_NS);
       }
     }
   }
 
   void process_rx(Panda *panda, const std::vector<can_frame> &frames) {
-    if (state_ != State::CATCHING) return;
     for (const auto &frame : frames) {
-      if (frame.address == TSS3_EPS_RX && frame.src == TSS3_DIAG_BUS && frame.dat == TSS3_POSITIVE_EXTENDED_FRAME) {
+      if (frame.src == TSS3_DIAG_BUS) {
+        last_native_rx_ns_ = nanos_since_boot();
+      }
+
+      if (state_ == State::ARMED && frame.src == TSS3_DIAG_BUS && frame.address == TSS3_WAKE_TRIGGER_ADDR) {
+        start_prewarm(panda, nanos_since_boot());
+      }
+
+      if (state_ == State::CATCHING && frame.address == TSS3_EPS_RX &&
+          frame.src == TSS3_DIAG_BUS && frame.dat == TSS3_POSITIVE_EXTENDED_FRAME) {
         const uint64_t positive_ns = nanos_since_boot();
         panda->can_send(TSS3_EPS_TX, TSS3_PROGRAMMING_FRAME, TSS3_DIAG_BUS);
         const uint64_t programming_ns = nanos_since_boot();
@@ -98,10 +127,12 @@ public:
   }
 
   bool active() const {
-    // ARMED deliberately counts as active so the ordinary offroad safety
-    // configuration does not replace the preloaded ELM327 policy. Panda power
-    // saving remains enabled and no CAN is transmitted until ignition.
-    return state_ == State::ARMED || state_ == State::CATCHING || state_ == State::CAUGHT;
+    // Pre-start states deliberately count as active so ordinary offroad safety
+    // does not replace the preloaded ELM327 policy. Panda power saving remains
+    // enabled through ARMED/PREWARM/WAIT_SLEEP; only the always-on main bus is
+    // used until the native ignition edge.
+    return state_ == State::ARMED || state_ == State::PREWARM || state_ == State::WAIT_SLEEP ||
+           state_ == State::CATCHING || state_ == State::CAUGHT;
   }
 
   bool caught() const {
@@ -109,7 +140,7 @@ public:
   }
 
 private:
-  enum class State { DISARMED, ARMED, CATCHING, CAUGHT, WAIT_OFF };
+  enum class State { DISARMED, ARMED, PREWARM, WAIT_SLEEP, CATCHING, CAUGHT, WAIT_OFF };
 
   bool exact_f33_auto_enabled() {
     if (!params_.getBool("Tss3OracleAutoArm")) return false;
@@ -138,7 +169,8 @@ private:
       return;
     }
 
-    if (ignition && !last_ignition_ && state_ == State::ARMED) {
+    if (ignition && !last_ignition_ &&
+        (state_ == State::ARMED || state_ == State::PREWARM || state_ == State::WAIT_SLEEP)) {
       start(panda, now);
     } else if (!ignition && last_ignition_) {
       reset_for_off();
@@ -151,13 +183,19 @@ private:
     last_ignition_ = ignition;
   }
 
+  void reset_wake_attempt() {
+    wake_ns_ = 0;
+    first_extended_tx_ns_ = 0;
+    next_extended_tx_ns_ = 0;
+  }
+
   void reset_for_off() {
     state_ = State::DISARMED;
     ignition_ns_ = 0;
-    first_extended_tx_ns_ = 0;
+    last_native_rx_ns_ = 0;
+    reset_wake_attempt();
     positive_extended_ns_ = 0;
     programming_tx_ns_ = 0;
-    next_extended_tx_ns_ = 0;
     first_extended_before_power_wake_ = false;
     power_wake_complete_ns_ = 0;
     std::remove(TSS3_NATIVE_CATCH_PATH);
@@ -170,7 +208,20 @@ private:
     // transfer ahead of the first diagnostic request.
     panda->set_safety_model(cereal::CarParams::SafetyModel::ELM327, 1U);
     state_ = State::ARMED;
-    LOGW("TSS3 oracle startup catcher armed in Panda power-save; waiting for ignition");
+    LOGW("TSS3 oracle startup catcher armed in Panda power-save; waiting for vehicle wake");
+  }
+
+  void start_prewarm(Panda *panda, uint64_t now) {
+    std::remove(TSS3_NATIVE_CATCH_PATH);
+    wake_ns_ = now;
+    last_native_rx_ns_ = now;
+    state_ = State::PREWARM;
+    // The exact 2026 Camry proximity capture observed 0x45A as the first
+    // mirrored wake frame. Logical bus 0 is Panda's always-awake main bus, so
+    // offer EXTENDED at low cadence without disabling Panda power-save.
+    send_extended(panda, now, TSS3_PREWARM_PERIOD_NS);
+    first_extended_before_power_wake_ = true;
+    LOGW("TSS3 oracle startup prewarm triggered by native bus0 0x45A");
   }
 
   void start(Panda *panda, uint64_t now) {
@@ -180,18 +231,18 @@ private:
     // Logical bus 0 is the harness main bus and its transceiver remains enabled
     // in Panda power-save for CAN ignition detection. Queue 10 03 before the
     // control transfer that wakes the remaining transceivers.
-    send_extended(panda, nanos_since_boot());
+    send_extended(panda, nanos_since_boot(), TSS3_EXTENDED_PERIOD_NS);
     first_extended_before_power_wake_ = true;
     panda->set_power_saving(false);
     power_wake_complete_ns_ = nanos_since_boot();
-    LOGW("TSS3 oracle startup catcher started on native ignition edge");
+    LOGW("TSS3 oracle startup catcher promoted to fast catch on native ignition edge");
   }
 
-  void send_extended(Panda *panda, uint64_t now) {
+  void send_extended(Panda *panda, uint64_t now, uint64_t period_ns) {
     panda->can_send(TSS3_EPS_TX, TSS3_EXTENDED_FRAME, TSS3_DIAG_BUS);
     const uint64_t sent_ns = nanos_since_boot();
     if (first_extended_tx_ns_ == 0) first_extended_tx_ns_ = sent_ns;
-    next_extended_tx_ns_ = now + TSS3_EXTENDED_PERIOD_NS;
+    next_extended_tx_ns_ = now + period_ns;
   }
 
   bool write_marker() const {
@@ -205,6 +256,8 @@ private:
         << "  \"schema\": \"tss3-oracle-native-catch-v1\",\n"
         << "  \"target\": \"TOYOTA_CAMRY_TSS3\",\n"
         << "  \"pandad_wrapper_pid\": " << getppid() << ",\n"
+        << "  \"wake_trigger_monotonic_ns\": " << wake_ns_ << ",\n"
+        << "  \"wake_trigger_address\": " << TSS3_WAKE_TRIGGER_ADDR << ",\n"
         << "  \"ignition_monotonic_ns\": " << ignition_ns_ << ",\n"
         << "  \"first_extended_tx_monotonic_ns\": " << first_extended_tx_ns_ << ",\n"
         << "  \"positive_extended_monotonic_ns\": " << positive_extended_ns_ << ",\n"
@@ -245,6 +298,8 @@ private:
   bool last_ignition_ = false;
   uint64_t last_param_check_ns_ = 0;
   uint64_t last_state_check_ns_ = 0;
+  uint64_t wake_ns_ = 0;
+  uint64_t last_native_rx_ns_ = 0;
   uint64_t ignition_ns_ = 0;
   uint64_t first_extended_tx_ns_ = 0;
   uint64_t positive_extended_ns_ = 0;
