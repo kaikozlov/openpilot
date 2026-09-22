@@ -90,19 +90,15 @@ Asynchronous authentication legitimately needs state and deadlines. Those lines 
 
 Do not merge this into `car/secoc.py` merely because both involve SecOC. The upstream helper performs keyed authentication; the current external capability has different availability and lifecycle semantics. This audit treats that capability as a dependency and does not redesign its ECU implementation or installation mechanism.
 
-### 5. Three configurations are being maintained under a broad TSS3 label
+### 5. Topology scope was collapsed to one repinned TSS3 layout
 
-**Medium priority; confirmed maintenance scope.**
+**Resolved by support-scope decision.**
 
-The code supports Camry with stock Toyota-B wiring, Camry with repinned request wiring, and Corolla. These differ in state buses, radar buses, longitudinal support, and authentication/control interfaces. They are not interchangeable configurations of a proven universal TSS3 port.
+The earlier audit found three simultaneously maintained configurations: stock-wired Camry, repinned Camry, and Corolla. That parallel topology work has now been retired. All maintained TSS3 integration uses the Toyota-B repin directly: chassis/state bus 0, FRC/source bus 2, and the unsplit auxiliary/radar bus 1. Raw stock-harness captures remain evidence/provenance only and are never used to select a runtime bus layout.
 
-Topology is selected in `interface.py:107`, then interpreted again in CarController, CarState, RadarInterface, safety, and parent `panda_safety.cc:74`. The parent duplicates Toyota safety flag values to configure transport. C safety must independently implement its restrictions; duplicating that enforcement is appropriate. Repeating ordinary Python topology decisions across several files is avoidable.
+Python now derives these roles from one TSS3 topology definition rather than treating model-specific bus placement as a capability. Corolla registration and its separate control/safety path remain removed; the retained Corolla tests exercise shared wire formats on the canonical repinned bus placement. C safety still independently enforces the corresponding bus contract, as it should.
 
-**Decision:** state the supported platform/harness matrix explicitly and derive Python bus roles once using established opendbc patterns. Retain one source of truth for capability selection. Keep each variant's tests. Do not silently remove Corolla or the stock-harness Camry path under the name of cleanup; retiring one is a support-scope decision.
-
-Camry longitudinal currently becomes enabled from observed topology, regardless of the alpha-long toggle. This is an intentional current contract, not just stale code. Preserve that distinction in the support matrix and evaluate its evidence separately; do not assume a stock-longitudinal configuration is valid for every wiring arrangement.
-
-Vehicle identity and authentication readiness are also distinct. EPS being nonessential for Camry fingerprinting can help identify a car with unavailable diagnostics; it does not prove an authenticated control capability is ready. Likewise, `secOcRequired=False` currently means no host key is required, not that authentication is unnecessary. Changing that flag alone would not solve readiness.
+The current supported Camry uses openpilot longitudinal control on that one topology. Vehicle identity and authentication readiness remain distinct: `secOcRequired=False` means no host key is required, not that authentication is unnecessary.
 
 ### 6. Radar contains real protocol work plus one redundant path
 
