@@ -7,7 +7,7 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.settings.common import restart_needed_callback
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.widgets.ssh_key import SshKeyFetcher
-from openpilot.selfdrive.ui.mici.layouts.settings.tss3_oracle import Tss3OracleBringupPage, tool_available
+from openpilot.selfdrive.ui.mici.layouts.settings.tss3_oracle import Tss3OracleBringupPage, tool_available, tool_compatible
 from opendbc.car.toyota.values import CAR
 
 
@@ -180,10 +180,11 @@ class DeveloperLayoutMici(NavScroller):
       self._alpha_long_toggle.set_visible(False)
 
     exact_f33 = ui_state.CP is not None and ui_state.CP.carFingerprint == CAR.TOYOTA_CAMRY_TSS3
-    oracle_available = not ui_state.is_release and exact_f33 and tool_available()
-    self._tss3_oracle_auto_toggle.set_visible(oracle_available)
+    oracle_installed = not ui_state.is_release and exact_f33 and tool_available()
+    oracle_compatible = oracle_installed and tool_compatible()
+    self._tss3_oracle_auto_toggle.set_visible(oracle_compatible)
     self._tss3_oracle_auto_toggle.set_enabled(lambda: ui_state.is_offroad() and not ui_state.engaged)
-    self._tss3_oracle_button.set_visible(oracle_available)
+    self._tss3_oracle_button.set_visible(oracle_installed)
     self._tss3_oracle_button.set_enabled(lambda: ui_state.is_offroad() and not ui_state.engaged)
 
     # Refresh toggles from params to mirror external changes

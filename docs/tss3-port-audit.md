@@ -114,7 +114,7 @@ However, `RadarInterface.update()` dispatches TSS3 directly to `_update_tss3()` 
 
 **Separate workstream, as requested.**
 
-The parent adds an orchestration process, UI, native pandad startup logic, and cooperative device ownership. It also expects an external executable under `/data/tss3-oracle/`; that executable is outside the audited Git pins. A checkout of these repositories therefore does not describe every dependency of the working system.
+The parent adds an orchestration process, UI, native pandad startup logic, and cooperative device ownership. It also expects an external executable under `/data/tss3-oracle/`; that executable is outside the audited Git pins. A checkout of these repositories therefore does not describe every dependency of the working system. The Camry startup path now reads the kit's `bundle/unified.json` before arming and requires the exact `camry-8965F3307000` target, so a Corolla/Crown kit copied into the generic `/data/tss3-oracle/` location is rejected before it can touch Panda or the vehicle.
 
 The automatic startup path is not purely a UI convenience in its current form: it changes pandad lifecycle and relies on a prepared external capability. Removing it without preserving an equivalent prepared environment changes what can run.
 

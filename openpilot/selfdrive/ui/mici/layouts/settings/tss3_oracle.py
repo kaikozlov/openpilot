@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from openpilot.selfdrive.car.toyota_tss3_oracle_kit import oracle_kit_compatibility
 from openpilot.selfdrive.ui.ui_state import device
 from openpilot.selfdrive.ui.mici.widgets.button import BigButton, GreyBigButton
 from openpilot.system.ui.widgets.scroller import NavScroller
@@ -32,6 +33,10 @@ STAGE_LABELS = {
 
 def tool_available() -> bool:
   return TOOL_PATH.is_file() and os.access(TOOL_PATH, os.X_OK)
+
+
+def tool_compatible() -> bool:
+  return oracle_kit_compatibility(TOOL_PATH)[0]
 
 
 def oracle_bringup_active() -> bool:
@@ -104,11 +109,18 @@ class Tss3OracleBringupPage(NavScroller):
       self._status = dict(status)
 
   def _start_worker(self) -> None:
-    if not tool_available():
+    compatible, detail = oracle_kit_compatibility(TOOL_PATH)
+    if not compatible:
+      if detail.startswith("wrong oracle kit:"):
+        title = "Wrong oracle kit"
+      elif detail.startswith("oracle kit metadata invalid:"):
+        title = "Oracle kit invalid"
+      else:
+        title = "Oracle tool unavailable"
       self._set_status({
         "stage": "error",
-        "title": "Oracle tool unavailable",
-        "detail": f"Expected {TOOL_PATH}",
+        "title": title,
+        "detail": detail,
         "progress": 0,
         "done": False,
         "error": True,

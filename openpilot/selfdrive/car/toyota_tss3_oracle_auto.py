@@ -13,6 +13,7 @@ from typing import Any
 
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.utils import atomic_write
+from openpilot.selfdrive.car.toyota_tss3_oracle_kit import oracle_kit_compatibility
 
 TOOL_PATH = Path(os.getenv("TSS3_ORACLE_TOOL", "/data/tss3-oracle/tss3-unified-signer"))
 RUN_ROOT = Path(os.getenv("TSS3_ORACLE_RUN_ROOT", "/data/tss3-oracle-runs"))
@@ -78,8 +79,9 @@ def _stop_warm_worker() -> None:
 def _start_warm_worker() -> bool:
   global _warm_worker
   _stop_warm_worker()
-  if not TOOL_PATH.is_file() or not os.access(TOOL_PATH, os.X_OK):
-    _write_status("error", f"oracle tool unavailable: {TOOL_PATH}")
+  compatible, detail = oracle_kit_compatibility(TOOL_PATH)
+  if not compatible:
+    _write_status("error", detail)
     return False
 
   cmd = [
@@ -215,8 +217,9 @@ def _allocate_run_path(*, stamp: str, catch_received_ns: int) -> tuple[Path, Pat
 
 def _run_bringup(native_catch_path: Path, native_catch: dict[str, Any], *, catch_received_ns: int) -> bool:
   global _child
-  if not TOOL_PATH.is_file() or not os.access(TOOL_PATH, os.X_OK):
-    _write_status("error", f"oracle tool unavailable: {TOOL_PATH}")
+  compatible, detail = oracle_kit_compatibility(TOOL_PATH)
+  if not compatible:
+    _write_status("error", detail)
     return False
 
   stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime())
