@@ -66,9 +66,9 @@ void PandaSafety::setSafetyMode(const std::string &params_string) {
 
   LOGW("setting safety model: %d, param: %d, alternative experience: %d", (int)safety_model, safety_param, alternative_experience);
 
-  // Canonical repinned TSS3 keeps the resident-signer sideband on the unsplit
-  // Panda bus 1. It is Classical CAN, so do not promote it from sticky bus-wide
-  // FD state learned from native traffic.
+  // Canonical repinned TSS3 mixes Classical CAN and CAN-FD on its chassis,
+  // auxiliary, and FRC/source buses. Keep each packet's explicit frame format
+  // authoritative instead of promoting it from sticky bus-wide FD state.
   // These mirror ToyotaSafetyFlags.TSS3_SIGNER / TSS3_08A_HOST defined in
   // opendbc (opendbc/car/toyota/values.py); keep in sync with that source.
   constexpr uint16_t TOYOTA_PARAM_TSS3_SIGNER = 16U << 8;
@@ -77,11 +77,10 @@ void PandaSafety::setSafetyMode(const std::string &params_string) {
                                   ((safety_param & TOYOTA_PARAM_TSS3_SIGNER) != 0U);
   const bool toyota_tss3_08a_host = (safety_model == cereal::CarParams::SafetyModel::TOYOTA) &&
                                     ((safety_param & TOYOTA_PARAM_TSS3_08A_HOST) != 0U);
-  panda_->set_can_fd_auto(1, !toyota_tss3_signer);
-  // The canonical repinned host path mixes the classic 0x777/0x7A9 signer
-  // mailbox with explicit CAN-FD 0x08A on chassis bus 0. Keep the host-created
-  // frame format authoritative instead of sticky bus-wide FD.
-  panda_->set_can_fd_auto(0, !toyota_tss3_08a_host);
+  const bool toyota_tss3 = toyota_tss3_signer || toyota_tss3_08a_host;
+  for (uint16_t bus = 0U; bus < PANDA_CAN_CNT; bus++) {
+    panda_->set_can_fd_auto(bus, !toyota_tss3);
+  }
 
   panda_->set_alternative_experience(alternative_experience);
   panda_->set_safety_model(safety_model, safety_param);
