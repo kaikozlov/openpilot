@@ -69,15 +69,10 @@ void PandaSafety::setSafetyMode(const std::string &params_string) {
   // Canonical repinned TSS3 mixes Classical CAN and CAN-FD on its chassis,
   // auxiliary, and FRC/source buses. Keep each packet's explicit frame format
   // authoritative instead of promoting it from sticky bus-wide FD state.
-  // These mirror ToyotaSafetyFlags.TSS3_SIGNER / TSS3_08A_HOST defined in
-  // opendbc (opendbc/car/toyota/values.py); keep in sync with that source.
-  constexpr uint16_t TOYOTA_PARAM_TSS3_SIGNER = 16U << 8;
-  constexpr uint16_t TOYOTA_PARAM_TSS3_08A_HOST = 64U << 8;
-  const bool toyota_tss3_signer = (safety_model == cereal::CarParams::SafetyModel::TOYOTA) &&
-                                  ((safety_param & TOYOTA_PARAM_TSS3_SIGNER) != 0U);
-  const bool toyota_tss3_08a_host = (safety_model == cereal::CarParams::SafetyModel::TOYOTA) &&
-                                    ((safety_param & TOYOTA_PARAM_TSS3_08A_HOST) != 0U);
-  const bool toyota_tss3 = toyota_tss3_signer || toyota_tss3_08a_host;
+  // Mirrors ToyotaSafetyFlags.TSS3 in opendbc/car/toyota/values.py
+  constexpr uint16_t TOYOTA_PARAM_TSS3 = 16U << 8;
+  const bool toyota_tss3 = (safety_model == cereal::CarParams::SafetyModel::TOYOTA) &&
+                           ((safety_param & TOYOTA_PARAM_TSS3) != 0U);
   for (uint16_t bus = 0U; bus < PANDA_CAN_CNT; bus++) {
     panda_->set_can_fd_auto(bus, !toyota_tss3);
   }
