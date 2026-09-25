@@ -1,9 +1,11 @@
 [submodule "panda"]
   path = panda
-  url = ../../commaai/panda.git
+  url = ../../kaikozlov/panda.git
+  branch = tss3-openpilot
 [submodule "opendbc"]
   path = opendbc_repo
-  url = ../../commaai/opendbc.git
+  url = ../../kaikozlov/opendbc.git
+  branch = tss3-openpilot
 [submodule "msgq"]
   path = msgq_repo
   url = ../../commaai/msgq.git
