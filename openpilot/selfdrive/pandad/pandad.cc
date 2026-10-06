@@ -43,7 +43,10 @@ constexpr uint64_t TSS3_STATE_POLL_NS = 10ULL * 1000ULL * 1000ULL;
 constexpr uint64_t TSS3_PARAM_POLL_NS = 250ULL * 1000ULL * 1000ULL;
 constexpr char TSS3_NATIVE_CATCH_PATH[] = "/tmp/tss3-oracle-native-catch.json";
 constexpr char TSS3_NATIVE_NOTIFY_PATH[] = "/tmp/tss3-oracle-native-catch.sock";
-constexpr char TSS3_F33_FINGERPRINT[] = "TOYOTA_CAMRY_TSS3";
+// Mirrors ToyotaSafetyFlags.TSS3 in opendbc/car/toyota/values.py. Any Toyota
+// platform OpenDBC marks TSS3 sets this safety param bit, so the catcher
+// follows the platform list instead of matching one car.
+constexpr uint16_t TOYOTA_PARAM_TSS3 = 16U << 8;
 const std::string TSS3_EXTENDED_FRAME("\x02\x10\x03\x00\x00\x00\x00\x00", 8);
 const std::string TSS3_PROGRAMMING_FRAME("\x02\x10\x02\x00\x00\x00\x00\x00", 8);
 const std::string TSS3_POSITIVE_EXTENDED_FRAME("\x06\x50\x03\x00\x32\x01\xF4\x00", 8);
@@ -53,7 +56,7 @@ public:
   void update(Panda *panda) {
     const uint64_t now = nanos_since_boot();
     if ((now - last_param_check_ns_) >= TSS3_PARAM_POLL_NS || !param_initialized_) {
-      enabled_ = exact_f33_auto_enabled();
+      enabled_ = tss3_auto_enabled();
       last_param_check_ns_ = now;
       param_initialized_ = true;
       if (!enabled_ && active()) {
@@ -142,7 +145,7 @@ public:
 private:
   enum class State { DISARMED, ARMED, PREWARM, WAIT_SLEEP, CATCHING, CAUGHT, WAIT_OFF };
 
-  bool exact_f33_auto_enabled() {
+  bool tss3_auto_enabled() {
     if (!params_.getBool("Tss3OracleAutoArm")) return false;
     const std::string cp_bytes = params_.get("CarParamsPersistent");
     if (cp_bytes.empty()) return false;
@@ -150,7 +153,13 @@ private:
       AlignedBuffer aligned_buf;
       capnp::FlatArrayMessageReader cmsg(aligned_buf.align(cp_bytes.data(), cp_bytes.size()));
       const auto CP = cmsg.getRoot<cereal::CarParams>();
-      return CP.getCarFingerprint() == TSS3_F33_FINGERPRINT;
+      const auto safety_configs = CP.getSafetyConfigs();
+      if (safety_configs.size() == 0) return false;
+      const bool tss3 = (safety_configs[0].getSafetyModel() == cereal::CarParams::SafetyModel::TOYOTA) &&
+                        ((safety_configs[0].getSafetyParam() & TOYOTA_PARAM_TSS3) != 0U);
+      if (!tss3) return false;
+      fingerprint_ = CP.getCarFingerprint().cStr();
+      return true;
     } catch (const kj::Exception &e) {
       LOGE("TSS3 oracle startup catcher could not parse CarParamsPersistent: %s", e.getDescription().cStr());
       return false;
@@ -254,7 +263,7 @@ private:
     }
     out << "{\n"
         << "  \"schema\": \"tss3-oracle-native-catch-v1\",\n"
-        << "  \"target\": \"TOYOTA_CAMRY_TSS3\",\n"
+        << "  \"target\": \"" << fingerprint_ << "\",\n"
         << "  \"pandad_wrapper_pid\": " << getppid() << ",\n"
         << "  \"wake_trigger_monotonic_ns\": " << wake_ns_ << ",\n"
         << "  \"wake_trigger_address\": " << TSS3_WAKE_TRIGGER_ADDR << ",\n"
@@ -290,6 +299,7 @@ private:
     close(fd);
   }
 
+  std::string fingerprint_;
   Params params_;
   State state_ = State::DISARMED;
   bool enabled_ = false;

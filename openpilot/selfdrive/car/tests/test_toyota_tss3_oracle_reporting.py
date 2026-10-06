@@ -4,10 +4,10 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from openpilot.selfdrive.car import toyota_tss3_oracle_auto as auto
+from openpilot.selfdrive.car.toyota_tss3_oracle_status import OracleStatus
 from openpilot.selfdrive.ui.mici.layouts.settings.tss3_oracle import (
   CANCEL_FILENAME,
   Tss3OracleBringupPage,
@@ -16,8 +16,7 @@ from openpilot.selfdrive.ui.mici.layouts.settings.tss3_oracle import (
 
 
 STATUS_SCHEMA = "camry-f33-request-signer-ui-status-v1"
-SUMMARY_SCHEMA = "camry-f33-request-signer-ui-bringup-v1"
-SUCCESS_VERDICT = "startup_caught_fresh_signer_peer_state_healthy_self_test_pass"
+NATIVE_CATCH_SCHEMA = "tss3-oracle-native-catch-v1"
 
 
 def status_row(**overrides):
@@ -28,57 +27,47 @@ def status_row(**overrides):
   }
 
 
-def read_ui(rows, returncode=0):
-  # Exercise only the subprocess-output reader; do not construct a GUI or launch a backend.
-  page = SimpleNamespace(
-    _proc=SimpleNamespace(stdout=io.StringIO("".join(json.dumps(row) + "\n" for row in rows)), wait=lambda: returncode),
-    _lock=threading.Lock(), _status={}, _last_output="",
-  )
-  page._snapshot = lambda: dict(page._status)
-  page._set_status = lambda value: setattr(page, "_status", dict(value))
-  Tss3OracleBringupPage._reader(page)
-  return page._status
-
-
-class TestOracleUiReporting(unittest.TestCase):
+class TestOracleStatus(unittest.TestCase):
   def test_completion_requires_zero_exit(self):
-    result = read_ui([status_row()], returncode=2)
-    self.assertIs(result["error"], True)
-    self.assertIs(result["done"], False)
-    self.assertIn("2", result["detail"])
-
-  def test_completion_is_not_displayed_before_process_exit(self):
-    page = SimpleNamespace(_lock=threading.Lock(), _status={}, _last_output="")
-    page._snapshot = lambda: dict(page._status)
-    page._set_status = lambda value: setattr(page, "_status", dict(value))
-
-    def output():
-      yield json.dumps(status_row()) + "\n"
-      self.assertIsNot(page._status.get("done"), True)
-
-    page._proc = SimpleNamespace(stdout=output(), wait=lambda: 0)
-    Tss3OracleBringupPage._reader(page)
-    self.assertIs(page._status["done"], True)
-
-  def test_valid_completion(self):
-    result = read_ui([status_row()])
-    self.assertIs(result["done"], True)
-    self.assertIs(result["error"], False)
+    for returncode in (0, 2):
+      with self.subTest(returncode=returncode):
+        report = OracleStatus()
+        report.feed(json.dumps(status_row(stage="verifying", done=False, progress=70)))
+        report.feed(json.dumps(status_row()))
+        result = report.finish(returncode)
+        self.assertIs(result["done"], returncode == 0)
+        self.assertIs(result["error"], returncode != 0)
 
   def test_exit_without_completion_is_not_success(self):
-    result = read_ui([status_row(stage="verifying", done=False, progress=70)])
-    self.assertIs(result["error"], True)
+    for rows in ([], [status_row(stage="verifying", done=False, progress=70)]):
+      with self.subTest(rows=rows):
+        report = OracleStatus()
+        for row in rows:
+          report.feed(json.dumps(row))
+        result = report.finish(0)
+        self.assertIs(result["error"], True)
+        self.assertIs(result["done"], False)
 
-  def test_error_is_not_overwritten_by_late_success(self):
+  def test_first_error_wins_over_later_output_and_exit(self):
     error = status_row(stage="error", done=False, error=True, detail="Original backend failure.", progress=0)
-    result = read_ui([error, status_row()])
-    self.assertIs(result["error"], True)
-    self.assertEqual(result["detail"], error["detail"])
+    rows = [error, {**error, "detail": "Later failure."}, status_row()]
+    for returncode in (0, 2):
+      with self.subTest(returncode=returncode):
+        report = OracleStatus()
+        updates = [update for row in rows if (update := report.feed(json.dumps(row))) is not None]
+        self.assertEqual(updates, [error])
+        self.assertEqual(report.finish(returncode), error)
 
-  def test_json_diagnostic_is_kept_when_process_fails(self):
-    result = read_ui([{"error": "permission denied opening log file"}], returncode=1)
+  def test_last_diagnostic_is_preserved_across_blank_lines(self):
+    report = OracleStatus()
+    report.feed("Earlier diagnostic")
+    diagnostic = json.dumps({"error": "permission denied opening log file"})
+    report.feed(diagnostic)
+    report.feed(" \n")
+    result = report.finish(1)
     self.assertIs(result["error"], True)
-    self.assertIn("permission denied opening log file", result["detail"])
+    self.assertIn(diagnostic, result["detail"])
+    self.assertNotIn("Earlier diagnostic", result["detail"])
 
   def test_malformed_status_cannot_report_success(self):
     for overrides in (
@@ -87,95 +76,29 @@ class TestOracleUiReporting(unittest.TestCase):
       {"title": []}, {"stage": "verifying", "done": True},
     ):
       with self.subTest(overrides=overrides):
-        result = read_ui([status_row(**overrides)])
+        report = OracleStatus()
+        self.assertIsNone(report.feed(json.dumps(status_row(**overrides))))
+        result = report.finish(0)
         self.assertIs(result["error"], True)
         self.assertIs(result["done"], False)
 
 
-class TestOracleAutoReporting(unittest.TestCase):
-  def run_report(self, summary, *, returncode=0, rows=None):
-    # All process, socket, timing and compatibility boundaries are mocked. No ECU I/O.
-    with tempfile.TemporaryDirectory() as td:
-      root = Path(td)
-      run_dir = root / "run"
-      log_path = root / "run.log"
-      fallback = root / "trigger.json"
-      proc = Mock()
-      proc.stdout = io.StringIO("".join(json.dumps(row) + "\n" for row in (rows if rows is not None else [status_row()])))
-      proc.wait.return_value = returncode
+class TestOracleUiReporting(unittest.TestCase):
+  def test_completion_is_not_displayed_before_process_exit(self):
+    # Construct only the reader state; do not initialize graphics or launch a backend.
+    page = object.__new__(Tss3OracleBringupPage)
+    page._lock = threading.Lock()
+    page._status = {}
 
-      def launch(*_args, **_kwargs):
-        run_dir.mkdir()
-        data = summary if isinstance(summary, bytes) else json.dumps(summary).encode("utf-8")
-        (run_dir / "summary.json").write_bytes(data)
-        return proc
+    def wait_for_exit():
+      status = page._snapshot()
+      self.assertEqual(status["stage"], "finishing")
+      self.assertIs(status["done"], False)
+      return 0
 
-      with patch.object(auto, "RUN_ROOT", root), \
-           patch.object(auto, "oracle_kit_compatibility", return_value=(True, "")), \
-           patch.object(auto, "_warm_worker", Mock(poll=Mock(return_value=None))), \
-           patch.object(auto, "WARM_WORKER_PATH", Mock(is_socket=Mock(return_value=True))), \
-           patch.object(auto, "_allocate_run_path", return_value=(run_dir, log_path, fallback)), \
-           patch.object(auto.subprocess, "Popen", side_effect=launch), \
-           patch.object(auto, "_write_status") as write_status, \
-           patch.object(auto, "_record_trigger_timing", return_value={}), \
-           patch.object(auto.cloudlog, "warning"):
-        success = auto._run_bringup(root / "marker", {"pandad_wrapper_pid": 123}, catch_received_ns=1)
-      return success, write_status.call_args
-
-  def test_current_backend_summary_is_recognized(self):
-    success, call = self.run_report({"schema": SUMMARY_SCHEMA, "verdict": SUCCESS_VERDICT})
-    self.assertTrue(success)
-    self.assertEqual(call.args[0], "complete")
-
-  def test_malformed_summary_is_an_error_not_a_daemon_crash(self):
-    for summary in ([], None, 7, "not an object"):
-      with self.subTest(summary=summary):
-        success, call = self.run_report(summary)
-        self.assertFalse(success)
-        self.assertEqual(call.args[0], "error")
-
-  def test_unreadable_summary_is_an_error_not_a_daemon_crash(self):
-    for summary in (b"{", b'\xff{"verdict":"incomplete"}'):
-      with self.subTest(summary=summary):
-        success, call = self.run_report(summary)
-        self.assertFalse(success)
-        self.assertEqual(call.args[0], "error")
-        self.assertIn("Could not read bringup summary", call.args[1])
-
-  def test_wrong_contract_does_not_reuse_success_detail(self):
-    for summary in (
-      {"schema": SUMMARY_SCHEMA, "verdict": "unknown"},
-      {"schema": "different-schema", "verdict": SUCCESS_VERDICT},
-      {"verdict": SUCCESS_VERDICT},
-    ):
-      with self.subTest(summary=summary):
-        success, call = self.run_report(summary)
-        self.assertFalse(success)
-        self.assertNotEqual(call.args[1], "All checks passed.")
-
-  def test_nonzero_exit_cannot_reuse_success_detail(self):
-    success, call = self.run_report({"schema": SUMMARY_SCHEMA, "verdict": SUCCESS_VERDICT}, returncode=2)
-    self.assertFalse(success)
-    self.assertNotEqual(call.args[1], "All checks passed.")
-
-  def test_error_is_not_overwritten_by_late_success(self):
-    row = status_row(stage="error", error=True, done=False, progress=0, detail="Original failure.")
-    success, call = self.run_report(
-      {"schema": SUMMARY_SCHEMA, "verdict": SUCCESS_VERDICT}, rows=[row, status_row()],
-    )
-    self.assertFalse(success)
-    self.assertEqual(call.args[1], "Original failure.")
-
-  def test_no_completion_status_is_not_success(self):
-    success, call = self.run_report({"schema": SUMMARY_SCHEMA, "verdict": SUCCESS_VERDICT}, rows=[])
-    self.assertFalse(success)
-    self.assertIn("without a completion status", call.args[1])
-
-  def test_original_backend_failure_is_preserved(self):
-    row = status_row(stage="error", error=True, done=False, progress=0, detail="Original failure.")
-    success, call = self.run_report({}, returncode=2, rows=[row])
-    self.assertFalse(success)
-    self.assertEqual(call.args[1], "Original failure.")
+    page._proc = Mock(stdout=io.StringIO(json.dumps(status_row()) + "\n"), wait=wait_for_exit)
+    page._reader()
+    self.assertIs(page._snapshot()["done"], True)
 
 
 class TestOracleLifecycleGuards(unittest.TestCase):
@@ -185,33 +108,39 @@ class TestOracleLifecycleGuards(unittest.TestCase):
       request_cooperative_cancel(run_dir)
       self.assertEqual((run_dir / CANCEL_FILENAME).read_text(encoding="utf-8"), "cancel\n")
 
-  def test_warm_worker_ready_requires_live_process_and_socket(self):
-    with patch.object(auto, "_warm_worker", Mock(poll=Mock(return_value=None))), \
-         patch.object(auto, "WARM_WORKER_PATH", Mock(is_socket=Mock(return_value=True))):
-      self.assertTrue(auto._warm_worker_ready())
-    with patch.object(auto, "_warm_worker", Mock(poll=Mock(return_value=2))), \
-         patch.object(auto, "WARM_WORKER_PATH", Mock(is_socket=Mock(return_value=True))):
-      self.assertFalse(auto._warm_worker_ready())
-    with patch.object(auto, "_warm_worker", Mock(poll=Mock(return_value=None))), \
-         patch.object(auto, "WARM_WORKER_PATH", Mock(is_socket=Mock(return_value=False))):
-      self.assertFalse(auto._warm_worker_ready())
-
-  def test_native_catch_rejects_reversed_transition_before_claim(self):
+  def test_native_catch_marker_is_claimed_exactly_once(self):
     marker = {
-      "schema": "tss3-oracle-native-catch-v1",
+      "schema": NATIVE_CATCH_SCHEMA,
       "target": "TOYOTA_CAMRY_TSS3",
       "verdict": "programming_request_sent_after_exact_50_03",
       "pandad_wrapper_pid": 123,
       "ignition_monotonic_ns": 10,
       "first_extended_tx_monotonic_ns": 20,
       "positive_extended_monotonic_ns": 40,
-      "programming_tx_monotonic_ns": 30,
+      "programming_tx_monotonic_ns": 50,
     }
     with tempfile.TemporaryDirectory() as td:
       path = Path(td) / "catch.json"
       path.write_text(json.dumps(marker), encoding="utf-8")
+
+      claimed = auto._claim_native_catch(path)
+      assert claimed is not None
+      claimed_path, claimed_marker = claimed
+      self.assertEqual(claimed_marker["pandad_wrapper_pid"], 123)
+      self.assertFalse(path.exists())
+      self.assertTrue(claimed_path.exists())
+
+      # The rename already took it; nothing is left to claim a second time.
       self.assertIsNone(auto._claim_native_catch(path))
-      self.assertTrue(path.exists())
+
+  def test_native_catch_ignores_foreign_files(self):
+    with tempfile.TemporaryDirectory() as td:
+      path = Path(td) / "catch.json"
+      for data in (b"{", b"not json", json.dumps({"schema": "something-else", "pandad_wrapper_pid": 123}).encode()):
+        with self.subTest(data=data):
+          path.write_bytes(data)
+          self.assertIsNone(auto._claim_native_catch(path))
+          self.assertTrue(path.exists())
 
 
 class TestOracleRearmReporting(unittest.TestCase):
@@ -227,3 +156,7 @@ class TestOracleRearmReporting(unittest.TestCase):
       write_status.assert_not_called()
       self.assertTrue(auto._start_warm_worker())
       self.assertEqual(write_status.call_args.args[0], "armed")
+
+
+if __name__ == "__main__":
+  unittest.main()

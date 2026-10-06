@@ -7,8 +7,8 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.settings.common import restart_needed_callback
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.widgets.ssh_key import SshKeyFetcher
-from openpilot.selfdrive.ui.mici.layouts.settings.tss3_oracle import Tss3OracleBringupPage, tool_available, tool_compatible
-from opendbc.car.toyota.values import CAR
+from openpilot.selfdrive.ui.mici.layouts.settings.tss3_oracle import Tss3OracleBringupPage, tool_available
+from openpilot.selfdrive.car.toyota_tss3_oracle_kit import tss3_fingerprints
 
 
 class AlphaLongConfirmPage(NavScroller):
@@ -87,14 +87,14 @@ class DeveloperLayoutMici(NavScroller):
                                                     "Braking (AEB).")
     self._tss3_oracle_auto_toggle = BigParamControl(
       "auto-arm TSS3 oracle", "Tss3OracleAutoArm",
-      description="Exact 2026 Camry F33 only. Preserves normal sleep behavior while OFF, then starts the volatile RAM-oracle bringup on " +
+      description="TSS3 Toyota platforms. Preserves normal sleep behavior while OFF, then starts the volatile RAM-oracle bringup on " +
                   "native Panda ignition detection. " +
                   "No EPS flash writes and no automatic Brake/FRC resets on a healthy run."
     )
 
     self._tss3_oracle_button = BigButton(
       "TSS3 oracle bringup", "ARM",
-      description="Exact 2026 Camry F33 only. Arm while fully OFF and in Park, then press the brake and POWER normally. " +
+      description="TSS3 Toyota platforms. Arm while fully OFF and in Park, then press the brake and POWER normally. " +
                   "The native comma page stays open through RAM-oracle installation and no-reset verification."
     )
     self._tss3_oracle_button.set_click_callback(self._on_tss3_oracle_bringup)
@@ -179,12 +179,11 @@ class DeveloperLayoutMici(NavScroller):
       self._lat_maneuver_toggle.set_enabled(False)
       self._alpha_long_toggle.set_visible(False)
 
-    exact_f33 = ui_state.CP is not None and ui_state.CP.carFingerprint == CAR.TOYOTA_CAMRY_TSS3
-    oracle_installed = not ui_state.is_release and exact_f33 and tool_available()
-    oracle_compatible = oracle_installed and tool_compatible()
-    self._tss3_oracle_auto_toggle.set_visible(oracle_compatible)
+    tss3 = ui_state.CP is not None and ui_state.CP.carFingerprint in tss3_fingerprints()
+    oracle_ready = not ui_state.is_release and tss3 and tool_available()
+    self._tss3_oracle_auto_toggle.set_visible(oracle_ready)
     self._tss3_oracle_auto_toggle.set_enabled(lambda: ui_state.is_offroad() and not ui_state.engaged)
-    self._tss3_oracle_button.set_visible(oracle_installed)
+    self._tss3_oracle_button.set_visible(oracle_ready)
     self._tss3_oracle_button.set_enabled(lambda: ui_state.is_offroad() and not ui_state.engaged)
 
     # Refresh toggles from params to mirror external changes

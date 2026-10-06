@@ -5,8 +5,6 @@ import json
 from typing import Any
 
 STATUS_SCHEMA = "camry-f33-request-signer-ui-status-v1"
-SUMMARY_SCHEMA = "camry-f33-request-signer-ui-bringup-v1"
-SUCCESS_VERDICT = "startup_caught_fresh_signer_peer_state_healthy_self_test_pass"
 
 
 def parse_status(line: str) -> dict[str, Any] | None:
@@ -27,16 +25,34 @@ def parse_status(line: str) -> dict[str, Any] | None:
   return row
 
 
-def process_status(status: dict[str, Any] | None, returncode: int, last_output: str = "") -> dict[str, Any]:
-  """An emitted completion does not override a later process failure."""
-  if status is not None and status.get("error") is True:
+class OracleStatus:
+  """Accumulate backend output; the first error wins and completion requires a clean exit."""
+
+  def __init__(self):
+    self._status: dict[str, Any] | None = None
+    self._last_output = ""
+
+  def feed(self, line: str) -> dict[str, Any] | None:
+    """Return an accepted status update, or None when there is nothing to publish."""
+    line = line.strip()
+    if not line:
+      return None
+    status = parse_status(line)
+    if status is None:
+      self._last_output = line
+      return None
+    if self._status is not None and self._status["error"]:
+      return None
+    self._status = status
     return status
-  if returncode == 0 and status is not None and status.get("done") is True:
-    return status
-  detail = f"Backend exited with status {returncode}." if returncode != 0 else "Backend exited without a completion status."
-  if last_output:
-    detail += f" Last output: {last_output}"
-  return {
-    "schema": STATUS_SCHEMA, "stage": "error", "title": "Request-signer bringup stopped",
-    "detail": detail, "progress": 0, "done": False, "error": True,
-  }
+
+  def finish(self, returncode: int) -> dict[str, Any]:
+    if self._status is not None and (self._status["error"] or (returncode == 0 and self._status["done"])):
+      return self._status
+    detail = f"Backend exited with status {returncode}." if returncode != 0 else "Backend exited without a completion status."
+    if self._last_output:
+      detail += f" Last output: {self._last_output}"
+    return {
+      "schema": STATUS_SCHEMA, "stage": "error", "title": "Request-signer bringup stopped",
+      "detail": detail, "progress": 0, "done": False, "error": True,
+    }
