@@ -1,7 +1,3 @@
-TSS3 fork (unreleased)
-=====================
-* Restore upstream Panda revision `92eb5651` to match pandad's NMI and hardfault reset telemetry.
-
 Version 0.11.2 (2026-08-12)
 =======================
 * New driving model
