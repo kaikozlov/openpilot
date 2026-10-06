@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from openpilot.selfdrive.car.toyota_tss3_oracle_kit import oracle_kit_compatibility
-from openpilot.selfdrive.car.toyota_tss3_oracle_status import parse_status, process_status
+from openpilot.selfdrive.car.toyota_tss3_oracle_status import OracleStatus
 from openpilot.selfdrive.ui.ui_state import device
 from openpilot.selfdrive.ui.mici.widgets.button import BigButton, GreyBigButton
 from openpilot.system.ui.widgets.scroller import NavScroller
@@ -35,9 +35,6 @@ def tool_available() -> bool:
   return TOOL_PATH.is_file() and os.access(TOOL_PATH, os.X_OK)
 
 
-def tool_compatible() -> bool:
-  return oracle_kit_compatibility(TOOL_PATH)[0]
-
 
 def oracle_bringup_active() -> bool:
   return _oracle_bringup_active
@@ -60,7 +57,7 @@ def request_cooperative_cancel(run_dir: Path) -> None:
 
 
 class Tss3OracleBringupPage(NavScroller):
-  """Native comma-four page for the exact-F33 RAM-oracle startup flow."""
+  """Native comma-four page for the TSS3 RAM-oracle startup flow."""
 
   def __init__(self):
     super().__init__()
@@ -73,7 +70,6 @@ class Tss3OracleBringupPage(NavScroller):
       "done": False,
       "error": False,
     }
-    self._last_output = ""
     self._proc: subprocess.Popen[str] | None = None
     self._run_dir: Path | None = None
 
@@ -125,9 +121,7 @@ class Tss3OracleBringupPage(NavScroller):
   def _start_worker(self) -> None:
     compatible, detail = oracle_kit_compatibility(TOOL_PATH)
     if not compatible:
-      if detail.startswith("wrong oracle kit:"):
-        title = "Wrong oracle kit"
-      elif detail.startswith("oracle kit metadata invalid:"):
+      if detail.startswith("oracle kit metadata invalid:"):
         title = "Oracle kit invalid"
       else:
         title = "Oracle tool unavailable"
@@ -173,45 +167,35 @@ class Tss3OracleBringupPage(NavScroller):
 
   def _reader(self) -> None:
     assert self._proc is not None and self._proc.stdout is not None
-    latest_status: dict[str, Any] | None = None
+    report = OracleStatus()
     for raw in self._proc.stdout:
-      line = raw.strip()
-      if not line:
-        continue
-      status = parse_status(line)
+      status = report.feed(raw)
       if status is None:
-        with self._lock:
-          self._last_output = line
         continue
-      if latest_status is None or not latest_status.get("error"):
-        latest_status = status
-        if status["done"]:
-          self._set_status({
-            **status, "stage": "finishing", "title": "Finalizing bringup",
-            "detail": "Waiting for the backend to finish.", "done": False,
-          })
-        else:
-          self._set_status(status)
+      if status["done"]:
+        self._set_status({
+          **status, "stage": "finishing", "title": "Finalizing bringup",
+          "detail": "Waiting for the backend to finish.", "done": False,
+        })
+      else:
+        self._set_status(status)
 
-    rc = self._proc.wait()
-    with self._lock:
-      last_output = self._last_output
-    self._set_status(process_status(latest_status, rc, last_output))
+    self._set_status(report.finish(self._proc.wait()))
 
   def _update_state(self):
     super()._update_state()
     status = self._snapshot()
-    stage = str(status.get("stage", "arming"))
-    progress = max(0, min(100, int(status.get("progress", 0))))
+    stage = status["stage"]
+    progress = status["progress"]
 
-    self._status_card.set_text(str(status.get("title", "Oracle bringup")))
-    self._status_card.set_value(str(status.get("detail", "")))
+    self._status_card.set_text(status["title"])
+    self._status_card.set_value(status["detail"])
     self._progress_card.set_value(f"{progress}%\n{STAGE_LABELS.get(stage, stage)}")
 
-    if status.get("done"):
+    if status["done"]:
       self._action_button.set_text("close")
       self._action_button.set_value("bringup passed")
-    elif status.get("error"):
+    elif status["error"]:
       self._action_button.set_text("close")
       self._action_button.set_value("bringup failed")
     elif stage in ("arming", "armed"):

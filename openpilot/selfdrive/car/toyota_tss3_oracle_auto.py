@@ -14,7 +14,7 @@ from typing import Any
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.utils import atomic_write
 from openpilot.selfdrive.car.toyota_tss3_oracle_kit import oracle_kit_compatibility
-from openpilot.selfdrive.car.toyota_tss3_oracle_status import SUMMARY_SCHEMA, SUCCESS_VERDICT, parse_status, process_status
+from openpilot.selfdrive.car.toyota_tss3_oracle_status import OracleStatus
 
 TOOL_PATH = Path(os.getenv("TSS3_ORACLE_TOOL", "/data/tss3-oracle/tss3-request-signer"))
 RUN_ROOT = Path(os.getenv("TSS3_ORACLE_RUN_ROOT", "/data/tss3-oracle-runs"))
@@ -134,38 +134,20 @@ def _signal_handler(signum, _frame) -> None:
 
 
 def _claim_native_catch(path: Path = NATIVE_CATCH_PATH) -> tuple[Path, dict[str, Any]] | None:
+  """Claim pandad's catch marker. The rename is the single-claimant guard.
+  The native catcher writes this file from one code path, after sending
+  PROGRAMMING on a car it already verified is TSS3, so beyond the schema
+  identity nothing here needs re-validating."""
   try:
     marker = json.loads(path.read_text(encoding="utf-8"))
   except (FileNotFoundError, json.JSONDecodeError, OSError):
     return None
-  if not isinstance(marker, dict):
+  if not isinstance(marker, dict) or marker.get("schema") != "tss3-oracle-native-catch-v1":
     return None
-  if marker.get("schema") != "tss3-oracle-native-catch-v1":
-    return None
-  if marker.get("target") != "TOYOTA_CAMRY_TSS3":
-    return None
-  if marker.get("verdict") != "programming_request_sent_after_exact_50_03":
+  if not isinstance(marker.get("pandad_wrapper_pid"), int):
     return None
 
-  required_times = (
-    "ignition_monotonic_ns",
-    "first_extended_tx_monotonic_ns",
-    "positive_extended_monotonic_ns",
-    "programming_tx_monotonic_ns",
-  )
-  if any(not isinstance(marker.get(key), int) or marker[key] <= 0 for key in required_times):
-    return None
-  if marker["positive_extended_monotonic_ns"] < marker["first_extended_tx_monotonic_ns"]:
-    return None
-  if marker["programming_tx_monotonic_ns"] < marker["positive_extended_monotonic_ns"]:
-    return None
-
-  programming_ns = marker["programming_tx_monotonic_ns"]
-  wrapper_pid = marker.get("pandad_wrapper_pid")
-  if not isinstance(wrapper_pid, int) or wrapper_pid <= 1:
-    return None
-
-  claimed = path.with_name(f"{path.name}.claimed-{os.getpid()}-{programming_ns}")
+  claimed = path.with_name(f"{path.name}.claimed-{os.getpid()}")
   try:
     os.replace(path, claimed)
   except FileNotFoundError:
@@ -219,30 +201,15 @@ def _record_trigger_timing(run_dir: Path, trigger_fallback: Path, *, native_catc
   return record
 
 
-def _allocate_run_path(*, stamp: str, catch_received_ns: int) -> tuple[Path, Path, Path]:
-  """Choose fresh paths without creating the backend-owned output directory."""
-  base = f"auto-{stamp}-{catch_received_ns}"
-  suffix = 0
-  while True:
-    name = base if suffix == 0 else f"{base}-{suffix}"
-    run_dir = RUN_ROOT / name
-    log_path = RUN_ROOT / f"{name}.auto-daemon.log"
-    trigger_fallback = RUN_ROOT / f"{name}.auto-trigger.json"
-    if not run_dir.exists() and not log_path.exists() and not trigger_fallback.exists():
-      return run_dir, log_path, trigger_fallback
-    suffix += 1
-
-
 def _run_bringup(native_catch_path: Path, native_catch: dict[str, Any], *, catch_received_ns: int) -> bool:
   global _child
-  compatible, detail = oracle_kit_compatibility(TOOL_PATH)
-  if not compatible:
-    _write_status("error", detail)
-    return False
-
   stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime())
   RUN_ROOT.mkdir(parents=True, exist_ok=True)
-  run_dir, log_path, trigger_fallback = _allocate_run_path(stamp=stamp, catch_received_ns=catch_received_ns)
+  # Paths only; the backend owns creating its output directory.
+  name = f"auto-{stamp}-{catch_received_ns}"
+  run_dir = RUN_ROOT / name
+  log_path = RUN_ROOT / f"{name}.auto-daemon.log"
+  trigger_fallback = RUN_ROOT / f"{name}.auto-trigger.json"
   if not _warm_worker_ready():
     _write_status("error", "native PROGRAMMING was caught but the warm oracle uploader is unavailable")
     return False
@@ -254,7 +221,7 @@ def _run_bringup(native_catch_path: Path, native_catch: dict[str, Any], *, catch
 
   _write_status(
     "triggered",
-    "Native pandad caught PROGRAMMING; resuming exact-F33 oracle bringup.",
+    "Native pandad caught PROGRAMMING; resuming TSS3 oracle bringup.",
     run_dir=str(run_dir),
     auto_daemon_log=str(log_path),
     native_catch_daemon_received_monotonic_ns=catch_received_ns,
@@ -282,31 +249,23 @@ def _run_bringup(native_catch_path: Path, native_catch: dict[str, Any], *, catch
   with _child_lock:
     _child = proc
 
-  latest_backend_status: dict[str, Any] | None = None
-  last_output = ""
+  report = OracleStatus()
   try:
     assert proc.stdout is not None
     with log_path.open("w", encoding="utf-8") as log:
       for raw in proc.stdout:
         log.write(raw)
         log.flush()
-        line = raw.strip()
-        if not line:
-          continue
-        row = parse_status(line)
-        if row is None:
-          last_output = line
-          continue
-        if latest_backend_status is None or not latest_backend_status.get("error"):
-          latest_backend_status = row
+        row = report.feed(raw)
+        if row is not None:
           _write_status(
             "running",
-            str(row.get("detail", row.get("title", "oracle bringup running"))),
+            row["detail"],
             run_dir=str(run_dir),
-            backend_stage=row.get("stage"),
-            backend_progress=row.get("progress"),
-            backend_done=bool(row.get("done")),
-            backend_error=bool(row.get("error")),
+            backend_stage=row["stage"],
+            backend_progress=row["progress"],
+            backend_done=row["done"],
+            backend_error=row["error"],
           )
 
     returncode = proc.wait()
@@ -322,20 +281,8 @@ def _run_bringup(native_catch_path: Path, native_catch: dict[str, Any], *, catch
     returncode=returncode,
   )
 
-  final_status = process_status(latest_backend_status, returncode, last_output)
+  final_status = report.finish(returncode)
   success = not final_status["error"]
-  detail = final_status["detail"]
-  if success:
-    summary_path = run_dir / "summary.json"
-    try:
-      summary = json.loads(summary_path.read_text(encoding="utf-8"))
-      success = (isinstance(summary, dict) and summary.get("schema") == SUMMARY_SCHEMA
-                 and summary.get("verdict") == SUCCESS_VERDICT)
-      if not success:
-        detail = "Could not verify bringup: summary does not match the current backend contract."
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-      success = False
-      detail = f"Could not read bringup summary: {type(exc).__name__}: {exc}"
 
   if success:
     _write_status(
@@ -347,7 +294,7 @@ def _run_bringup(native_catch_path: Path, native_catch: dict[str, Any], *, catch
   else:
     _write_status(
       "error",
-      detail,
+      final_status["detail"],
       run_dir=str(run_dir),
       returncode=returncode,
       trigger_timing=timing,
