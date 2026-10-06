@@ -7,7 +7,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from openpilot.selfdrive.car import toyota_tss3_oracle_auto as auto
-from openpilot.selfdrive.car.toyota_tss3_oracle_status import OracleStatus
+from openpilot.selfdrive.car.toyota_tss3_oracle_status import STATUS_SCHEMA, OracleStatus
+from openpilot.selfdrive.ui.mici.layouts.settings import developer
 from openpilot.selfdrive.ui.mici.layouts.settings.tss3_oracle import (
   CANCEL_FILENAME,
   Tss3OracleBringupPage,
@@ -15,7 +16,6 @@ from openpilot.selfdrive.ui.mici.layouts.settings.tss3_oracle import (
 )
 
 
-STATUS_SCHEMA = "camry-f33-request-signer-ui-status-v1"
 NATIVE_CATCH_SCHEMA = "tss3-oracle-native-catch-v1"
 
 
@@ -100,6 +100,15 @@ class TestOracleUiReporting(unittest.TestCase):
     page._reader()
     self.assertIs(page._snapshot()["done"], True)
 
+  def test_missing_kit_still_opens_actionable_error_page(self):
+    page = object()
+    with patch.object(developer.ui_state, "is_offroad", return_value=True), \
+         patch.object(developer, "tool_available", return_value=False), \
+         patch.object(developer, "Tss3OracleBringupPage", return_value=page), \
+         patch.object(developer.gui_app, "push_widget") as push_widget:
+      developer.DeveloperLayoutMici._on_tss3_oracle_bringup(object())
+    push_widget.assert_called_once_with(page)
+
 
 class TestOracleLifecycleGuards(unittest.TestCase):
   def test_manual_cancel_is_cooperative_file_request(self):
@@ -117,7 +126,7 @@ class TestOracleLifecycleGuards(unittest.TestCase):
       "ignition_monotonic_ns": 10,
       "first_extended_tx_monotonic_ns": 20,
       "positive_extended_monotonic_ns": 40,
-      "programming_tx_monotonic_ns": 50,
+      "positive_extended_frame_hex": "065003003201f400",
     }
     with tempfile.TemporaryDirectory() as td:
       path = Path(td) / "catch.json"
