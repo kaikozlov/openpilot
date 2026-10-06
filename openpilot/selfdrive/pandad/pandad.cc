@@ -1,4 +1,5 @@
 #include "selfdrive/pandad/pandad.h"
+#include "selfdrive/pandad/tss3_startup_catcher.h"
 
 #include <array>
 #include <bitset>
@@ -49,7 +50,6 @@ constexpr char TSS3_NATIVE_NOTIFY_PATH[] = "/tmp/tss3-oracle-native-catch.sock";
 constexpr uint16_t TOYOTA_PARAM_TSS3 = 16U << 8;
 const std::string TSS3_EXTENDED_FRAME("\x02\x10\x03\x00\x00\x00\x00\x00", 8);
 const std::string TSS3_PROGRAMMING_FRAME("\x02\x10\x02\x00\x00\x00\x00\x00", 8);
-const std::string TSS3_POSITIVE_EXTENDED_FRAME("\x06\x50\x03\x00\x32\x01\xF4\x00", 8);
 
 class Tss3OracleStartupCatcher {
 public:
@@ -93,7 +93,7 @@ public:
       }
     } else if (state_ == State::CATCHING) {
       if ((now - ignition_ns_) > TSS3_CATCH_TIMEOUT_NS) {
-        LOGW("TSS3 oracle startup catcher timed out without exact 50 03");
+        LOGW("TSS3 oracle startup catcher timed out without exact positive 50 03");
         state_ = State::WAIT_OFF;
         return;
       }
@@ -112,17 +112,17 @@ public:
       if (state_ == State::ARMED && frame.src == TSS3_DIAG_BUS && frame.address == TSS3_WAKE_TRIGGER_ADDR) {
         start_prewarm(panda, nanos_since_boot());
       }
-
-      if (state_ == State::CATCHING && frame.address == TSS3_EPS_RX &&
-          frame.src == TSS3_DIAG_BUS && frame.dat == TSS3_POSITIVE_EXTENDED_FRAME) {
+      if (state_ == State::CATCHING && frame.address == TSS3_EPS_RX && frame.src == TSS3_DIAG_BUS &&
+          is_tss3_exact_extended_response(frame.dat)) {
         const uint64_t positive_ns = nanos_since_boot();
+        positive_extended_frame_ = frame.dat;
         panda->can_send(TSS3_EPS_TX, TSS3_PROGRAMMING_FRAME, TSS3_DIAG_BUS);
         const uint64_t programming_ns = nanos_since_boot();
         positive_extended_ns_ = positive_ns;
         programming_tx_ns_ = programming_ns;
         if (write_marker()) notify_watcher();
         state_ = State::CAUGHT;
-        LOGW("TSS3 oracle startup catcher sent 10 02 %.3f ms after exact 50 03",
+        LOGW("TSS3 oracle startup catcher sent 10 02 %.3f ms after exact positive 50 03",
              (programming_ns - positive_ns) / 1e6);
         return;
       }
@@ -196,6 +196,7 @@ private:
     wake_ns_ = 0;
     first_extended_tx_ns_ = 0;
     next_extended_tx_ns_ = 0;
+    positive_extended_frame_.clear();
   }
 
   void reset_for_off() {
@@ -270,6 +271,8 @@ private:
         << "  \"ignition_monotonic_ns\": " << ignition_ns_ << ",\n"
         << "  \"first_extended_tx_monotonic_ns\": " << first_extended_tx_ns_ << ",\n"
         << "  \"positive_extended_monotonic_ns\": " << positive_extended_ns_ << ",\n"
+        << "  \"positive_extended_frame_hex\": \""
+        << util::hexdump(reinterpret_cast<const uint8_t *>(positive_extended_frame_.data()), positive_extended_frame_.size()) << "\",\n"
         << "  \"programming_tx_monotonic_ns\": " << programming_tx_ns_ << ",\n"
         << "  \"first_extended_before_power_wake\": " << (first_extended_before_power_wake_ ? "true" : "false") << ",\n"
         << "  \"power_wake_complete_monotonic_ns\": " << power_wake_complete_ns_ << ",\n"
@@ -313,6 +316,7 @@ private:
   uint64_t ignition_ns_ = 0;
   uint64_t first_extended_tx_ns_ = 0;
   uint64_t positive_extended_ns_ = 0;
+  std::string positive_extended_frame_;
   uint64_t programming_tx_ns_ = 0;
   uint64_t next_extended_tx_ns_ = 0;
   bool first_extended_before_power_wake_ = false;

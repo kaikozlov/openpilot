@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-STATUS_SCHEMA = "camry-f33-request-signer-ui-status-v1"
+STATUS_SCHEMA = "tss3-request-signer-ui-status-v1"
 
 
 def parse_status(line: str) -> dict[str, Any] | None:

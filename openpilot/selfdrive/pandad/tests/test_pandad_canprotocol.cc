@@ -3,6 +3,7 @@
 #include "common/tests/native_test.h"
 #include "openpilot/cereal/messaging/messaging.h"
 #include "selfdrive/pandad/panda.h"
+#include "selfdrive/pandad/tss3_startup_catcher.h"
 
 struct PandaTest : public Panda {
   PandaTest(int can_list_size, cereal::PandaState::PandaType hw_type);
@@ -97,6 +98,11 @@ void PandaTest::test_can_recv(uint32_t rx_chunk_size) {
 }
 
 void test_can_protocol() {
+  CHECK(is_tss3_exact_extended_response(std::string("\x06\x50\x03\x00\x32\x01\xf4\x00", 8)));
+  CHECK(!is_tss3_exact_extended_response(std::string("\x06\x50\x03\x00\x64\x01\xf4\x00", 8)));
+  CHECK(!is_tss3_exact_extended_response(std::string("\x06\x50\x02\x00\x32\x01\xf4\x00", 8)));
+  CHECK(!is_tss3_exact_extended_response(std::string("\x03\x7f\x10\x22\x00\x00\x00\x00", 8)));
+
   for (auto hw_type : {cereal::PandaState::PandaType::DOS, cereal::PandaState::PandaType::RED_PANDA}) {
     for (int can_list_size : {1, 3, 5, 10, 30, 60, 100, 200}) {
       PandaTest send_test(can_list_size, hw_type);

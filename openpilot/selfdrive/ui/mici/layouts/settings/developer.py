@@ -180,18 +180,23 @@ class DeveloperLayoutMici(NavScroller):
       self._alpha_long_toggle.set_visible(False)
 
     tss3 = ui_state.CP is not None and ui_state.CP.carFingerprint in tss3_fingerprints()
-    oracle_ready = not ui_state.is_release and tss3 and tool_available()
-    self._tss3_oracle_auto_toggle.set_visible(oracle_ready)
-    self._tss3_oracle_auto_toggle.set_enabled(lambda: ui_state.is_offroad() and not ui_state.engaged)
-    self._tss3_oracle_button.set_visible(oracle_ready)
+    oracle_visible = not ui_state.is_release and tss3
+    self._tss3_oracle_auto_toggle.set_visible(oracle_visible)
+    self._tss3_oracle_auto_toggle.set_enabled(
+      lambda: ui_state.is_offroad() and not ui_state.engaged and tool_available()
+    )
+    self._tss3_oracle_button.set_visible(oracle_visible)
     self._tss3_oracle_button.set_enabled(lambda: ui_state.is_offroad() and not ui_state.engaged)
+    self._tss3_oracle_button.set_value("ARM" if tool_available() else "KIT MISSING")
 
     # Refresh toggles from params to mirror external changes
     for key, item in self._refresh_toggles:
       item.set_checked(ui_state.params.get_bool(key))
 
   def _on_tss3_oracle_bringup(self):
-    if ui_state.is_offroad() and tool_available():
+    if ui_state.is_offroad():
+      # The page owns compatibility diagnostics. Keep it reachable when the
+      # tool is missing or malformed so collaborators see the exact fix.
       gui_app.push_widget(Tss3OracleBringupPage())
 
   def _on_joystick_debug_mode(self, state: bool):
