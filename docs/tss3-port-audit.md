@@ -13,6 +13,8 @@ Two things are actually open:
 
 Native startup pre-arm disables automatic CAN-FD promotion on all three Panda buses, matching normal TSS3 safety. This keeps explicitly Classical diagnostic packets Classical after FD wake traffic. The policy is preloaded while OFF, outside the ignition hot path.
 
+Initial ELM327 firmware fingerprinting also disables automatic CAN-FD promotion on all three buses, matching Python Panda diagnostics. On the live Camry, automatic promotion allowed only ABS to answer; disabling it on the same bus 0 restored EPS, camera, and ABS Tester Present/F181 responses. Post-identification frame policy and strict firmware matching are unchanged.
+
 Secondary: the fork is 32 commits (openpilot) and 11 commits (opendbc) behind commaai master — rebase hygiene, not a correctness issue. The opendbc lag touches no Toyota files; the parent lag intersects only `pandad/spi.cc`, which the bringup series modifies.
 
 ## In-repo signer boundary

@@ -22,6 +22,11 @@ void PandaSafety::configureSafetyMode(bool is_onroad) {
 void PandaSafety::updateMultiplexingMode() {
   // Initialize to ELM327 without OBD multiplexing for initial fingerprinting
   if (!initialized_) {
+    // Match Python Panda diagnostics: each packet's explicit format wins,
+    // so CAN-FD traffic cannot promote eight-byte UDS requests to FD.
+    for (uint16_t bus = 0U; bus < PANDA_CAN_CNT; bus++) {
+      panda_->set_can_fd_auto(bus, false);
+    }
     prev_obd_multiplexing_ = false;
     panda_->set_safety_model(cereal::CarParams::SafetyModel::ELM327, 1U);
     initialized_ = true;
