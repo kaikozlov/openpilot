@@ -217,6 +217,11 @@ private:
     // Preload it while OFF so the ignition hot path has no safety control
     // transfer ahead of the first diagnostic request.
     panda->set_safety_model(cereal::CarParams::SafetyModel::ELM327, 1U);
+    // Keep explicit packet formats authoritative after CAN-FD wake traffic,
+    // just as normal TSS3 safety does.
+    for (uint16_t bus = 0U; bus < PANDA_CAN_CNT; bus++) {
+      panda->set_can_fd_auto(bus, false);
+    }
     state_ = State::ARMED;
     LOGW("TSS3 oracle startup catcher armed in Panda power-save; waiting for vehicle wake");
   }
