@@ -7,7 +7,8 @@ from openpilot.system.ui.lib.application import gui_app
 from openpilot.selfdrive.ui.layouts.settings.common import restart_needed_callback
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.widgets.ssh_key import SshKeyFetcher
-from openpilot.selfdrive.ui.mici.layouts.settings.tss3_oracle import Tss3OracleBringupPage, tool_available
+from openpilot.selfdrive.ui.mici.layouts.settings.tss3_oracle import Tss3OracleBringupPage
+from openpilot.selfdrive.ui.tss3_oracle_runner import tool_available
 from openpilot.selfdrive.car.toyota_tss3_oracle_kit import tss3_fingerprints
 
 
