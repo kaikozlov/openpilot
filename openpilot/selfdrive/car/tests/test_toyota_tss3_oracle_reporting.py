@@ -1,7 +1,6 @@
 import io
 import json
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -9,9 +8,9 @@ from unittest.mock import Mock, patch
 from openpilot.selfdrive.car import toyota_tss3_oracle_auto as auto
 from openpilot.selfdrive.car.toyota_tss3_oracle_status import STATUS_SCHEMA, OracleStatus
 from openpilot.selfdrive.ui.mici.layouts.settings import developer
-from openpilot.selfdrive.ui.mici.layouts.settings.tss3_oracle import (
+from openpilot.selfdrive.ui.tss3_oracle_runner import (
   CANCEL_FILENAME,
-  Tss3OracleBringupPage,
+  Tss3OracleRunner,
   request_cooperative_cancel,
 )
 
@@ -85,20 +84,17 @@ class TestOracleStatus(unittest.TestCase):
 
 class TestOracleUiReporting(unittest.TestCase):
   def test_completion_is_not_displayed_before_process_exit(self):
-    # Construct only the reader state; do not initialize graphics or launch a backend.
-    page = object.__new__(Tss3OracleBringupPage)
-    page._lock = threading.Lock()
-    page._status = {}
+    runner = Tss3OracleRunner(start=False)
 
     def wait_for_exit():
-      status = page._snapshot()
+      status = runner.snapshot()
       self.assertEqual(status["stage"], "finishing")
       self.assertIs(status["done"], False)
       return 0
 
-    page._proc = Mock(stdout=io.StringIO(json.dumps(status_row()) + "\n"), wait=wait_for_exit)
-    page._reader()
-    self.assertIs(page._snapshot()["done"], True)
+    runner._proc = Mock(stdout=io.StringIO(json.dumps(status_row()) + "\n"), wait=wait_for_exit)
+    runner._reader()
+    self.assertIs(runner.snapshot()["done"], True)
 
   def test_missing_kit_still_opens_actionable_error_page(self):
     page = object()
