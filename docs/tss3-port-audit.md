@@ -15,7 +15,7 @@ Native startup pre-arm disables automatic CAN-FD promotion on all three Panda bu
 
 Initial ELM327 firmware fingerprinting also disables automatic CAN-FD promotion on all three buses, matching Python Panda diagnostics. On the live Camry, automatic promotion allowed only ABS to answer; disabling it on the same bus 0 restored EPS, camera, and ABS Tester Present/F181 responses. Post-identification frame policy and strict firmware matching are unchanged.
 
-Secondary: the fork is 32 commits (openpilot) and 11 commits (opendbc) behind commaai master — rebase hygiene, not a correctness issue. The opendbc lag touches no Toyota files; the parent lag intersects only `pandad/spi.cc`, which the bringup series modifies.
+At the 2026-10-09 audit, both forks lagged commaai master. The parent rebase and opendbc pin update are recorded under Validation below; the inventory remains the historical audit snapshot.
 
 ## In-repo signer boundary
 
@@ -39,7 +39,7 @@ Remaining gap: no deterministic offline double drives this boundary, which is wh
 
 1. Register a Crown route or exempt it deliberately — CI is red on `test_models` until then. Recover capture provenance: the deleted audit fixtures' `manifest.json` was the only record, and the Camry route's comment says only "openpilot longitudinal". Build a deterministic signer double and un-skip the TSS3 controls tests against it. Regenerate `CARS.md`.
 2. Split bringup into its own review series: pandad startup/lifecycle, oracle daemon + UI, and external tool versioning. Until then it travels with every port change and vice versa.
-3. Rebase both forks; only `pandad/spi.cc` conflicts with the bringup changes.
+3. Parent update completed 2026-10-13 onto `42ccc5ceb`; opendbc now uses the updated `tss3-expand` branch at `9de3b22d`.
 
 ## Validation
 
@@ -49,6 +49,15 @@ Run 2026-10-09 with `opendbc_repo/.venv`:
 - Parent TSS3 suites (`pandad/tests/test_direct_panda_lease.py`, `car/tests/test_toyota_tss3_oracle_*.py`): **19 passed, 22 subtests passed**.
 - Previously recorded (2026-09): five recorded-route checks passed against the Camry capture; Toyota safety suites pass with their existing skips.
 - Not run: full CI, MISRA coverage, hardware builds, live CAN, road tests.
+
+### 2026-10-13 rebase verification
+
+- Replayed the parent port onto commaai master `42ccc5ceb`, preserving both upstream navigation settings and the TSS3 controls in the mici developer page.
+- Pinned opendbc `tss3-expand` at `9de3b22d`, including the upstream car-mass removal and the Camry, Crown, and Corolla TSS3 definitions.
+- Rebuilt `openpilot/common/libparams_c.dylib` for the updated parameter keys.
+- Parent oracle suites: **16 tests passed** under unittest. Panda lease suite: **3 standalone test functions passed** under `unittest.FunctionTestCase`.
+- Desktop smoke: rendered and visually checked navigation and TSS3 bringup controls; confirmed TSS3 eligibility for Camry, Crown, and Corolla. The external signer kit was absent, and the UI displayed `KIT MISSING`.
+- LFS downloads were skipped during rebase; this does not fix Hugging Face authentication. Full builds, Toyota safety suites, hardware, and road behavior were not validated in this update.
 
 ## File inventory (merge-base diffs vs commaai master, 2026-10-09)
 
