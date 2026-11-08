@@ -57,6 +57,11 @@ class CarEvents:
         events.add(EventName.manualRestart)
 
     elif self.CP.brand == 'toyota':
+      if self.CP.flags & ToyotaFlags.TSS3 and not self.CP.pcmCruise:
+        for b in CS.buttonEvents:
+          if b.type == ButtonType.mainCruise and b.pressed:
+            events.add(EventName.buttonCancel if CC.enabled else EventName.buttonEnable)
+
       # TODO: when we check for unexpected disengagement, check gear not S1, S2, S3
       if self.CP.openpilotLongitudinalControl:
         # Only can leave standstill when planner wants to move
